@@ -3,12 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, doctor, registry, scaffold
-
-
-def _todo(args) -> int:
-    print(f"house {args.command}: not implemented yet")
-    return 2
+from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold
 
 
 def contest_dir(name: str) -> Path:
@@ -58,6 +53,26 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    target = contest_dir(args.name)
+    if not (target / ".git").exists():
+        print(f"error: {target} is not a contest repo", file=sys.stderr)
+        return 1
+    _, excluded = export.plan(target)
+    try:
+        files = export.export(target, Path(args.dest).resolve(), force=args.force)
+    except export.ExportBlocked as e:
+        print(f"blocked: {e}\nfix the files or re-run with --force if these are false positives", file=sys.stderr)
+        return 1
+    except FileExistsError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"exported {len(files)} files to {args.dest}")
+    if excluded:
+        print("excluded: " + ", ".join(excluded))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
@@ -79,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("name")
     e.add_argument("dest")
     e.add_argument("--force", action="store_true", help="export even if secret scan finds hits")
-    e.set_defaults(func=_todo)
+    e.set_defaults(func=cmd_export)
 
     s = sub.add_parser("sync", help="clone contests listed in contests.yaml that are missing locally")
     s.set_defaults(func=cmd_sync)
