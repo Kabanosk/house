@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, doctor, scaffold
+from . import HOUSE_ROOT, adapters, doctor, scaffold
 
 
 def _todo(args) -> int:
@@ -38,6 +38,16 @@ def cmd_new(args) -> int:
     return 0
 
 
+def cmd_adapt(args) -> int:
+    target = contest_dir(args.name)
+    if not (target / ".house").is_dir():
+        print(f"error: {target} is not a house contest (run: bin/house new {args.name})", file=sys.stderr)
+        return 1
+    for path in adapters.adapt(target):
+        print(f"wrote {path.relative_to(target)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
@@ -53,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("adapt", help="generate Claude Code / Codex files for a contest")
     a.add_argument("name")
-    a.set_defaults(func=_todo)
+    a.set_defaults(func=cmd_adapt)
 
     e = sub.add_parser("export", help="clean public copy of a contest (no .house, agent configs, secrets)")
     e.add_argument("name")
