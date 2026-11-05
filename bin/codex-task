@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Run a house task (or any prompt file) through Codex CLI.
+
+usage: codex-task [--dry-run] [--read-only] <task-or-prompt-file> <workdir>
+
+If the file is a task (.house/tasks/T###-*.md with `id:` frontmatter), Codex is told to write its report to
+$HOUSE_DIR/reports/<id>.md. HOUSE_DIR = the file's .house/ ancestor, or $HOUSE_DIR.
+Exit codes: 0 ok, 2 usage, 3 codex not installed, other = codex's exit code.
+"""
+import argparse
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def house_dir(path: Path) -> Path | None:
+    for parent in path.resolve().parents:
+        if parent.name == ".house":
+            return parent
+    env = os.environ.get("HOUSE_DIR")
+    return Path(env) if env else None
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="codex-task")
+    p.add_argument("--dry-run", action="store_true", help="print the command instead of running it")
+    p.add_argument("--read-only", action="store_true", help="read-only sandbox (no edits)")
+    p.add_argument("file", type=Path)
+    p.add_argument("workdir", type=Path)
+    a = p.parse_args()
+    if not a.file.is_file():
+        print(f"codex-task: no such file: {a.file}", file=sys.stderr)
+        return 2
+    text = a.file.read_text()
+    prompt = text
+    m = re.search(r"^id:\s*(\S+)", text, re.M)
+    hd = house_dir(a.file)
+    hd = hd.resolve() if hd else None
+    if m and hd:
+        prompt += (
+            f"\n\n---\nHOUSE_DIR is {hd}. Read {hd}/spec.yaml and {hd}/DECISIONS.md first. "
+            f"When done, write your report (English) to {hd}/reports/{m.group(1)}.md using "
+            f"{hd}/reports/TEMPLATE.md, run every acceptance check and include the output. "
+            "Do not commit; the driver commits your changes."
+        )
+    if a.read_only:
+        mode = ["--sandbox", "read-only"]
+    else:
+        # workspace-write: Codex may edit the workdir and, via --add-dir, the contest's .house/ (reports, ideas)
+        mode = ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
+        if hd:
+            mode += ["--add-dir", str(hd)]
+    cmd = ["codex", "exec", *mode, "-C", str(a.workdir), "--", prompt]
+    if a.dry_run:
+        print(shlex.join(cmd))
+        return 0
+    if not shutil.which("codex"):
+        print("codex-task: codex CLI not found on PATH (fall back to the coder agent)", file=sys.stderr)
+        return 3
+    return subprocess.run(cmd).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
