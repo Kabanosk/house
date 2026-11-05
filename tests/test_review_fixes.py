@@ -61,7 +61,7 @@ class CodexDriverTest(Base):  # I1, I2, I3, I6
         driver, _, codex_part = text.partition("--- Instructions for Codex ---")
         self.assertNotIn("codex-task", codex_part)
         self.assertIn("commit", driver)
-        self.assertIn("run_in_background", driver)
+        self.assertIn("600000", driver)
 
     def test_ideation_not_read_only(self):
         adapters.adapt(self.c, self.root, detect=lambda: ALL)

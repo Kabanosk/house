@@ -9,5 +9,5 @@ Follow **Release** in `$HOUSE_DIR/playbooks/build.md` and `$HOUSE_DIR/protocols/
 2. Fallback: demo video plan + offline/seeded mode.
 3. Dispatch `pitch` for script, slides, README, demo plan (in `spec.languages.public`).
 4. Final judge round on the release candidate: dispatch the `judge` agent.
-5. Export: `$HOUSE_ROOT/bin/house export <contest> <dest>`; show the human what will be published. Pushing the
+5. Export: `$HOUSE_ROOT/bin/house export <contest> $HOUSE_ROOT/exports/<contest>-<YYYYMMDD-HHMM>`; show the human what will be published. Pushing the
    export to a public remote is the human's call unless `spec` says otherwise.
