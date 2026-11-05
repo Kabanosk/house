@@ -104,7 +104,7 @@ class CodexTaskTest(unittest.TestCase):
             task.write_text("---\nid: T001\n---\nDo it\n")
             out = subprocess.run([str(HOUSE_ROOT / "bin/codex-task"), "--dry-run", str(task), d],
                                  capture_output=True, text=True, check=True).stdout
-            self.assertTrue(out.startswith("codex exec --full-auto -C"), out)
+            self.assertTrue(out.startswith("codex exec --sandbox workspace-write"), out)
             self.assertIn("reports/T001.md", out)
 
 

@@ -1,13 +1,14 @@
 ---
 id: T000
 title: <short imperative title>
-status: todo
+status: template
 owner: null
 branch: null
 depends_on: []
 capabilities: []
 acceptance: []
 ---
+<!-- Copy to tasks/T###-slug.md and set status: todo. Files with status: template are ignored. -->
 ## Objective
 One paragraph: what done looks like for this task.
 

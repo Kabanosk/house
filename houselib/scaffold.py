@@ -17,6 +17,9 @@ def validate_name(name: str) -> None:
         )
 
 
+CONTEST_GITIGNORE = ".env*\n!.env.example\n.worktrees/\nnode_modules/\n__pycache__/\n.venv/\n"
+
+
 def install_core(contest: Path, root: Path) -> None:
     """Copy .house/ templates (only if absent) and refresh playbooks/protocols."""
     house = contest / ".house"
@@ -41,8 +44,10 @@ def new_contest(name: str, repo_url: str | None, root: Path = HOUSE_ROOT, detect
     set_identity(contest, user, email)
     install_core(contest, root)
     doctor.write(contest, detect())
+    if not (contest / ".gitignore").exists():
+        (contest / ".gitignore").write_text(CONTEST_GITIGNORE)
     registry.add(root / "contests.yaml", name, repo_url or "")
-    git(contest, "add", ".house")
-    if git(contest, "status", "--porcelain", "--", ".house").strip():
+    git(contest, "add", ".house", ".gitignore")
+    if git(contest, "status", "--porcelain", "--", ".house", ".gitignore").strip():
         git(contest, "commit", "-q", "-m", "chore: scaffold house")
     return contest

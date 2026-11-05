@@ -39,14 +39,22 @@ def main() -> int:
     prompt = text
     m = re.search(r"^id:\s*(\S+)", text, re.M)
     hd = house_dir(a.file)
+    hd = hd.resolve() if hd else None
     if m and hd:
         prompt += (
             f"\n\n---\nHOUSE_DIR is {hd}. Read {hd}/spec.yaml and {hd}/DECISIONS.md first. "
             f"When done, write your report (English) to {hd}/reports/{m.group(1)}.md using "
-            f"{hd}/reports/TEMPLATE.md, run every acceptance check and include the output."
+            f"{hd}/reports/TEMPLATE.md, run every acceptance check and include the output. "
+            "Do not commit; the driver commits your changes."
         )
-    mode = ["--sandbox", "read-only"] if a.read_only else ["--full-auto"]
-    cmd = ["codex", "exec", *mode, "-C", str(a.workdir), prompt]
+    if a.read_only:
+        mode = ["--sandbox", "read-only"]
+    else:
+        # workspace-write: Codex may edit the workdir and, via --add-dir, the contest's .house/ (reports, ideas)
+        mode = ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
+        if hd:
+            mode += ["--add-dir", str(hd)]
+    cmd = ["codex", "exec", *mode, "-C", str(a.workdir), "--", prompt]
     if a.dry_run:
         print(shlex.join(cmd))
         return 0

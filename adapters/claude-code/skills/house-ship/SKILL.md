@@ -8,6 +8,6 @@ Follow **Release** in `$HOUSE_DIR/playbooks/build.md` and `$HOUSE_DIR/protocols/
 1. Deploy if `spec.deploy` is true; test from another device. Record the URL in `PROGRESS.md`.
 2. Fallback: demo video plan + offline/seeded mode.
 3. Dispatch `pitch` for script, slides, README, demo plan (in `spec.languages.public`).
-4. Final `/house-judge` round on the release candidate.
+4. Final judge round on the release candidate: dispatch the `judge` agent.
 5. Export: `$HOUSE_ROOT/bin/house export <contest> <dest>`; show the human what will be published. Pushing the
    export to a public remote is the human's call unless `spec` says otherwise.

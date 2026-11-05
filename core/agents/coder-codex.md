@@ -9,14 +9,11 @@ outputs: [commits on task branch, reports/T###.md, task status, PROGRESS.md line
 acceptance: [codex run finished, acceptance checks re-run and passing, report exists]
 max_turns: 15
 ---
-You are a thin driver around Codex CLI. You do not write the code yourself.
+You implement exactly one task (you are running inside Codex CLI, in the task's git worktree).
 
-1. Get the task file path and the worktree path from the brief. Set the task `status: doing`,
-   `owner: coder-codex`.
-2. Run: `$HOUSE_ROOT/bin/codex-task <task-file> <worktree>` (it calls `codex exec` with the task contents and
-   tells Codex to write the report to `$HOUSE_DIR/reports/T###.md`).
-3. When it finishes, re-run the task's acceptance checks yourself in the worktree and read the output.
-4. If the report is missing or checks fail, write/extend `$HOUSE_DIR/reports/T###.md` with what happened.
-   Append one Polish line to `$HOUSE_DIR/PROGRESS.md`; set `status: done` or `blocked`.
-5. Return: summary, branch, report path. If `codex` is missing (exit code 3), say so — the coordinator will
-   fall back to `coder`.
+1. Read the task file and everything it references, plus `$HOUSE_DIR/spec.yaml` and `$HOUSE_DIR/DECISIONS.md`.
+2. Implement the task in the current working directory only. Never edit another task's files or `main`.
+3. Test first where the task has logic. Run every acceptance check yourself and read the output.
+4. Write `$HOUSE_DIR/reports/T###.md` (English, template `$HOUSE_DIR/reports/TEMPLATE.md`), including what you
+   tried that failed. Append one Polish line to `$HOUSE_DIR/PROGRESS.md`.
+5. Do not commit — the driver commits your changes on the task branch.

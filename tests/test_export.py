@@ -31,7 +31,7 @@ class ExportTest(unittest.TestCase):
         dest = self.tmp / "out"
         export.export(self.c, dest)
         present = {str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file() and ".git" not in p.parts}
-        self.assertEqual(present, {"app.py", "README.md", ".env.example"})
+        self.assertEqual(present, {"app.py", "README.md", ".env.example", ".gitignore"})
         self.assertEqual(len(git(dest, "log", "--oneline").splitlines()), 1)
 
     def test_secret_blocks_export(self):

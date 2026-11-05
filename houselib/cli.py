@@ -7,6 +7,7 @@ from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold
 
 
 def contest_dir(name: str) -> Path:
+    scaffold.validate_name(name)  # raises ValueError: never resolve "..", "/x", etc.
     return HOUSE_ROOT / "contests" / name
 
 
@@ -103,4 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ValueError, RuntimeError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
