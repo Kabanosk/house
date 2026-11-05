@@ -37,6 +37,8 @@ def is_excluded(rel: str) -> bool:
 
 
 def has_secret(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False  # links are exported as links (target content never copied); dirs = submodules
     try:
         text = path.read_text(errors="ignore")
     except OSError:
@@ -52,9 +54,11 @@ def plan(contest: Path) -> tuple[list[str], list[str]]:
 
 
 def export(contest: Path, dest: Path, force: bool = False) -> list[Path]:
-    if dest.exists() and any(dest.iterdir()):
-        raise FileExistsError(f"{dest} exists and is not empty")
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        raise FileExistsError(f"{dest} exists and is not an empty directory")
     keep, _ = plan(contest)
+    # skip tracked files deleted from the working tree and submodule gitlinks (directories)
+    keep = [f for f in keep if (contest / f).is_symlink() or (contest / f).is_file()]
     hits = [f for f in keep if has_secret(contest / f)]
     if hits and not force:
         raise ExportBlocked(hits)
@@ -63,7 +67,7 @@ def export(contest: Path, dest: Path, force: bool = False) -> list[Path]:
     for rel in keep:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(contest / rel, target)
+        shutil.copy2(contest / rel, target, follow_symlinks=False)
         out.append(target)
     git(dest, "init", "-q", "-b", "main")
     set_identity(dest, *identity(contest))

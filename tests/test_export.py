@@ -48,6 +48,26 @@ class ExportTest(unittest.TestCase):
         export.export(self.c, self.tmp / "out", force=True)
         self.assertTrue((self.tmp / "out/app.py").exists())
 
+    def test_deleted_tracked_file_is_skipped(self):
+        (self.c / "README.md").unlink()
+        export.export(self.c, self.tmp / "out")
+        self.assertFalse((self.tmp / "out/README.md").exists())
+        self.assertTrue((self.tmp / "out/app.py").exists())
+
+    def test_dest_is_a_file_refused(self):
+        (self.tmp / "out").write_text("x")
+        with self.assertRaises(FileExistsError):
+            export.export(self.c, self.tmp / "out")
+
+    def test_symlink_exported_as_link_not_target_content(self):
+        secret_outside = self.tmp / "outside.txt"
+        secret_outside.write_text("private notes\n")
+        (self.c / "link.txt").symlink_to(secret_outside)
+        git(self.c, "add", "link.txt")
+        git(self.c, "commit", "-qm", "link")
+        export.export(self.c, self.tmp / "out")
+        self.assertTrue((self.tmp / "out/link.txt").is_symlink())
+
     def test_non_empty_dest_refused(self):
         dest = self.tmp / "out"
         dest.mkdir()
