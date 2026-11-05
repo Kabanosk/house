@@ -55,7 +55,9 @@ Tożsamość git ustawiona w repo systemu jest kopiowana do każdego nowego konk
 4. Odpowiedz na pytania z `QUESTIONS.md` (przez „jak tam”). Dopóki regulamin jest „UNCLEAR”, dopytaj organizatorów.
 
 **W trakcie (hackathon budowlany)**
-1. `/house-ideate` → wybierasz pomysł (w `copilot`) albo wybiera sędzia (w `autopilot`).
+1. `/house-ideate` → pomysły, do każdego karta „co już istnieje” (katalog YC, YC Requests for Startups,
+   zwycięzcy hackathonów, Product Hunt), ocena sędziego na podstawie kart → wybierasz Ty (`copilot`) albo sędzia
+   (`autopilot`). Bez karty pomysł nie może zostać wybrany.
 2. `/house-plan` → zadania w `.house/tasks/`. Przejrzyj je; to najtańszy moment na korektę.
 3. `/house-run` → koderzy (Claude i Codex) w osobnych worktree w `.worktrees/`, scalanie do `main` na bieżąco.
 4. `/house-judge` przed każdym kamieniem milowym → oceny 1–5 według kryteriów i jedna najtańsza poprawa.
@@ -71,6 +73,10 @@ podjęte bez Ciebie, ryzyka), potem pytania po jednym. Twoje odpowiedzi trafiaj�
 
 **Zgłoszenie publiczne**: `house export <nazwa> <katalog>` → sprawdź zawartość → wypchnij **eksport**
 na publiczne repo. Samego repo konkursu nigdy nie upubliczniaj.
+
+**Sprawdzenie pomysłu w katalogu YC** (też ręcznie): `house yc AI agents that negotiate prices` → najbliższe
+firmy YC z edycją, statusem i linkiem. Dane: codzienny zrzut katalogu YC ([yc-oss](https://github.com/yc-oss/api)),
+cache w `~/.cache/house/`, działa offline na starym zrzucie.
 
 ## Aktualizacja systemu
 
@@ -107,7 +113,7 @@ Aktualizacja: sklonuj źródło na nowo i podmień folder (nie edytuj w miejscu)
 ```text
 core/            neutralny rdzeń (Markdown/YAML): agenci, playbooki, zasady, szablon .house/
 adapters/        nakładki: claude-code (skille), codex (AGENTS.md)
-bin/house        CLI: doctor, new, adapt, sync, export
+bin/house        CLI: doctor, new, adapt, sync, export, yc
 bin/codex-task   uruchamia zadanie przez Codex CLI
 contests/        repozytoria konkursów (każde osobne, poza gitem systemu)
 contests.yaml    spis konkursów → `bin/house sync` odtwarza je na nowej maszynie

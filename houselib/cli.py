@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold
+from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold, yc
 
 
 def contest_dir(name: str) -> Path:
@@ -74,6 +74,15 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_yc(args) -> int:
+    hits = yc.search(yc.load(), " ".join(args.query), limit=args.limit)
+    if not hits:
+        print("no YC companies match")
+    for c in hits:
+        print(yc.format_hit(c))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
@@ -99,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sync", help="clone contests listed in contests.yaml that are missing locally")
     s.set_defaults(func=cmd_sync)
+
+    y = sub.add_parser("yc", help="search the Y Combinator company directory (prior art / market check)")
+    y.add_argument("query", nargs="+", help="what the idea does, in plain words")
+    y.add_argument("--limit", type=int, default=15)
+    y.set_defaults(func=cmd_yc)
     return p
 
 

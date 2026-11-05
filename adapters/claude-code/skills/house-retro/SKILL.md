@@ -11,6 +11,8 @@ Adapted from `retro` by Matt Pocock (MIT, https://github.com/mattpocock/skills).
 2. Read the primary sources for the period `$ARGUMENTS` names (default: the whole contest):
    `$HOUSE_DIR/DECISIONS.md`, `QUESTIONS.md`, `PROGRESS.md`, `reports/`, `submissions.csv`, `ideas.md`, task files,
    `git log --all`, and the Claude Code session logs for this repo (`~/.claude/projects/<this repo path with / as ->/`).
+   If official results are known (jury verdict, final leaderboard), compare them with every judge report and
+   prior-art card: where was our judge too generous or too harsh, per criterion? That calibration is a finding.
    Look for: time lost, questions that blocked work, agents circling one idea, failed or rejected commands,
    wrong merges, scores that dropped, things the human had to fix by hand.
 3. Find candidates in these categories:

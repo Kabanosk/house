@@ -26,6 +26,7 @@ At the start of every session: read `spec.yaml`, `DECISIONS.md`, open questions 
 
 ## 2. Ideation
 - Ideator proposes `limits.ideas_per_round` ideas, checking `ideas.md` first.
+- Researcher writes a prior-art card per idea (`protocols/prior-art.md`). No idea is chosen without its card.
 - Judge scores each against `scoring` (rubric for build, expected metric gain + risk for optimize), with a
   one-line justification per criterion.
 - `copilot`: Q-### with the ranked list and a recommendation. `autopilot`: take the top one, log D-###.
