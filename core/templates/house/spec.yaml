@@ -1,0 +1,55 @@
+# Specyfikacja konkursu — centralny dokument. Wypełniasz Ty; luki uzupełnia coordinator
+# z regulaminu/treści zadania i oznacza je `proposed: true` do Twojego zatwierdzenia.
+# Agenci czytają ten plik na starcie każdej sesji.
+
+contest:            # człowiek
+  name: null
+  url: null
+  organizer: null
+  language: null    # język konkursu (pitch/README w tym języku)
+
+kind: null          # build | optimize — człowiek
+
+goal: null          # co budujemy / co optymalizujemy — człowiek, coordinator doprecyzowuje
+
+scoring:            # build: rubryka; optimize: metryka + sprawdzarka — z regulaminu
+  rubric: null      # build: lista kryteriów {name, what, levels 1-5, weight}
+  metric: null      # optimize: nazwa metryki i kierunek (max/min)
+  local_scorer: null   # optimize: komenda lokalnej sprawdzarki
+  leaderboard: null    # optimize: czy jest, gdzie, jak często się odświeża
+
+timeline:           # z regulaminu
+  start: null
+  end: null
+  milestones: []    # np. {at: "19:00", what: "golden path end-to-end"}, feature freeze
+
+rules:              # sprawdza researcher PRZED startem
+  url: null
+  allowed_ai: null
+  allowed_autonomous_agents: null
+  notes: null
+
+mode: copilot       # copilot (pytaj o trudne decyzje) | autopilot (decyduj sam, pytaj tylko w końcówce)
+
+limits:
+  max_parallel_agents: 3
+  ideas_per_round: 5
+  stagnation_n: 3   # iteracje bez poprawy → wymuszona zmiana kierunku
+
+submissions:
+  auto_submit: true     # wysyłaj sam, gdy jest podstawa sądzić, że poprawi wynik
+  slots_total: null     # limit zgłoszeń (np. na dzień), z regulaminu
+  explore_share: 0.25   # część slotów na nowe/nieprzetestowane podejścia
+  endgame_share: 0.20   # ostatnie 20% czasu: pytaj przed każdym zgłoszeniem
+
+deploy: true        # czy wolno samemu wystawić publiczne demo
+
+languages:
+  team: pl          # PROGRESS, QUESTIONS, DECISIONS, briefing
+  public: null      # pitch, README, raporty — domyślnie język konkursu, inaczej en
+
+tools: see tools.json   # wykrywa `house doctor`; nie edytuj ręcznie
+
+team:               # człowiek — system zajmuje się tylko tematami właściciela
+  owner: Wojtek
+  members: []       # {name, role, uses: claude|codex|cursor|grok-bot}
