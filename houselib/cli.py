@@ -1,10 +1,30 @@
 """`house` command line."""
 import argparse
+import sys
+from pathlib import Path
+
+from . import HOUSE_ROOT, doctor
 
 
 def _todo(args) -> int:
     print(f"house {args.command}: not implemented yet")
     return 2
+
+
+def contest_dir(name: str) -> Path:
+    return HOUSE_ROOT / "contests" / name
+
+
+def cmd_doctor(args) -> int:
+    tools = doctor.detect()
+    print(doctor.summary(tools))
+    if args.name:
+        target = contest_dir(args.name)
+        if not (target / ".house").is_dir():
+            print(f"error: {target} is not a house contest", file=sys.stderr)
+            return 1
+        print(f"wrote {doctor.write(target, tools)}")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="detect available tools (claude, codex, ollama, gpu, ...)")
     d.add_argument("name", nargs="?", help="contest name: also write .house/tools.json")
-    d.set_defaults(func=_todo)
+    d.set_defaults(func=cmd_doctor)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")
