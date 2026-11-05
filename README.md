@@ -34,6 +34,60 @@ W Claude Code:
 | `/house-submit` | zgłoszenie w konkursie optymalizacyjnym |
 | „jak tam” / `/house-status` | briefing: co się działo, potem pytania po kolei |
 
+## Jak tego używać na konkursie (krok po kroku)
+
+**Raz na maszynę**
+```bash
+git clone git@github.com:Kabanosk/house.git ~/house && cd ~/house
+git config user.name "Wojciech Fiołka"; git config user.email "56364007+Kabanosk@users.noreply.github.com"
+echo 'export PATH="$HOME/house/bin:$PATH"' >> ~/.bashrc   # potem `house …` z dowolnego miejsca
+house doctor          # sprawdź, co jest: claude, codex, ollama, GPU
+house sync            # odtwórz konkursy zapisane w contests.yaml
+```
+Tożsamość git ustawiona w repo systemu jest kopiowana do każdego nowego konkursu.
+
+**Przed startem konkursu**
+1. `house new <nazwa>` (albo `--repo <url>`, jeśli repo konkursu już istnieje), potem `house adapt <nazwa>`.
+2. `cd contests/<nazwa> && claude`
+3. `/house-start` i wklej wszystko, co masz: treść zadania, link/tekst regulaminu, kryteria oceny, harmonogram.
+   Dopisz tryb (`copilot`/`autopilot`) i limity, jeśli chcesz inne niż domyślne (3 agentów, 5 pomysłów).
+4. Odpowiedz na pytania z `QUESTIONS.md` (przez „jak tam”). Dopóki regulamin jest „UNCLEAR”, dopytaj organizatorów.
+
+**W trakcie (hackathon budowlany)**
+1. `/house-ideate` → wybierasz pomysł (w `copilot`) albo wybiera sędzia (w `autopilot`).
+2. `/house-plan` → zadania w `.house/tasks/`. Przejrzyj je; to najtańszy moment na korektę.
+3. `/house-run` → koderzy (Claude i Codex) w osobnych worktree w `.worktrees/`, scalanie do `main` na bieżąco.
+4. `/house-judge` przed każdym kamieniem milowym → oceny 1–5 według kryteriów i jedna najtańsza poprawa.
+5. `/house-ship` → demo, pitch (`pitch/script.md`, `pitch/slides.html`), README zgłoszenia, czysty eksport.
+
+**W trakcie (konkurs optymalizacyjny)**: to samo do `/house-run`, potem pętla eksperyment → `/house-judge` →
+`/house-submit`. Każde zgłoszenie ląduje w `.house/submissions.csv` z wynikiem lokalnym i z leaderboardu.
+
+**Po powrocie od komputera**: napisz „jak tam”. Najpierw dostajesz briefing (co się zmieniło, wynik, decyzje
+podjęte bez Ciebie, ryzyka), potem pytania po jednym. Twoje odpowiedzi trafiają do `DECISIONS.md`.
+
+**Drużyna** czyta `.house/PROGRESS.md` (po polsku) i `.house/reports/` (po angielsku).
+
+**Zgłoszenie publiczne**: `house export <nazwa> <katalog>` → sprawdź zawartość → wypchnij **eksport**
+na publiczne repo. Samego repo konkursu nigdy nie upubliczniaj.
+
+## Aktualizacja systemu
+
+Zmiany w `core/` albo `adapters/` (np. poprawiony playbook) przenosisz do konkursu przez `house adapt <nazwa>`.
+Nadpisuje to wygenerowane pliki (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.house/playbooks/`, `.house/protocols/`),
+ale nigdy specyfikacji, decyzji, pytań, zadań ani raportów. Własny `AGENTS.md`/`CLAUDE.md` z repo konkursu
+zostaje zachowany jako `*.orig`.
+
+## Gdy coś nie działa
+
+| Objaw | Co zrobić |
+|---|---|
+| `coder-codex` nie istnieje albo kończy się kodem 3 | `house doctor`: brak Codex CLI → `npm i -g @openai/codex && codex login`, potem `house adapt` |
+| Agent pisze „$HOUSE_DIR” zamiast ścieżki | `house adapt <nazwa>` (stare wygenerowane pliki) |
+| `house export` zatrzymuje się na „possible secrets” | usuń klucz z pliku (i z historii, jeśli trzeba); `--force` tylko przy fałszywym alarmie |
+| Agent wraca do sprawdzonego pomysłu | sprawdź, czy `ideas.md` jest uzupełniane; ideator musi je czytać |
+| Briefing nie pokazuje zmian | `.house/state.json` → `last_briefing` ustaw na `null`, żeby zebrać wszystko od początku |
+
 ## Jak to jest zbudowane
 
 ```text
