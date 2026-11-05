@@ -23,6 +23,14 @@ Everything else (library choice, task split, retries, which test to write) is NO
 | Submission (endgame) | ask | ask |
 | Rules ambiguity | ask | ask |
 
+## A run never waits
+- A run never waits for a human: it ends or moves to the next item. The human's later answer starts new work.
+  Blocked on a question? Park that branch (`status: blocked`), take the next ready item, and when nothing is
+  ready, research new directions (see the playbook for `spec.kind`).
+- **Push right**: defer the human checkpoint as late as it will go. Do all the work that does not depend on the
+  answer first, then ask once, with a tight decision-ready brief: what was produced, why, the options, and links
+  to the assets (reports, branches, scores). The human reads a brief, not a draft.
+
 ## How to ask
 1. Append to `.house/QUESTIONS.md` (Polish) using the template: `## Q-### [open] <title>`, context, options,
    recommendation with one-line reason, what it blocks.

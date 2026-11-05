@@ -12,7 +12,7 @@ NONE = {"claude": False, "codex": False, "cursor": False, "grok_bot": False,
         "ollama": {"installed": False, "models": []}, "gpu": None}
 ALL = dict(NONE, claude=True, codex=True, ollama={"installed": True, "models": ["qwen3:8b"]})
 SKILLS = ["house-start", "house-status", "house-ideate", "house-plan",
-          "house-run", "house-judge", "house-ship", "house-submit"]
+          "house-run", "house-judge", "house-ship", "house-submit", "house-retro"]
 
 
 def house_hash(contest: Path) -> str:

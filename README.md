@@ -33,6 +33,7 @@ W Claude Code:
 | `/house-ship` | deploy, pitch, slajdy, README zgłoszenia, czysty eksport |
 | `/house-submit` | zgłoszenie w konkursie optymalizacyjnym |
 | „jak tam” / `/house-status` | briefing: co się działo, potem pytania po kolei |
+| `/house-retro` | po konkursie: co poprawić w samym systemie (raport z propozycjami, zmiany dopiero po Twojej akceptacji) |
 
 ## Jak tego używać na konkursie (krok po kroku)
 

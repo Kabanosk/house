@@ -72,6 +72,14 @@ def omitted_for(meta: dict, tier: str | None, profiles: dict) -> str | None:
     return None
 
 
+def short(desc: str, limit: int = 110) -> str:
+    """Roster blurb: the description cut on a word boundary (AGENTS.md is always in context; keep it lean)."""
+    desc = " ".join(str(desc).split())
+    if len(desc) <= limit:
+        return desc
+    return desc[:limit].rsplit(" ", 1)[0].rstrip(" ,;-") + "…"
+
+
 def _read_tools(contest: Path) -> dict:
     return json.loads((contest / ".house/tools.json").read_text())
 
@@ -133,7 +141,7 @@ def codex(contest: Path, root: Path = HOUSE_ROOT) -> Path:
         tier = resolve_tier((meta, body), tools, profiles)
         replacement = omitted_for(meta, tier, profiles)
         shown = f"unavailable (use {replacement})" if replacement else (tier or "unavailable")
-        rows.append(f"| `{pid}` | {shown} | {meta['description']} |")
+        rows.append(f"| `{pid}` | {shown} | {short(meta['description'])} |")
     text = (root / "adapters/codex/AGENTS.md.tmpl").read_text()
     for key, value in {
         "{contest_name}": contest.name,
