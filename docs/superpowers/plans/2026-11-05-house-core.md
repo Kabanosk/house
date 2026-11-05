@@ -15,7 +15,7 @@
 - **Stdlib only.** No PyYAML, no pytest. Tests: `python3 -m unittest discover -s tests -v` from repo root.
 - YAML in this repo is parsed by our own minimal parser (`houselib/fm.py`): flat `key: value`, inline lists `[a, b]`, `null`/`true`/`false`/ints. Content files must stay within that subset; `spec.yaml` is read only by agents, never by code.
 - Machine-detected tools go to `.house/tools.json` (deviation from SPEC §4 `tools` field: spec.yaml keeps `tools: see tools.json`).
-- Contest names: `^[a-z0-9][a-z0-9-]{0,40}$`.
+- Contest names: words/numbers separated by single hyphens, lowercase: `^[a-z0-9]+(-[a-z0-9]+)*$` (e.g. `grok-bot-wro-2026`). No leading/trailing/double hyphens.
 - Contest repos get local git identity copied from the system repo's local config (`Wojciech Fiołka` / `56364007+Kabanosk@users.noreply.github.com`); never touch global config.
 - Agent instructions, reports, public artifacts: English. Human-facing files (`PROGRESS.md`, `QUESTIONS.md`, `DECISIONS.md`, briefing, README): Polish.
 - Model tiers allowed: `opus | sonnet | haiku | codex | local`.
@@ -129,7 +129,7 @@ def test_registry_roundtrip(tmp):
   - `scaffold.new_contest(name: str, repo_url: str | None, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Path`: validate name; `contests/<name>` must not exist; clone if `repo_url` else `git init -b main`; set local identity from `git -C root config user.name/email`; copy `core/templates/house` → `.house/`, `core/playbooks` → `.house/playbooks/`, `core/protocols` → `.house/protocols/`; write tools.json; `registry.add(root/"contests.yaml", name, repo_url or "")`; commit `chore: scaffold house` in the contest repo. Raises `ValueError` (bad name) / `FileExistsError`.
   - CLI: `house new <name> [--repo URL]` prints path and next step (`house adapt <name>`).
 
-- [ ] **Step 1: Failing tests:** all 8 profiles parse, have exactly the keys, tiers in allowed set, `ideator.model_tier != coder.model_tier`; `new_contest` in a temp root (copy of `core/` + a git-initialised root with local identity) creates `.house/spec.yaml`, `.house/playbooks/build.md`, `.house/tools.json`, registry entry, one commit authored with the root's identity; second call → `FileExistsError` and nothing changed; names `"Grok Bot"`, `"../x"`, `""` → `ValueError` and `contests/` untouched.
+- [ ] **Step 1: Failing tests:** all 8 profiles parse, have exactly the keys, tiers in allowed set, `ideator.model_tier != coder.model_tier`; `new_contest` in a temp root (copy of `core/` + a git-initialised root with local identity) creates `.house/spec.yaml`, `.house/playbooks/build.md`, `.house/tools.json`, registry entry, one commit authored with the root's identity; second call → `FileExistsError` and nothing changed; names `"Grok Bot"`, `"../x"`, `""`, `"-x"`, `"a--b"`, `"x-"`, `"Grok-Bot"` → `ValueError` and `contests/` untouched.
 - [ ] **Step 2:** FAIL. **Step 3:** Implement (tests pass a fake `detect`). **Step 4:** PASS.
 - [ ] **Step 5:** Commit `feat: agent profiles and house new`.
 
