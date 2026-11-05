@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, doctor, scaffold
+from . import HOUSE_ROOT, adapters, doctor, registry, scaffold
 
 
 def _todo(args) -> int:
@@ -48,6 +48,16 @@ def cmd_adapt(args) -> int:
     return 0
 
 
+def cmd_sync(args) -> int:
+    entries = registry.load(HOUSE_ROOT / "contests.yaml")
+    for name in registry.sync(HOUSE_ROOT):
+        print(f"cloned {name}")
+    for name, url in entries.items():
+        if not url:
+            print(f"local only (no URL in contests.yaml): {name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
@@ -72,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     e.set_defaults(func=_todo)
 
     s = sub.add_parser("sync", help="clone contests listed in contests.yaml that are missing locally")
-    s.set_defaults(func=_todo)
+    s.set_defaults(func=cmd_sync)
     return p
 
 
