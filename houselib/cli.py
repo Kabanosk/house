@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, doctor
+from . import HOUSE_ROOT, doctor, scaffold
 
 
 def _todo(args) -> int:
@@ -27,6 +27,17 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def cmd_new(args) -> int:
+    try:
+        path = scaffold.new_contest(args.name, args.repo)
+    except (ValueError, FileExistsError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"created {path}")
+    print(f"next: bin/house adapt {args.name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
@@ -38,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")
     n.add_argument("--repo", help="clone this git URL instead of git init")
-    n.set_defaults(func=_todo)
+    n.set_defaults(func=cmd_new)
 
     a = sub.add_parser("adapt", help="generate Claude Code / Codex files for a contest")
     a.add_argument("name")
