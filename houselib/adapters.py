@@ -5,6 +5,7 @@ from pathlib import Path
 
 from . import HOUSE_ROOT, doctor
 from .fm import parse_frontmatter
+from .gitutil import git
 from .scaffold import install_core
 
 CLAUDE_MODELS = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku", "codex": "haiku", "local": "haiku"}
@@ -101,4 +102,10 @@ def codex(contest: Path, root: Path = HOUSE_ROOT) -> Path:
 def adapt(contest: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> list[Path]:
     install_core(contest, root)  # refresh playbooks/protocols from core; never touches existing .house files
     doctor.write(contest, detect())
-    return [codex(contest, root), *claude_code(contest, root)]
+    written = [codex(contest, root), *claude_code(contest, root)]
+    # commit only what adapt owns, so worktrees see it; never sweep up the user's other changes
+    owned = ["AGENTS.md", "CLAUDE.md", ".claude", ".house/tools.json", ".house/playbooks", ".house/protocols"]
+    git(contest, "add", "-A", "--", *owned)
+    if git(contest, "diff", "--cached", "--name-only", "--", *owned).strip():
+        git(contest, "commit", "-q", "-m", "chore(house): adapt", "--", *owned)
+    return written

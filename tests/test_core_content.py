@@ -40,6 +40,14 @@ class CoreContentTest(unittest.TestCase):
         header = (CORE / "templates/house/submissions.csv").read_text().splitlines()[0]
         self.assertEqual(header, "time,submission_id,commit,kind,local_score,leaderboard_score,note")
 
+    def test_templates_have_no_entry_lookalikes(self):
+        for name in ("QUESTIONS.md", "DECISIONS.md"):
+            text = (CORE / "templates/house" / name).read_text()
+            self.assertIsNone(re.search(r"^## [QD]-", text, re.M), name)
+
+    def test_house_tmp_is_gitignored(self):
+        self.assertIn("tmp/", (CORE / "templates/house/.gitignore").read_text().splitlines())
+
     def test_briefing_tracks_last_briefing(self):
         self.assertIn("last_briefing", (CORE / "protocols/briefing.md").read_text())
 

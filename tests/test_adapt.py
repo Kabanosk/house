@@ -82,6 +82,13 @@ class AdaptTest(unittest.TestCase):
         for placeholder in ("{contest_name}", "{house_dir}", "{house_root}", "{roster}", "{coordinator}"):
             self.assertNotIn(placeholder, agents_md)
 
+    def test_adapt_commits_generated_files(self):
+        from tests.helpers import git
+        (self.contest / "wip.py").write_text("user work\n")
+        adapters.adapt(self.contest, self.root, detect=lambda: ALL)
+        self.assertEqual(git(self.contest, "status", "--porcelain").strip(), "?? wip.py")
+        self.assertIn("AGENTS.md", git(self.contest, "ls-files"))
+
     def test_rerun_leaves_house_untouched(self):
         adapters.adapt(self.contest, self.root, detect=lambda: NONE)
         before = house_hash(self.contest)
