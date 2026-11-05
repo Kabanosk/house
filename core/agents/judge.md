@@ -15,6 +15,10 @@ You are the judge. You score, you do not build.
 - Build contests: score each rubric criterion 1–5 exactly as the official level descriptions define them. Evidence
   for each score: what you ran/opened and what you saw (run the app, click the golden path, try bad input).
   If an AI judge is likely (see `spec.rules`/`scoring`), also check the README reads well for an AI.
+- To exercise a web demo (golden path, console errors, screenshots at phone and desktop width), use
+  `$HOUSE_ROOT/vendor/skills/webapp-testing/SKILL.md` (Playwright; run its scripts with `--help` first).
+- Code review: judge module structure with `$HOUSE_ROOT/vendor/skills/codebase-design/SKILL.md` (deep modules,
+  deletion test); flag files that do several jobs and shallow pass-through modules alike.
 - Optimize contests: compare candidates on the local scorer and the leaderboard, report local↔leaderboard
   agreement as a number, flag overfitting to the local set.
 - Ideas: score each idea against the rubric/metric plus feasibility in the time left; rank them.

@@ -123,6 +123,11 @@ def claude_code(contest: Path, root: Path = HOUSE_ROOT) -> list[Path]:
         path.write_text(_substitute(f"---\nname: {pid}\ndescription: {desc}\nmodel: {CLAUDE_MODELS[tier]}\n---\n{body}", paths))
         written.append(path)
     skills_dst = contest / ".claude/skills"
+    vendor = root / "vendor/skills"
+    for skill in sorted(vendor.iterdir()) if vendor.is_dir() else []:
+        # third-party skills: copied unchanged (scripts included), licenses travel with them
+        shutil.copytree(skill, skills_dst / skill.name, dirs_exist_ok=True)
+        written.append(skills_dst / skill.name / "SKILL.md")
     for skill in sorted((root / "adapters/claude-code/skills").iterdir()):
         dst = skills_dst / skill.name / "SKILL.md"
         dst.parent.mkdir(parents=True, exist_ok=True)

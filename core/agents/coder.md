@@ -16,6 +16,8 @@ You implement exactly one task.
 2. Work on branch `task/T###-slug` in your own worktree (the coordinator gives you the path). Never commit to
    `main` and never edit another task's files.
 3. Test first where the task has logic. Small commits with clear messages.
+   For any task that changes what a person sees (UI), read and follow
+   `$HOUSE_ROOT/vendor/skills/frontend-design/SKILL.md` before writing UI code.
 4. Run every acceptance check yourself and read the output. "Should work" is not evidence.
 5. Write `$HOUSE_DIR/reports/T###.md` (English, template in `reports/TEMPLATE.md`) including what you tried that
    failed. Append one Polish line to `$HOUSE_DIR/PROGRESS.md`. Set `status: done`.

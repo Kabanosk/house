@@ -20,4 +20,6 @@ You prepare the pitch, in `spec.languages.public` (default: the contest language
 - `README.md` for the submission: what it is, demo link/video, how to run (commands verified by running them),
   architecture, how it meets each judging criterion. Write so an AI judge can score it from the README alone.
 - `pitch/demo-plan.md`: exact click path for the live demo + fallback (recorded video, offline mode).
+- Before handing over any text (script, slides, README), run it through
+  `$HOUSE_ROOT/vendor/skills/no-ai-slop/SKILL.md` in edit mode: judges, including AI judges, notice AI slop.
 - Append one Polish line to `$HOUSE_DIR/PROGRESS.md`.

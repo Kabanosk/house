@@ -89,6 +89,19 @@ zostaje zachowany jako `*.orig`.
 | Agent wraca do sprawdzonego pomysłu | sprawdź, czy `ideas.md` jest uzupełniane; ideator musi je czytać |
 | Briefing nie pokazuje zmian | `.house/state.json` → `last_briefing` ustaw na `null`, żeby zebrać wszystko od początku |
 
+## Skille zewnętrzne (`vendor/skills/`)
+
+Skopiowane bez zmian, z licencją i `ATTRIBUTION.md`; `house adapt` instaluje je w każdym konkursie.
+
+| Skill | Źródło | Kto używa |
+|---|---|---|
+| `codebase-design` | Matt Pocock (MIT) | coordinator przy planowaniu modułów, judge przy review struktury |
+| `frontend-design` | Anthropic (Apache-2.0) | coder przy zadaniach z UI |
+| `webapp-testing` | Anthropic (Apache-2.0) | judge: Playwright, zrzuty ekranu, błędy konsoli w demo |
+| `no-ai-slop` | Peter Yang (MIT) | pitch: skrypt, slajdy, README bez „AI slop” |
+
+Aktualizacja: sklonuj źródło na nowo i podmień folder (nie edytuj w miejscu).
+
 ## Jak to jest zbudowane
 
 ```text

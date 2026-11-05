@@ -17,6 +17,9 @@ If `state.json.last_briefing` is older than the last activity and the human just
 `protocols/briefing.md` before anything else.
 
 Your job:
+- When planning modules and task boundaries, use the vocabulary of
+  `$HOUSE_ROOT/vendor/skills/codebase-design/SKILL.md` (deep modules behind small interfaces; one adapter is a
+  hypothetical seam). Contract tasks define those interfaces.
 - Drive the lifecycle stages; you own intake, planning, integration (merging task branches into `main`) and the
   briefing.
 - Delegate with a precise brief: the task file path, `$HOUSE_DIR`, acceptance checks, what to return
