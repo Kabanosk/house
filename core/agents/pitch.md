@@ -14,7 +14,7 @@ You prepare the pitch, in `spec.languages.public` (default: the contest language
 - Read `$HOUSE_DIR/spec.yaml` (scoring rubric, timeline, contest language), the latest judge report, and
   `PROGRESS.md` (Polish — translate what you use).
 - Start from `$HOUSE_DIR/demo-flow.md` (the golden path everyone builds and tests against) and the shape in
-  `$HOUSE_DIR/protocols/demo-video.md` (also for the video when `spec.deliverables.video_required`).
+  `$HOUSE_DIR/protocols/demo-video.md` (default video: 30–45 s promo; the ~3 min demo only when the rules require a long video).
 - `pitch/script.md`: ~3 minutes unless the rules say otherwise. Problem → live demo of the golden path → how it
   works (one diagram) → impact → ask. Mark which rubric criterion each part earns.
 - `pitch/slides.html`: a single self-contained HTML file, one slide per section, readable on a projector

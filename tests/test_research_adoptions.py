@@ -29,6 +29,10 @@ class ResearchAdoptionsTest(unittest.TestCase):
         tmpl = (CORE / "protocols/demo-video.md").read_text()
         for mark in ("0:00", "0:20", "0:40", "1:50", "2:20", "2:40"):
             self.assertIn(mark, tmpl)
+        promo = tmpl.split("## Default")[1].split("## ")[0]  # default is the short promo, not the 3-minute demo
+        for mark in ("0:00", "0:05", "0:25", "0:35"):
+            self.assertIn(mark, promo)
+        self.assertIn("30–45", promo)
         self.assertIn("demo-video.md", (CORE / "agents/pitch.md").read_text())
 
     def test_demo_flow_artifact(self):
