@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold, yc
+from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold, setup, yc
 
 
 def contest_dir(name: str) -> Path:
@@ -83,6 +83,34 @@ def cmd_yc(args) -> int:
     return 0
 
 
+def cmd_setup(args) -> int:
+    for name in setup.install_user_skills():
+        print(f"✓ skill {name} → ~/.claude/skills/{name}")
+    tools = doctor.detect()
+    print(doctor.summary(tools))
+    try:
+        from .gitutil import git
+        git(HOUSE_ROOT, "config", "--local", "user.email")
+    except RuntimeError:
+        print("! set your git identity in this repo: git config user.name \"…\"; git config user.email \"…\"")
+    todo = setup.hints(tools)
+    if todo:
+        print("\nnext steps:")
+        for line in todo:
+            print(f"  - {line}")
+    print("\nthen: bin/house sync && bin/house adapt <contest>")
+    return 0
+
+
+def cmd_adopt(args) -> int:
+    link = scaffold.adopt(args.name, Path(args.path))
+    print(f"adopted {link.resolve()} as {link}")
+    print("added .house/ (nothing committed). Choose the branch, then:")
+    print(f"  bin/house adapt {args.name}   # generates AGENTS.md, CLAUDE.md, .claude/ and commits them on the CURRENT branch")
+    print("  note: teammates' tools read AGENTS.md/CLAUDE.md automatically if these land on a shared branch")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
@@ -108,6 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sync", help="clone contests listed in contests.yaml that are missing locally")
     s.set_defaults(func=cmd_sync)
+
+    st = sub.add_parser("setup", help="prepare this machine: user skills, tool check, next steps")
+    st.set_defaults(func=cmd_setup)
+
+    ad = sub.add_parser("adopt", help="attach an existing contest repo in place (symlink in contests/, adds .house/)")
+    ad.add_argument("name")
+    ad.add_argument("path")
+    ad.set_defaults(func=cmd_adopt)
 
     y = sub.add_parser("yc", help="search the Y Combinator company directory (prior art / market check)")
     y.add_argument("query", nargs="+", help="what the idea does, in plain words")

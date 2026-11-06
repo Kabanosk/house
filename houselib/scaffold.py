@@ -29,6 +29,28 @@ def install_core(contest: Path, root: Path) -> None:
         shutil.copytree(root / "core" / part, house / part, dirs_exist_ok=True)
 
 
+def adopt(name: str, repo: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Path:
+    """Attach an existing contest repo in place: contests/<name> becomes a symlink, .house/ is added, nothing is
+    committed (the owner decides on which branch the house files live)."""
+    validate_name(name)
+    repo = repo.expanduser().resolve()
+    if not (repo / ".git").exists():
+        raise ValueError(f"{repo} is not the root of a git repository")
+    link = root / "contests" / name
+    if link.exists() or link.is_symlink():
+        raise FileExistsError(f"{link} already exists")
+    link.parent.mkdir(exist_ok=True)
+    link.symlink_to(repo, target_is_directory=True)
+    install_core(repo, root)
+    doctor.write(repo, detect())
+    try:
+        url = git(repo, "remote", "get-url", "origin").strip()
+    except RuntimeError:
+        url = ""
+    registry.add(root / "contests.yaml", name, url)
+    return link
+
+
 def new_contest(name: str, repo_url: str | None, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Path:
     validate_name(name)
     contest = root / "contests" / name

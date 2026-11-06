@@ -33,6 +33,8 @@ def detect(which=shutil.which, run=_run) -> dict:
         "claude": bool(which("claude")),
         "codex": bool(which("codex")),
         "cursor": bool(which("cursor")),
+        "uv": bool(which("uv")),
+        "ruff": bool(which("ruff")),
         "grok_bot": bool(which("grok-bot")) or bool((run(["dpkg-query", "-W", "grok-bot"]) or "").strip()),
         "ollama": {"installed": ollama, "models": models},
         "gpu": _gpu(run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])),
@@ -48,7 +50,7 @@ def write(contest_dir: Path, tools: dict) -> Path:
 
 def summary(tools: dict) -> str:
     mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
-    lines = [f"{mark(tools[k])} {k}" for k in ("claude", "codex", "cursor", "grok_bot")]
+    lines = [f"{mark(tools[k])} {k}" for k in ("claude", "codex", "cursor", "grok_bot", "uv", "ruff")]
     o = tools["ollama"]
     lines.append(f"{mark(o['installed'])} ollama  models: {', '.join(o['models']) or '(none)'}")
     g = tools["gpu"]

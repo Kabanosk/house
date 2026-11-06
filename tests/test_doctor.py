@@ -15,7 +15,7 @@ class DetectTest(unittest.TestCase):
         tools = doctor.detect(which=lambda _: None, run=lambda _: None)
         self.assertEqual(
             tools,
-            {"claude": False, "codex": False, "cursor": False, "grok_bot": False,
+            {"claude": False, "codex": False, "cursor": False, "grok_bot": False, "uv": False, "ruff": False,
              "ollama": {"installed": False, "models": []}, "gpu": None},
         )
 

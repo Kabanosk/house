@@ -41,11 +41,18 @@ W Claude Code:
 ```bash
 git clone git@github.com:Kabanosk/house.git ~/house && cd ~/house
 git config user.name "Wojciech Fiołka"; git config user.email "56364007+Kabanosk@users.noreply.github.com"
+bin/house setup       # skille użytkownika (grill-me, retro, …) do ~/.claude/skills, sprawdzenie narzędzi, co doinstalować
 echo 'export PATH="$HOME/house/bin:$PATH"' >> ~/.bashrc   # potem `house …` z dowolnego miejsca
-house doctor          # sprawdź, co jest: claude, codex, ollama, GPU
 house sync            # odtwórz konkursy zapisane w contests.yaml
+house adapt <nazwa>   # ścieżki i agenci pod ten komputer
 ```
-Tożsamość git ustawiona w repo systemu jest kopiowana do każdego nowego konkursu.
+Tożsamość git ustawiona w repo systemu jest kopiowana do każdego nowego konkursu. Skille użytkownika żyją w
+`user-skills/`; `house setup` instaluje je ponownie po zmianach (lokalnie zmienioną kopię odkłada jako `*.bak-*`).
+
+**Konkurs, który już trwa (istniejące repo)**: `house adopt <nazwa> <ścieżka-do-repo>` podpina je w miejscu
+(odnośnik w `contests/`, bez drugiej kopii) i dodaje `.house/`, niczego nie commitując. Wybierz gałąź, potem
+`house adapt <nazwa>` i `/house-start` z treścią zadania, a do `ideas.md` niech trafi wszystko, co już sprawdzono.
+Uwaga: `AGENTS.md`/`CLAUDE.md` na wspólnej gałęzi czytają też narzędzia reszty drużyny.
 
 **Przed startem konkursu**
 1. `house new <nazwa>` (albo `--repo <url>`, jeśli repo konkursu już istnieje), potem `house adapt <nazwa>`.
@@ -113,7 +120,7 @@ Aktualizacja: sklonuj źródło na nowo i podmień folder (nie edytuj w miejscu)
 ```text
 core/            neutralny rdzeń (Markdown/YAML): agenci, playbooki, zasady, szablon .house/
 adapters/        nakładki: claude-code (skille), codex (AGENTS.md)
-bin/house        CLI: doctor, new, adapt, sync, export, yc
+bin/house        CLI: setup, doctor, new, adopt, adapt, sync, export, yc
 bin/codex-task   uruchamia zadanie przez Codex CLI
 contests/        repozytoria konkursów (każde osobne, poza gitem systemu)
 contests.yaml    spis konkursów → `bin/house sync` odtwarza je na nowej maszynie
