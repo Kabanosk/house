@@ -5,7 +5,9 @@ disable-model-invocation: true
 ---
 Follow **Release** in `$HOUSE_DIR/playbooks/build.md` and `$HOUSE_DIR/protocols/export.md`.
 
-1. Deploy if `spec.deploy` is true; test from another device. Record the URL in `PROGRESS.md`.
+1. Deploy if `spec.deploy` is true, with every API key set server-side in the hosting environment. Then run it
+   like the jury will: the public URL from a clean browser on another device/network, and a fresh clone without our
+   `.env` (must fall back to the labelled demo mode, not crash). Record the URL and both results in `PROGRESS.md`.
 2. Fallback: demo video plan + offline/seeded mode.
 3. Dispatch `pitch` for script, slides, README, demo plan (in `spec.languages.public`).
 4. Final judge round on the release candidate: dispatch the `judge` agent.

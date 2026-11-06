@@ -10,6 +10,8 @@ If nothing was given, ask for it in one short message and stop.
 
 1. Fill `$HOUSE_DIR/spec.yaml` with what the human gave. Keep their values verbatim.
 2. Dispatch the `researcher` agent for the rules check (links/text from the input) and any missing facts.
+   Also list every external API key the contest or likely ideas need (e.g. sponsor APIs) and verify each key works
+   with one cheap real call (see `build.md` principle 0); a missing or failing key is a question for the human now.
 3. Fill the remaining gaps yourself, marking each `# proposed`. Raise ONE question in `QUESTIONS.md` listing all
    proposed values for approval (format: `protocols/questions.md`).
 4. Commit `.house/` (`chore(house): intake`). Append a Polish line to `PROGRESS.md`.

@@ -3,6 +3,14 @@
 Goal: a working, demoable product + pitch, scored by humans/AI judges against `spec.scoring.rubric`.
 
 ## Principles
+0. **External APIs and keys work for the jury, not only for us.** (grok-bot-wro-2026: we missed the final because
+   the xAI key failed when the jury ran the demo.) At intake, list every external API and key the idea needs and
+   verify each with one real, cheap call; log it as D-###. Never assume the jury has our key or our `.env`:
+   - the deployed demo has the key set server-side in the hosting environment and is checked from a clean browser
+     on another device and network, by the first milestone, not at the end;
+   - without any key the app falls back to a clearly labelled demo mode (seeded/recorded data) instead of failing;
+   - the README says exactly how to run it with their own key and without one; a key-check command exists;
+   - check quota, rate limits and expiry of trial/hackathon keys before the demo; have a spare key ready.
 1. **Rubric is the scorer.** Before every milestone the judge scores the current build against each rubric
    criterion (1–5, with evidence) and names the cheapest way to gain a point. Work follows the biggest gain.
 2. **Golden path first.** Define the demo in 3 sentences (who, does what, sees what). Build that end-to-end,
@@ -28,5 +36,6 @@ Goal: a working, demoable product + pitch, scored by humans/AI judges against `s
 7. Submission: `house export <contest> <dest>` → push the export, never the contest repo.
 
 ## Judge checklist for build (in addition to the rubric)
-Runs from a clean clone with documented commands? Golden path works without the author? Survives bad input /
+Runs like the jury will run it: the deployed URL from a clean browser profile, and a fresh clone without our
+`.env` (fallback mode visible, no crash)? Runs from a clean clone with documented commands? Golden path works without the author? Survives bad input /
 API failure with a visible message? Demo works without network?
