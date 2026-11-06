@@ -29,6 +29,18 @@ rules:              # sprawdza researcher PRZED startem
   allowed_autonomous_agents: null
   notes: null
 
+deliverables:       # co trzeba oddać — researcher sprawdza w regulaminie; nie zakładaj niczego (null = nieznane)
+  video_required: null
+  video_max_seconds: null
+  live_demo: null
+  slides: null
+  repo_submission: null
+  starter_code_allowed: null    # czy wolno użyć kodu przygotowanego przed eventem
+  ai_apis_allowed: null
+  external_data_allowed: null
+  cloud_deploy_allowed: null
+  format: null                  # optimize: .py / .onnx / zip / plik wyników …
+
 mode: copilot       # copilot (pytaj o trudne decyzje) | autopilot (decyduj sam, pytaj tylko w końcówce)
 
 limits:

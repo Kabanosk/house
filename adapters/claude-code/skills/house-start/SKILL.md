@@ -12,6 +12,9 @@ If nothing was given, ask for it in one short message and stop.
 2. Dispatch the `researcher` agent for the rules check (links/text from the input) and any missing facts.
    Also list every external API key the contest or likely ideas need (e.g. sponsor APIs) and verify each key works
    with one cheap real call (see `build.md` principle 0); a missing or failing key is a question for the human now.
+   The researcher also fills `spec.deliverables` from the rules (video and its length, live demo, slides, repo,
+   starter code, AI APIs, external data, cloud deploy, submission format). Never assume: an item the rules do
+   not settle stays null and goes into the intake question.
 3. Fill the remaining gaps yourself, marking each `# proposed`. Raise ONE question in `QUESTIONS.md` listing all
    proposed values for approval (format: `protocols/questions.md`).
 4. Commit `.house/` (`chore(house): intake`). Append a Polish line to `PROGRESS.md`.

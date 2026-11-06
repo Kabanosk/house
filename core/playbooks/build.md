@@ -25,7 +25,9 @@ Goal: a working, demoable product + pitch, scored by humans/AI judges against `s
 ## Flow
 1. Intake + rules check (lifecycle §1). Note: is AI judging first? Then write README/pitch for an AI reader too.
 2. Ideation: `ideas_per_round` ideas, judge scores each on the rubric; also "can we demo it in the time left?".
-3. Plan: contract task first (types / API), then parallel tasks (e.g. backend agent logic, frontend, deploy),
+3. Plan: write `$HOUSE_DIR/demo-flow.md` first: the golden path as numbered user steps with the expected screen
+   after each, plus the demo data it needs. Frontend tasks build it, the judge tests it, the pitch shows it.
+   Then the contract task first (types / API), then parallel tasks (e.g. backend agent logic, frontend, deploy),
    capped by `max_parallel_agents`.
 4. Milestones (adapt to `timeline`): golden path end-to-end → judge round → "wow" feature → deploy + test on a
    phone → judge round → freeze → pitch.
