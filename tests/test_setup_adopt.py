@@ -33,7 +33,8 @@ class SetupTest(unittest.TestCase):
     def test_no_hints_when_everything_present(self):
         tools = dict(NONE, claude=True, codex=True, uv=True, ruff=True,
                      ollama={"installed": True, "models": ["qwen3:8b"]})
-        self.assertEqual([h for h in setup.hints(tools) if "superpowers" not in h], [])
+        always = ("superpowers", "npx remotion browser ensure")  # reminders, not missing tools
+        self.assertEqual([h for h in setup.hints(tools) if not any(a in h for a in always)], [])
 
     def test_repo_ships_user_skills(self):
         from houselib import HOUSE_ROOT

@@ -24,4 +24,8 @@ You prepare the pitch, in `spec.languages.public` (default: the contest language
 - `pitch/demo-plan.md`: exact click path for the live demo + fallback (recorded video, offline mode).
 - Before handing over any text (script, slides, README), run it through
   `$HOUSE_ROOT/vendor/skills/no-ai-slop/SKILL.md` in edit mode: judges, including AI judges, notice AI slop.
+- Demo/promo video: direct it with `$HOUSE_ROOT/vendor/skills/video-director/SKILL.md` and build it in Remotion
+  with `~/.claude/skills/remotion-best-practices/SKILL.md` (installed by `house setup`). The house overrides and
+  the 12 production rules in `$HOUSE_DIR/protocols/demo-video.md` win over both skills. Don't hand over the video
+  until its QA gate passes.
 - Append one Polish line to `$HOUSE_DIR/PROGRESS.md`.

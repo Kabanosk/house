@@ -86,6 +86,12 @@ def cmd_yc(args) -> int:
 def cmd_setup(args) -> int:
     for name in setup.install_user_skills():
         print(f"✓ skill {name} → ~/.claude/skills/{name}")
+    remotion = setup.fetch_remotion_skill()
+    if remotion:
+        print(f"✓ skill {remotion} → ~/.claude/skills/{remotion} (fetched from {setup.REMOTION_REPO})")
+        print(f"  note: {setup.REMOTION_LICENSE_NOTE}")
+    else:
+        print(f"! skill {setup.REMOTION_SKILL} skipped (offline and no cache); re-run `house setup` when online")
     tools = doctor.detect()
     print(doctor.summary(tools))
     try:

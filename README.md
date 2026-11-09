@@ -41,7 +41,7 @@ W Claude Code:
 ```bash
 git clone git@github.com:Kabanosk/house.git ~/house && cd ~/house
 git config user.name "Wojciech Fiołka"; git config user.email "56364007+Kabanosk@users.noreply.github.com"
-bin/house setup       # skille użytkownika (grill-me, retro, …) do ~/.claude/skills, sprawdzenie narzędzi, co doinstalować
+bin/house setup       # skille użytkownika (grill-me, retro, …) + remotion-best-practices do ~/.claude/skills, sprawdzenie narzędzi, co doinstalować
 echo 'export PATH="$HOME/house/bin:$PATH"' >> ~/.bashrc   # potem `house …` z dowolnego miejsca
 house sync            # odtwórz konkursy zapisane w contests.yaml
 house adapt <nazwa>   # ścieżki i agenci pod ten komputer
@@ -112,8 +112,15 @@ Skopiowane bez zmian, z licencją i `ATTRIBUTION.md`; `house adapt` instaluje je
 | `frontend-design` | Anthropic (Apache-2.0) | coder przy zadaniach z UI |
 | `webapp-testing` | Anthropic (Apache-2.0) | judge: Playwright, zrzuty ekranu, błędy konsoli w demo |
 | `no-ai-slop` | Peter Yang (MIT) | pitch: skrypt, slajdy, README bez „AI slop” |
+| `video-director` | win4r (MIT) | pitch: reżyseria filmiku (hak w 3 s, `timeline.json`, kontrola `qa_video.py`) |
 
 Aktualizacja: sklonuj źródło na nowo i podmień folder (nie edytuj w miejscu).
+
+`remotion-best-practices` (oficjalny skill Remotion, budowanie filmiku w kodzie) **nie** jest w `vendor/`, bo jego
+repo nie ma licencji pozwalającej na kopiowanie. `house setup` pobiera go na każdej maszynie z
+[remotion-dev/skills](https://github.com/remotion-dev/skills) do `~/.claude/skills/` (cache w `~/.cache/house/`,
+offline zostaje poprzednia kopia). Remotion jest darmowy dla osób prywatnych i firm do 3 osób. Zasady filmiku
+i nadpisania obu skilli: [`core/protocols/demo-video.md`](core/protocols/demo-video.md).
 
 ## Jak to jest zbudowane
 

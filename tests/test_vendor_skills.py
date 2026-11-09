@@ -7,7 +7,8 @@ from houselib import HOUSE_ROOT, adapters, scaffold
 from tests.helpers import FAKE_TOOLS, make_root
 
 VENDORED = {"codebase-design": "codebase-design", "frontend-design": "frontend-design",
-            "webapp-testing": "webapp-testing", "no-ai-slop": "no-ai-slop"}
+            "webapp-testing": "webapp-testing", "no-ai-slop": "no-ai-slop",
+            "video-director": "video-director"}
 USERS = {"coder": "frontend-design", "judge": "webapp-testing", "pitch": "no-ai-slop",
          "coordinator": "codebase-design"}
 
