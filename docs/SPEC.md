@@ -30,7 +30,7 @@ konkursów (Optical, CCC 2025) **bez dostępu do starych rozwiązań**.
 ## 3. Układ repozytoriów
 
 ```text
-software-house/                 # repo systemu (GitHub, prywatne)
+house/                          # repo systemu (GitHub, prywatne)
 ├── core/
 │   ├── agents/*.md             # neutralne profile agentów (YAML frontmatter + instrukcje)
 │   ├── playbooks/*.md          # przebieg pracy: lifecycle, build, optimize
