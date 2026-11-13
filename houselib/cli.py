@@ -11,6 +11,7 @@ from . import (
     doctor,
     export,
     guard,
+    inbox,
     manifest,
     merge,
     notify,
@@ -150,6 +151,30 @@ def cmd_ask(args) -> int:
         return 0
     asked = notify.ask_new(target)
     print("sent " + ", ".join(asked) if asked else "no new open questions")
+    return 0
+
+
+def _all_contests() -> list[Path]:
+    names = registry.load(HOUSE_ROOT / "contests.yaml")
+    return [HOUSE_ROOT / "contests" / n for n in names if (HOUSE_ROOT / "contests" / n / ".house").is_dir()]
+
+
+def cmd_inbox(args) -> int:
+    from .signal import from_config
+    contests = [contest_dir(args.name)] if args.name else _all_contests()
+    for line in inbox.process([c.resolve() if c.is_symlink() else c for c in contests], from_config()) or [
+            "no new answers"]:
+        print(line)
+    return 0
+
+
+def cmd_deadlines(args) -> int:
+    from .signal import from_config
+    sig = from_config()
+    contests = [contest_dir(args.name)] if args.name else inbox.running(_all_contests())
+    lines = [line for c in contests for line in inbox.deadlines(c, sig)]
+    for line in lines or ["nothing due"]:
+        print(line)
     return 0
 
 
@@ -295,6 +320,14 @@ def build_parser() -> argparse.ArgumentParser:
     ak.add_argument("name")
     ak.add_argument("question", nargs="?", help="Q-### to (re)send")
     ak.set_defaults(func=cmd_ask)
+
+    ib = sub.add_parser("inbox", help="read answers from Signal (quote-replies) into QUESTIONS.md / DECISIONS.md")
+    ib.add_argument("name", nargs="?", help="one contest (default: every running contest)")
+    ib.set_defaults(func=cmd_inbox)
+
+    dl = sub.add_parser("deadlines", help="remind about / apply defaults of critical questions past their deadline")
+    dl.add_argument("name", nargs="?")
+    dl.set_defaults(func=cmd_deadlines)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")
