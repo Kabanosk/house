@@ -130,7 +130,7 @@ def freeze(house: Path, task_id: str) -> Path:
 
 
 def _next_decision_id(text: str) -> str:
-    nums = [int(n) for n in re.findall(r"^## D-(\d+)", text, re.M)]
+    nums = [int(n) for n in re.findall(r"^## D-(\d+)", text, re.MULTILINE)]
     return f"D-{max(nums, default=0) + 1:03d}"
 
 
@@ -163,9 +163,9 @@ def expect_ok(expect: str | None, stdout: str) -> bool:
     m = _CMP_RE.match(expect)
     if m:
         label = re.escape(m["label"].strip())
-        found = re.findall(rf"{label}\s*[:=]\s*(-?\d+(?:\.\d+)?)", stdout, re.I)
+        found = re.findall(rf"{label}\s*[:=]\s*(-?\d+(?:\.\d+)?)", stdout, re.IGNORECASE)
         return bool(found) and _OPS[m["op"]](float(found[-1]), float(m["num"]))
-    return re.search(expect, stdout, re.M) is not None
+    return re.search(expect, stdout, re.MULTILINE) is not None
 
 
 def _tail(text: str) -> str:
@@ -179,7 +179,7 @@ def _commit(workdir: Path) -> str | None:
 
 def _run_one(c: Criterion, workdir: Path, commit: str | None) -> Result:
     try:
-        r = subprocess.run(c.run, shell=True, cwd=workdir, capture_output=True, text=True,  # noqa: S602
+        r = subprocess.run(c.run, shell=True, cwd=workdir, capture_output=True, text=True,
                            timeout=c.timeout, check=False)
     except subprocess.TimeoutExpired:
         return Result(c.id, False, None, f"timeout after {c.timeout} s", _now(), commit)
