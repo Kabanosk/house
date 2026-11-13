@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from houselib import notify, questions
+from tests import helpers  # noqa: F401  (never the real Signal account)
 
 QS = ("# Q\n\n## Q-001 [open] Które zgłoszenie finalne?\n- **Opcje:** A) lgbm B) ensemble\n"
       "- **Rekomendacja:** B (lepszy na obu)\n- **Poziom:** krytyczny\n- **Termin:** 2026-11-20 23:50\n"

@@ -88,7 +88,12 @@ def _signal_lines(contest: Path) -> list[str]:
         sig = from_config()
         if sig is None:
             return []
-        return [f"signal: {line}" for line in (*inbox.process([contest], sig), *inbox.deadlines(contest, sig))]
+        sig.timeout = 10  # a session start must stay quick even if signal-cli waits on its lock
+        everyone = inbox.all_running() or [contest]
+        if contest.resolve() not in {c.resolve() for c in everyone}:
+            everyone.append(contest)
+        lines = [*inbox.process(everyone, sig, scope=[contest]), *inbox.deadlines(contest, sig)]
+        return [f"signal: {line}" for line in lines]
     except Exception as e:  # noqa: BLE001
         return [f"signal: skipped ({type(e).__name__})"]
 

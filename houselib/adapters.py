@@ -214,7 +214,7 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
                             "hooks": [{"type": "command", "command": f"{hook} pre-tool"}]}],
             "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|Bash",
                              "hooks": [{"type": "command", "command": f"{hook} post-tool"}]}],
-            "SessionStart": [{"hooks": [{"type": "command", "command": f"{hook} session-start"}]}],
+            "SessionStart": [{"hooks": [{"type": "command", "command": f"{hook} session-start", "timeout": 45}]}],
         },
         "permissions": {"allow": [f"Bash({root.resolve()}/bin/house:*)", f"Bash({root.resolve()}/bin/codex-task:*)",
                                   *(f"Bash({c})" for c in ALLOW_COMMANDS)]},

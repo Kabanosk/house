@@ -165,9 +165,11 @@ def _all_contests() -> list[Path]:
 
 def cmd_inbox(args) -> int:
     from .signal import from_config
-    contests = [contest_dir(args.name)] if args.name else _all_contests()
-    for line in inbox.process([c.resolve() if c.is_symlink() else c for c in contests], from_config()) or [
-            "no new answers"]:
+    everyone = _all_contests()
+    scope = [contest_dir(args.name)] if args.name else None
+    if scope and scope[0].resolve() not in {c.resolve() for c in everyone}:
+        everyone.append(scope[0])
+    for line in inbox.process(everyone, from_config(), scope=scope) or ["no new answers"]:
         print(line)
     return 0
 

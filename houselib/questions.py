@@ -31,15 +31,24 @@ class Question:
     end: int = 0
 
 
+DATETIME_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})")
+
+
 def _parse_deadline(value: str | None) -> datetime | None:
-    if not value:
+    """First `YYYY-MM-DD HH:MM` in the value (local time); trailing notes like "(koniec − 10 min)" are fine."""
+    m = DATETIME_RE.search(value or "")
+    if not m:
         return None
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(value.strip(), fmt)
-        except ValueError:
-            continue
-    return None
+    try:
+        return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+def clean_answer(text: str) -> str:
+    """One line, no markdown structure: a reply must not be able to add `## Q-…` / `## D-…` entries."""
+    one_line = " ".join(str(text).split())
+    return one_line.lstrip("#").strip()[:500] or "—"
 
 
 def parse(text: str) -> list[Question]:
@@ -82,12 +91,13 @@ def answer(house: Path, qid: str, text: str, who: str, via: str, today: str | No
     if q is None or q.status != "open":
         return None
     today = today or datetime.now().strftime("%Y-%m-%d")
+    text, who = clean_answer(text), clean_answer(who)
     section = content[q.start:q.end]
     section = HEADER_RE.sub(lambda m: f"## {m.group(1)} [answered {today}] {m.group(3)}", section, count=1)
     line = f"- **Odpowiedź:** {text} ({who}, {via})"
     odp = re.compile(r"^-\s+\*\*\s*odpowiedź\s*:?\s*\*\*.*$", re.MULTILINE | re.IGNORECASE)
     if odp.search(section):
-        section = odp.sub(line, section, count=1)
+        section = odp.sub(lambda _: line, section, count=1)
     else:
         section = section.rstrip("\n") + "\n" + line + "\n" + ("\n" if q.end < len(content) else "")
     path.write_text(content[:q.start] + section + content[q.end:])

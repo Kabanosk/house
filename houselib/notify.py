@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from . import questions
+from . import questions, registry
 from . import spec as specmod
 from .signal import from_config
 
@@ -24,8 +24,12 @@ def _notify_spec(contest: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def contest_name(contest: Path) -> str:
+    return registry.name_for(contest)
+
+
 def alias(contest: Path) -> str:
-    return str(_notify_spec(contest).get("alias") or contest.name)
+    return str(_notify_spec(contest).get("alias") or contest_name(contest))
 
 
 def prefix(contest: Path) -> str:
@@ -33,8 +37,10 @@ def prefix(contest: Path) -> str:
 
 
 def _append(name: str, record: dict) -> None:
-    with (data_dir() / name).open("a") as f:
+    path = data_dir() / name
+    with path.open("a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    path.chmod(0o600)
 
 
 def resolve_group(sig, name: str) -> tuple[str | None, str | None]:
@@ -77,7 +83,7 @@ def send(contest: Path, text: str, question: str | None = None, sig=None,
             warnings.append(f"sending to {chat} failed")
             continue
         sent.append(ts)
-        _append("sent.jsonl", {"ts": ts, "contest": contest.name, "question": question, "chat": chat})
+        _append("sent.jsonl", {"ts": ts, "contest": contest_name(contest), "question": question, "chat": chat})
     return sent, warnings
 
 

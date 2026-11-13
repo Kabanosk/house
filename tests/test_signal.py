@@ -39,6 +39,12 @@ class SignalTest(unittest.TestCase):
         self.assertEqual([e["envelope"]["timestamp"] for e in out], [1, 2])
         self.assertEqual(run.calls[0], ["sc", "-a", "+1", "-o", "json", "receive", "--timeout", "3"])
 
+    def test_receive_timeout_keeps_partial_output(self):
+        def run(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 1, output='{"envelope": {"timestamp": 7}}\n')
+        out = sig.Signal("+1", "sc", run=run).receive(timeout=1)
+        self.assertEqual([e["envelope"]["timestamp"] for e in out], [7])
+
     def test_list_groups(self):
         run = FakeRun('[{"id": "g1", "name": "Team", "isMember": true}]')
         self.assertEqual(sig.Signal("+1", "sc", run=run).list_groups(), [{"id": "g1", "name": "Team"}])

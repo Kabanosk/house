@@ -7,6 +7,7 @@ from pathlib import Path
 
 from houselib import questions
 from houselib.fm import parse_frontmatter
+from tests import helpers  # noqa: F401  (never the real Signal account)
 
 QS = """# Pytania do człowieka
 

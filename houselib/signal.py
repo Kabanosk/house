@@ -14,14 +14,17 @@ TIMEOUT_S = 60
 
 
 class Signal:
-    def __init__(self, account: str, binary: str, run=subprocess.run):
-        self.account, self.binary, self._run = account, binary, run
+    def __init__(self, account: str, binary: str, run=subprocess.run, timeout: int = TIMEOUT_S):
+        self.account, self.binary, self._run, self.timeout = account, binary, run, timeout
 
-    def _call(self, *args: str, timeout: int = TIMEOUT_S) -> subprocess.CompletedProcess | None:
+    def _call(self, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess | None:
+        argv = [self.binary, "-a", self.account, *args]
         try:
-            return self._run([self.binary, "-a", self.account, *args], capture_output=True, text=True,
-                             timeout=timeout, check=False)
-        except (OSError, subprocess.TimeoutExpired):
+            return self._run(argv, capture_output=True, text=True, timeout=timeout or self.timeout, check=False)
+        except subprocess.TimeoutExpired as e:  # keep what was already printed: those messages are acknowledged
+            out = e.output.decode() if isinstance(e.output, bytes) else (e.output or "")
+            return subprocess.CompletedProcess(argv, -1, out, "")
+        except OSError:
             return None
 
     def send(self, text: str, group_id: str | None = None) -> int | None:
@@ -34,7 +37,7 @@ class Signal:
         return int(last) if last.isdigit() else None
 
     def receive(self, timeout: int = 1) -> list[dict]:
-        r = self._call("-o", "json", "receive", "--timeout", str(timeout), timeout=timeout + TIMEOUT_S)
+        r = self._call("-o", "json", "receive", "--timeout", str(timeout), timeout=timeout + self.timeout)
         if r is None:
             return []
         out = []

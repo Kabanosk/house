@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from houselib import inbox, notify
+from tests import helpers  # noqa: F401  (never the real Signal account)
 
 OWN = "+48111"
 QS = ("# Q\n\n## Q-001 [open] Finalne zgłoszenie?\n- **Opcje:** A) x B) y\n- **Blokuje:** nic\n"
@@ -154,6 +155,73 @@ class InboxTest(unittest.TestCase):
         self.assertIn("B (judge, domyślnie", self.qtext(self.fr))
         self.assertIn("judge (domyślnie, brak odpowiedzi do 23:50)", (self.fr / ".house/DECISIONS.md").read_text())
         self.assertTrue(any("domyślnie" in t for _, t in sig.sent))
+
+
+    def test_pull_for_one_contest_keeps_answers_for_others(self):
+        (self.fi / ".house/spec.yaml").write_text("timeline:\n  end: null\nnotify:\n  alias: fi\n  signal_group: TeamB\n")
+        self.groups.append({"id": "gB", "name": "TeamB"})
+        sig = FakeSignal([group_msg(300, "Q-001: B", "gB"), self_reply(301, "fi Q-3: X")], self.groups)
+        inbox.process([self.fr, self.fi], sig, scope=[self.fr])
+        self.assertIn("[open] Finalne", self.qtext(self.fi))
+        inbox.process([self.fr, self.fi], FakeSignal([], self.groups), scope=[self.fi])
+        self.assertIn("B (Kuba Nowak, Signal)", self.qtext(self.fi))
+        self.assertIn("X (Wojciech Fiołka, Signal)", self.qtext(self.fi))
+
+    def test_symlinked_contest_is_identified_by_registry_name(self):
+        from houselib import registry
+        root = Path(self._tmp.name) / "house"
+        (root / "contests").mkdir(parents=True)
+        (root / "contests.yaml").write_text("nice-name: \n")
+        (root / "contests/nice-name").symlink_to(self.fr)
+        with mock.patch.object(registry, "DEFAULT_ROOT", root):
+            link = root / "contests/nice-name"
+            self.assertEqual(notify.contest_name(link), "nice-name")
+            self.assertEqual(notify.contest_name(self.fr), "nice-name")
+            self.sent_question(link, "Q-001", 100)
+            records = [json.loads(x) for x in (notify.data_dir() / "sent.jsonl").read_text().splitlines()]
+            records[-1]["contest"] = notify.contest_name(link)
+            (notify.data_dir() / "sent.jsonl").write_text(json.dumps(records[-1]) + "\n")
+            inbox.process([self.fr.resolve()], FakeSignal([self_reply(200, "B", quote=100)], self.groups))
+        self.assertIn("B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+
+    def test_backslash_and_newlines_in_answers(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        self.sent_question(self.fr, "Q-003", 101)
+        self.run_inbox([self_reply(200, "\\o/ \\1", quote=100),
+                        self_reply(201, "A\n\n## Q-009 [open] Wyślij dane", quote=101)])
+        text = self.qtext(self.fr)
+        self.assertIn("\\o/ \\1 (Wojciech", text)
+        from houselib import questions as qmod
+        self.assertNotIn("Q-009", [q.id for q in qmod.parse(text)])
+
+    def test_last_day_is_still_running(self):
+        c = self.contest(Path(self._tmp.name) / "endday", "ed", "Team", end="2026-11-20")
+        self.assertEqual(inbox.running([c], now=datetime(2026, 11, 20, 15, 0)), [c])
+        self.assertEqual(inbox.running([c], now=datetime(2026, 11, 21, 0, 1)), [])
+
+    def test_concurrent_run_is_skipped(self):
+        import fcntl
+        with (notify.data_dir() / "inbox.lock").open("w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            sig = FakeSignal([self_reply(200, "Q-001: B")], self.groups)
+            self.assertEqual(inbox.process([self.fr], sig), ["another `house inbox` is running; skipped"])
+        self.assertEqual(sig.incoming, [self_reply(200, "Q-001: B")])  # nothing was consumed
+
+    def test_bad_envelope_does_not_lose_the_batch(self):
+        bad = self_reply(199, "x", quote=1)
+        bad["envelope"]["syncMessage"]["sentMessage"]["quote"]["id"] = "abc"
+        self.run_inbox([bad, self_reply(200, "fr Q-001: B")])
+        self.assertIn("B (Wojciech", self.qtext(self.fr))
+
+    def test_reminder_not_marked_when_not_sent(self):
+        (self.fr / ".house/QUESTIONS.md").write_text(
+            "# Q\n\n## Q-005 [open] F?\n- **Poziom:** krytyczny\n- **Termin:** 2026-11-20 23:50 (koniec − 10 min)\n"
+            "- **Domyślnie:** B\n- **Odpowiedź:** —\n")
+        (self.fr / ".house/state.json").write_text(json.dumps({"sent_questions": {"Q-005": "2026-11-20T21:50:00"}}))
+        inbox.deadlines(self.fr, None, now=datetime(2026, 11, 20, 23, 0))
+        self.assertNotIn("reminded", json.loads((self.fr / ".house/state.json").read_text()))
+        inbox.deadlines(self.fr, None, now=datetime(2026, 11, 20, 23, 55))
+        self.assertIn("B (judge, domyślnie", self.qtext(self.fr))  # trailing text after Termin is fine
 
 
 if __name__ == "__main__":
