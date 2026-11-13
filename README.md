@@ -149,6 +149,9 @@ konkursów; inne rozmowy odrzuca bez zapisu.
    zatrzymuje nowe sesje.
 4. **Rano:** raport `reports/night-*.md`, linia w PROGRESS i podsumowanie na Signalu.
 
+`--max-tasks` liczy uruchomione sesje (także powtórki). Noc commituje tylko własne pliki; to, co worker zapisał
+w `.house/`, przechodzi przez bramkę `house merge` (ręczna zmiana kryteriów albo statusu `done` jest cofana).
+
 Uprawnienia sesji: tryb `auto` + lista dozwolonych komend + hooki (bez `--dangerously-skip-permissions`).
 
 ## Aktualizacja systemu

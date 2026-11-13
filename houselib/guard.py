@@ -444,6 +444,25 @@ def frozen_tampering(contest: Path) -> list[str]:
     return found
 
 
+def _secrets_in_history(repo: Path, base: str) -> list[str]:
+    """Paths that looked like secrets in ANY commit of base..HEAD (a later deletion does not remove them)."""
+    found: set[str] = set()
+    for commit in _git(repo, "rev-list", f"{base}..HEAD").stdout.split():
+        names = _git(repo, "show", "--name-only", "--diff-filter=AM", "--format=", commit).stdout.splitlines()
+        for rel in filter(None, names):
+            name = Path(rel).name
+            if name.startswith(".env") and name != ".env.example":
+                found.add(rel)
+                continue
+            blob = subprocess.run(["git", "show", f"{commit}:{rel}"], cwd=repo, capture_output=True, check=False)
+            head = blob.stdout[:MAX_SCAN_BYTES]
+            if blob.returncode == 0 and b"\0" not in head[:8192]:
+                text = head.decode(errors="ignore")
+                if any(r.search(text) for r in SECRET_RES):
+                    found.add(rel)
+    return sorted(found)
+
+
 def diff_violations(contest: Path, task_id: str, worktree: Path) -> list[str]:
     """Report what a task branch changed that it must not, plus tampering in the contest checkout.
 
@@ -472,6 +491,8 @@ def diff_violations(contest: Path, task_id: str, worktree: Path) -> list[str]:
             pinned = (_checks(contest).get(owner, {}).get("frozen", {}).get("protected") or {}).get(rel)
             if owner == "local_scorer" or _sha(worktree / rel) != pinned:
                 found.append(f"{rel} is protected ({owner}) and was changed on the branch")
+    for rel in _secrets_in_history(worktree, base):
+        found.append(f"{rel} held a secret in a commit on the branch (rewrite the branch history to drop it)")
     for rel in sorted(changed):
         if rel == ".house" or rel.startswith(".house/"):
             found.append(f"{rel}: task branches must not carry .house/ files (write via $HOUSE_DIR)")

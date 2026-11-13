@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import HOUSE_ROOT, checks, merge
+from . import HOUSE_ROOT, checks, guard, merge
 from . import spec as specmod
 from .fm import parse_frontmatter, set_fields
 
@@ -129,6 +129,17 @@ def _set(task: checks.Task, **fields) -> None:
     task.path.write_text(set_fields(task.path.read_text(), fields))
 
 
+def _commit_paths(contest: Path, paths: list[Path], message: str) -> None:
+    """Commit only files the night itself wrote. Never all of .house/: workers write there too, and committing
+    their edits before the gate would hide tampering from `guard.frozen_tampering`."""
+    rels = [str(p.relative_to(contest)) for p in paths if p.exists()]
+    if not rels:
+        return
+    _git(contest, "add", "--", *rels)
+    if _git(contest, "diff", "--cached", "--quiet", "--", *rels).returncode != 0:
+        _git(contest, "commit", "-q", "-m", message, "--", *rels)
+
+
 def prepare_worktree(contest: Path, task_id: str) -> Path:
     house = contest / ".house"
     task = checks.load_task(house, task_id)
@@ -142,27 +153,32 @@ def prepare_worktree(contest: Path, task_id: str) -> Path:
         if r.returncode != 0:
             raise RuntimeError(f"git worktree add failed for {task_id}: {r.stderr.strip()}")
     _set(task, status="doing", owner=str(task.meta.get("agent") or "coder"), branch=branch)
-    _commit_house(contest, f"chore(house): night starts {task_id}")
+    _commit_paths(contest, [task.path], f"chore(house): night starts {task_id}")
     return wt
 
 
-def brief(contest: Path, task_id: str, worktree: Path) -> str:
+def brief(contest: Path, task_id: str, worktree: Path, previous: str | None = None) -> str:
     task = checks.load_task(contest / ".house", task_id)
-    return (f"You are working unattended on contest `{contest.name}` (house night). Implement exactly one task: "
+    text = (f"You are working unattended on contest `{contest.name}` (house night). Implement exactly one task: "
             f"{task.path} . HOUSE_DIR={contest / '.house'} . Your worktree: {worktree} . "
             f"Follow your agent instructions. Finish when `{HOUSE_ROOT / 'bin/house'} check {contest.name} "
             f"{task_id} --worktree {worktree}` prints GREEN: commit your work on the task branch, write the report, "
             "set `status: review` in the task file. A decision only a human can take: write a Q-### per "
             "protocols/questions.md, set `status: blocked` and stop. Never wait for a human.")
+    if previous:
+        text += f" Previous attempt failed: {previous[:600]} . Fix that first."
+    return text
 
 
-def worker_command(contest: Path, task: checks.Task, worktree: Path, tools: dict) -> list[str]:
+def worker_command(contest: Path, task: checks.Task, worktree: Path, tools: dict,
+                   previous: str | None = None) -> list[str]:
     if task.meta.get("agent") == "coder-codex" and tools.get("codex"):
         return [str(HOUSE_ROOT / "bin/codex-task"), str(task.path), str(worktree)]
     model = specmod.get(_spec(contest), "night.model") or "sonnet"
     return ["claude", "-p", "--agent", "coder", "--model", str(model),
             "--settings", str(contest / ".claude/settings.local.json"),
-            "--permission-mode", "auto", "--permission-prompts", "none", brief(contest, task.id, worktree)]
+            "--permission-mode", "auto", "--permission-prompts", "none",
+            brief(contest, task.id, worktree, previous)]
 
 
 class Worker:
@@ -171,8 +187,10 @@ class Worker:
     def __init__(self, cmd: list[str], cwd: Path, log: Path):
         log.parent.mkdir(parents=True, exist_ok=True)
         self._log = log.open("w")
+        house = guard.contest_root(cwd)
+        env = {**os.environ, **({"HOUSE_DIR": str(house / ".house")} if house else {})}
         self.proc = subprocess.Popen(cmd, cwd=cwd, stdout=self._log, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, start_new_session=True)
+                                     stdin=subprocess.DEVNULL, start_new_session=True, env=env)
         self.pid = self.proc.pid
 
     def poll(self):
@@ -215,11 +233,19 @@ def _signal_round(contest: Path) -> None:
                 everyone.append(contest)
             inbox.process(everyone, s, scope=[contest])
             inbox.deadlines(contest, s)
-    except Exception:  # noqa: BLE001 — Signal trouble never stops the night
+    except Exception:  # noqa: BLE001, S110 — Signal trouble never stops the night
         pass
 
 
-def _write_report(contest: Path, rep: NightReport, started: datetime) -> Path:
+def _open_questions(house: Path) -> list[str]:
+    from . import questions
+    path = house / "QUESTIONS.md"
+    if not path.exists():
+        return []
+    return [f"{q.id} {q.title}" for q in questions.parse(path.read_text()) if q.status == "open"]
+
+
+def _write_report(contest: Path, rep: NightReport, started: datetime, tampering: list[str]) -> Path:
     house = contest / ".house"
     path = house / "reports" / f"night-{started:%Y-%m-%d-%H%M}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,12 +256,32 @@ def _write_report(contest: Path, rep: NightReport, started: datetime) -> Path:
     for a in rep.attempts:
         details = a.message.replace("\n", " ").replace("|", "/")[:300]
         lines.append(f"| {a.task} | {a.n} | {a.outcome} | {details} | `{a.log}` |")
+    questions = _open_questions(house)
+    lines += ["", "## Open questions", *([f"- {q}" for q in questions] or ["- none"])]
+    if tampering:
+        lines += ["", "## Tampering found (left uncommitted; house merge refuses it)", *[f"- {t}" for t in tampering]]
     path.write_text("\n".join(lines) + "\n")
     with (house / "PROGRESS.md").open("a") as f:
         f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · house · noc: {len(merged)} zadań scalonych, "
                 f"{len(rep.attempts) - len(merged)} nieudanych prób, koniec: {rep.stopped_because} · "
                 f"{path.relative_to(contest)}\n")
     return path
+
+
+def _after_failure(contest: Path, tid: str, n: int, outcome: str) -> None:
+    """Status after a failed attempt: 3rd failure → blocked; doing/review → todo; blocked (by the worker or a
+    reverted merge) stays blocked."""
+    house = contest / ".house"
+    task = checks.load_task(house, tid)
+    progress = house / "PROGRESS.md"
+    if n >= MAX_ATTEMPTS and task.meta.get("status") != "blocked":
+        _set(task, status="blocked")
+        with progress.open("a") as f:
+            f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · house · {tid} zablokowane po {n} nieudanych próbach "
+                    "w nocy\n")
+    elif task.meta.get("status") in ("doing", "review"):
+        _set(task, status="todo")
+    _commit_paths(contest, [task.path, progress], f"chore(house): night {tid} attempt {n} {outcome}")
 
 
 def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
@@ -251,7 +297,18 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
     rep = NightReport()
     running: dict[str, tuple] = {}  # task → (proc, start, worktree, log, attempt n, branch)
     attempts: dict[str, int] = {}
+    last_failure: dict[str, str] = {}
     consecutive, started_count = 0, 0
+
+    def failed(tid: str, n: int, attempt: Attempt) -> None:
+        nonlocal consecutive
+        rep.attempts.append(attempt)
+        attempts[tid] = n
+        last_failure[tid] = f"{attempt.outcome}: {attempt.message}"
+        if attempt.outcome != "blocked-by-worker":
+            consecutive += 1
+        _after_failure(contest, tid, n, attempt.outcome)
+
     try:
         while True:
             stopping = ""
@@ -267,14 +324,22 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
                     if max_tasks is not None and started_count >= max_tasks:
                         break
                     n = attempts.get(tid, 0) + 1
-                    wt = prepare_worktree(contest, tid)
-                    task = checks.load_task(house, tid)
-                    log = house / "tmp/night" / f"{started_at:%Y-%m-%d}" / f"{tid}-{n}.log"
-                    proc = launcher(worker_command(contest, task, wt, tools), wt, log)
-                    running[tid] = (proc, now(), wt, log, n, str(task.meta.get("branch")))
                     started_count += 1
-            if not running:
-                rep.stopped_because = stopping or "nothing ready"
+                    log = house / "tmp/night" / f"{started_at:%Y-%m-%d}" / f"{tid}-{started_at:%H%M%S}-{n}.log"
+                    try:
+                        wt = prepare_worktree(contest, tid)
+                        task = checks.load_task(house, tid)
+                        cmd = worker_command(contest, task, wt, tools, last_failure.get(tid))
+                        running[tid] = (launcher(cmd, wt, log), now(), wt, log, n, str(task.meta.get("branch")))
+                    except Exception as e:  # noqa: BLE001 — one broken task must not end the night
+                        failed(tid, n, Attempt(tid, n, "error", f"could not start: {e}", ""))
+            if not running and not rep.stopped_because:
+                rep.stopped_because = stopping or (
+                    f"{MAX_CONSECUTIVE_FAILURES} failed attempts in a row"
+                    if consecutive >= MAX_CONSECUTIVE_FAILURES else "nothing ready")
+                if not stopping and consecutive < MAX_CONSECUTIVE_FAILURES and pick_ready(house, set(), 1):
+                    rep.stopped_because = ""
+                    continue
                 break
             for tid in list(running):
                 proc, start, wt, log, n, branch = running[tid]
@@ -285,22 +350,16 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
                 if timed_out:
                     proc.kill()
                 del running[tid]
-                attempt = _finish(contest, tid, n, branch, wt, log, timed_out)
-                attempts[tid] = n
-                rep.attempts.append(attempt)
+                try:
+                    attempt = _finish(contest, tid, n, branch, wt, log, timed_out)
+                except Exception as e:  # noqa: BLE001
+                    attempt = Attempt(tid, n, "error", f"evaluating the attempt failed: {e!r}", str(log))
                 if attempt.outcome == "merged":
+                    rep.attempts.append(attempt)
+                    attempts[tid] = n
                     consecutive = 0
-                elif attempt.outcome != "blocked-by-worker":
-                    consecutive += 1
-                    task = checks.load_task(house, tid)
-                    if n >= MAX_ATTEMPTS:
-                        _set(task, status="blocked")
-                        with (house / "PROGRESS.md").open("a") as f:
-                            f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · house · {tid} zablokowane po {n} "
-                                    "nieudanych próbach w nocy\n")
-                    elif task.meta.get("status") in ("doing", "review", "blocked"):
-                        _set(task, status="todo")
-                    _commit_house(contest, f"chore(house): night {tid} attempt {n} {attempt.outcome}")
+                else:
+                    failed(tid, n, attempt)
                 if consecutive >= MAX_CONSECUTIVE_FAILURES:
                     rep.stopped_because = f"{MAX_CONSECUTIVE_FAILURES} failed attempts in a row"
                     break
@@ -311,36 +370,67 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
     except KeyboardInterrupt:
         rep.stopped_because = "interrupted"
     finally:
-        for proc, *_ in running.values():
+        for tid, (proc, _start, _wt, log, n, _branch) in list(running.items()):
             proc.kill()
+            rep.attempts.append(Attempt(tid, n, "interrupted", "session killed when the night ended", str(log)))
+            task = checks.load_task(house, tid)
+            if task.meta.get("status") in ("doing", "review"):
+                _set(task, status="todo")
+            _commit_paths(contest, [task.path], f"chore(house): night interrupted {tid}")
         rep.stopped_because = rep.stopped_because or "ended"
-        rep.report_path = _write_report(contest, rep, started_at)
-        _commit_house(contest, "chore(house): night report")
+        tampering = guard.frozen_tampering(contest)
+        rep.report_path = _write_report(contest, rep, started_at, tampering)
+        _commit_paths(contest, [rep.report_path, house / "PROGRESS.md"], "chore(house): night report")
         try:
             from . import notify
             merged = sum(a.outcome == "merged" for a in rep.attempts)
             notify.send(contest, f"🌙 noc: {merged} scalonych, {len(rep.attempts) - merged} nieudanych prób; "
                         f"koniec: {rep.stopped_because}. Raport: {rep.report_path.name}")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
     return rep
 
 
+def _restore_tampering(contest: Path, found: list[str]) -> None:
+    """Put back what only house may write: frozen criteria and hand-set merged/done statuses (from HEAD)."""
+    _git(contest, "checkout", "HEAD", "--", ".house/checks")
+    for path in sorted((contest / ".house/tasks").glob("T*-*.md")):
+        tid = path.name.split("-", 1)[0]
+        if any(line.startswith(f"{tid} set to") for line in found):
+            _git(contest, "checkout", "HEAD", "--", str(path.relative_to(contest)))
+
+
+def _commit_leftovers(wt: Path, tid: str, contest: Path) -> list[str]:
+    """Commit what the worker left uncommitted, except secrets, protected files and .house/ (those stay
+    uncommitted, so the gate refuses the branch). Returns the paths left out."""
+    protected = guard.protected_paths(contest)
+    keep, skipped = [], []
+    for _, rel in guard._status(wt):
+        risky = rel.startswith(".house/") or rel in protected or guard._secret_file(wt / rel)
+        (skipped if risky else keep).append(rel)
+    if keep:
+        _git(wt, "add", "-A", "--", *keep)
+        _git(wt, "commit", "-q", "-m", f"{tid}: uncommitted work at the end of the night session")
+    return skipped
+
+
 def _finish(contest: Path, tid: str, n: int, branch: str, wt: Path, log: Path, timed_out: bool) -> Attempt:
     house = contest / ".house"
-    rel_log = str(log.relative_to(contest))
+    rel_log = str(log.relative_to(contest)) if log.is_relative_to(contest) else str(log)
+    tampered = guard.frozen_tampering(contest)
+    if tampered:
+        _restore_tampering(contest, tampered)
+        return Attempt(tid, n, "tampered", "; ".join(tampered) + " (restored from HEAD)", rel_log)
     if timed_out:
         return Attempt(tid, n, "timeout", "worker session exceeded night.task_minutes and was killed", rel_log)
-    status = checks.load_task(house, tid).meta.get("status")
-    if status == "blocked":
+    task = checks.load_task(house, tid)
+    if task.meta.get("status") == "blocked":
         return Attempt(tid, n, "blocked-by-worker", "worker raised a question / blocked the task", rel_log)
+    _commit_leftovers(wt, tid, contest)
     if _ahead(contest, branch) == 0:
         return Attempt(tid, n, "no-commits", "worker finished without committing anything", rel_log)
-    if merge._porcelain_paths(wt):  # leftovers the worker did not commit: keep them on the branch
-        _git(wt, "add", "-A")
-        _git(wt, "commit", "-q", "-m", f"{tid}: uncommitted work at the end of the night session")
-    _set(checks.load_task(house, tid), status="review")
-    _commit_house(contest, f"chore(house): {tid} ready for review (night)")
+    _set(task, status="review")
+    _commit_paths(contest, [task.path], f"chore(house): {tid} ready for review (night)")
     try:
         out = merge.merge_task(contest, tid, wt)
     except Exception as e:  # noqa: BLE001

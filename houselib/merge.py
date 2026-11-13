@@ -151,6 +151,9 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None) -> Mer
                 red_after[tid] = _failures(after)
         already_red = _red_before(contest, house, [t for t in red_after if t != task_id])
         regressions = {t: why for t, why in red_after.items() if t not in already_red}
+    except KeyboardInterrupt:  # Ctrl+C during the re-checks: undo the merge, then stop
+        _rollback(contest, pre_head)
+        raise
     except Exception as e:  # noqa: BLE001 — whatever broke, main must not keep an unchecked merge
         err = _rollback(contest, pre_head)
         return MergeOutcome(False, status, f"checks crashed after merging ({e!r}); merge undone"

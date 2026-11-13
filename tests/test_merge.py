@@ -239,6 +239,24 @@ class MergeTest(unittest.TestCase):
         from houselib import adapters
         self.assertIn("house guard diff", adapters.CODEX_DRIVER)
 
+    def test_interrupt_after_merge_rolls_back(self):
+        from unittest import mock
+        self.calc_task()
+        head = git(self.c, "rev-parse", "HEAD").strip()
+        real = checks.run_checks
+        calls = {"n": 0}
+
+        def interrupt_on_main(house, tid, workdir, record=True):
+            calls["n"] += 1
+            if calls["n"] > 1:  # first call = the branch check; then main
+                raise KeyboardInterrupt
+            return real(house, tid, workdir, record)
+        with mock.patch.object(checks, "run_checks", side_effect=interrupt_on_main), \
+                self.assertRaises(KeyboardInterrupt):
+            merge.merge_task(self.c, "T001")
+        self.assertFalse((self.c / "calc.py").exists())
+        self.assertEqual(git(self.c, "diff", "--stat", head, "HEAD", "--", ".", ":!.house").strip(), "")
+
     def test_cli_exit_codes(self):
         import io
         from contextlib import redirect_stdout

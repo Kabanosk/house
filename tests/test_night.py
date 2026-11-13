@@ -189,8 +189,9 @@ class LoopTest(Base):
             self.add(t)
         bad = commit_file("hello.py", "raise SystemExit(1)\n")
         rep = self.run_night({t: [bad, bad, bad] for t in ("T001", "T002", "T003")})
-        self.assertEqual(len(rep.attempts), 5)
+        self.assertEqual(len([a for a in rep.attempts if a.outcome != "interrupted"]), 5)
         self.assertIn("5 failed", rep.stopped_because)
+        self.assertTrue(all(self.status(t) in ("todo", "blocked") for t in ("T001", "T002", "T003")))
 
     def test_stop_file(self):
         self.add("T001")
@@ -198,6 +199,114 @@ class LoopTest(Base):
         rep = self.run_night({"T001": [commit_file("hello.py", "X = 1\n")]})
         self.assertEqual(rep.attempts, [])
         self.assertIn("STOP", rep.stopped_because)
+
+
+def tamper_frozen(cwd):
+    import json as _json
+    contest = cwd.parents[1]
+    cf = contest / ".house/checks/T001.json"
+    data = _json.loads(cf.read_text())
+    data["frozen"]["criteria"][0]["run"] = "true"
+    cf.write_text(_json.dumps(data))
+    tf = contest / ".house/tasks/T001-x.md"
+    tf.write_text(tf.read_text().replace("python3 -c 'import hello'", "true"))
+    commit_file("junk.txt", "x")(cwd)
+
+
+def set_done(cwd):
+    tf = cwd.parents[1] / ".house/tasks/T001-x.md"
+    tf.write_text(tf.read_text().replace("status: doing", "status: done"))
+
+
+def secret_then_delete(cwd):
+    (cwd / "creds.txt").write_text('API_KEY = "sk-abcdefghijklmnopqrstuvwxyz0123"\n')
+    git(cwd, "add", "-A")
+    git(cwd, "commit", "-q", "-m", "creds")
+    (cwd / "creds.txt").unlink()
+    (cwd / "hello.py").write_text("X = 1\n")
+    git(cwd, "add", "-A")
+    git(cwd, "commit", "-q", "-m", "remove creds")
+
+
+def uncommitted_work(cwd):
+    (cwd / "hello.py").write_text("X = 1\n")
+
+
+class SafetyTest(LoopTest):
+    def test_worker_tampering_is_not_merged(self):
+        self.add("T001")
+        rep = self.run_night({"T001": [tamper_frozen, None, None]})
+        self.assertEqual(rep.attempts[0].outcome, "tampered")
+        self.assertNotEqual(self.status("T001"), "done")
+        frozen = json.loads((self.house / "checks/T001.json").read_text())["frozen"]["criteria"][0]["run"]
+        self.assertEqual(frozen, "python3 -c 'import hello'")
+
+    def test_worker_cannot_mark_done(self):
+        self.add("T001")
+        self.add("T002", deps="[T001]")
+        rep = self.run_night({"T001": [set_done, None, None], "T002": []})
+        self.assertNotEqual(self.status("T001"), "done")
+        self.assertNotIn("T002", [a.task for a in rep.attempts])
+
+    def test_secret_in_branch_history_refused(self):
+        self.add("T001")
+        rep = self.run_night({"T001": [secret_then_delete, None, None]})
+        self.assertNotEqual(rep.attempts[0].outcome, "merged")
+        self.assertIn("creds.txt", rep.attempts[0].message)
+
+    def test_git_error_does_not_end_the_night(self):
+        from unittest import mock
+        self.add("T001")
+        self.add("T002")
+        real = night.prepare_worktree
+
+        def flaky(contest, tid):
+            if tid == "T001":
+                raise RuntimeError("git worktree add failed")
+            return real(contest, tid)
+        with mock.patch.object(night, "prepare_worktree", side_effect=flaky):
+            rep = self.run_night({"T001": [], "T002": [commit_file("hello.py", "X = 1\n")]})
+        self.assertIn(("T001", "error"), [(a.task, a.outcome) for a in rep.attempts])
+        self.assertIn(("T002", "merged"), [(a.task, a.outcome) for a in rep.attempts])
+
+    def test_interrupt_resets_running_tasks(self):
+        self.add("T001")
+
+        def launch(cmd, cwd, log):
+            proc = FakeProc("hang", cwd)
+            proc.poll = lambda: (_ for _ in ()).throw(KeyboardInterrupt())
+            return proc
+        rep = night.run_night(self.c, hours=1, launcher=launch, sleep=lambda s: None)
+        self.assertEqual(rep.stopped_because, "interrupted")
+        self.assertEqual(self.status("T001"), "todo")
+        self.assertEqual([a.outcome for a in rep.attempts], ["interrupted"])
+        self.assertIsNotNone(rep.report_path)
+
+    def test_reverted_task_is_not_retried(self):
+        self.add("T001", run="python3 -c 'import hello; assert hello.X == 1'")
+        self.assertEqual([a.outcome for a in self.run_night({"T001": [commit_file("hello.py", "X = 1\n")]}).attempts],
+                         ["merged"])
+        self.add("T002", run="true")
+        rep = self.run_night({"T002": [commit_file("hello.py", "X = 2\n"), None, None]})
+        self.assertEqual([a.outcome for a in rep.attempts], ["reverted"])
+        self.assertEqual(self.status("T002"), "blocked")
+
+    def test_uncommitted_work_is_committed_and_merged(self):
+        self.add("T001")
+        rep = self.run_night({"T001": [uncommitted_work]})
+        self.assertEqual([a.outcome for a in rep.attempts], ["merged"])
+
+    def test_retry_brief_carries_previous_failure(self):
+        self.add("T001")
+        briefs = []
+
+        def launch(cmd, cwd, log):
+            briefs.append(cmd[-1])
+            return FakeProc(commit_file("hello.py", "raise SystemExit(1)\n"), cwd)
+        night.run_night(self.c, hours=1, launcher=launch, sleep=lambda s: None, max_tasks=2)
+        self.assertNotIn("Previous attempt", briefs[0])
+        self.assertIn("Previous attempt", briefs[1])
+        self.assertIn("AC-1", briefs[1])
 
 
 if __name__ == "__main__":
