@@ -1,4 +1,17 @@
-"""`house` command line."""
+"""`house` command line.
+
+Used by: the owner and every agent role through `bin/house <command>`. Commands: doctor, check, merge, guard,
+notify, ask, inbox, deadlines, night, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
+name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
+
+Rules an agent should know:
+- Task status flow: todo → doing → review → merged → done, or blocked. Coders set `review`; only `house merge`
+  sets `merged`/`done`. Acceptance criteria are frozen (`house check --freeze`) and only changed through
+  `--refreeze --reason`.
+- Exit codes: 0 success, 1 failure or refusal (RED check, refused merge, guard violations, preflight problems,
+  not a house contest, any ValueError/RuntimeError/OSError reported as `error: ...` on stderr), 2 usage error
+  (also argparse's own). `cmd_*` docstrings give the exact codes per command.
+"""
 import argparse
 import sys
 from pathlib import Path
@@ -25,11 +38,31 @@ from . import (
 
 
 def contest_dir(name: str) -> Path:
+    """Resolve a contest name to its directory.
+
+    Args:
+        name: Contest name, lowercase words/numbers separated by single hyphens.
+
+    Returns:
+        `<house root>/contests/<name>`.
+
+    Raises:
+        ValueError: The name is not valid (e.g. contains "..", "/" or uppercase letters).
+    """
     scaffold.validate_name(name)  # raises ValueError: never resolve "..", "/x", etc.
     return HOUSE_ROOT / "contests" / name
 
 
 def cmd_doctor(args) -> int:
+    """Implement `house doctor [name] [--context]`: detect tools; with a contest name also write `.house/tools.json`.
+
+    Args:
+        args: Parsed arguments: `name` (contest name or None) and `context` (bool, needs `name`).
+
+    Returns:
+        0 on success; 1 for `--context` without a name, or when `name` is not a house contest. Also prints Signal
+        status, alias collisions among running contests, and drift of generated files.
+    """
     if args.context and not args.name:
         print("error: --context needs a contest name (house doctor --context <name>)", file=sys.stderr)
         return 1
@@ -56,6 +89,7 @@ def cmd_doctor(args) -> int:
 
 
 def _print_report(rep: checks.CheckReport) -> None:
+    """Print one line per criterion (PASS, FAIL with the last output lines, MANUAL) and init/freeze problems."""
     for r in rep.results:
         if rep.kinds[r.id] == "manual":
             print(f"MANUAL {r.id} {'ok' if r.passes else 'pending'}")
@@ -73,6 +107,20 @@ def _print_report(rep: checks.CheckReport) -> None:
 
 
 def cmd_check(args) -> int:
+    """Implement `house check <name> [T###] [--worktree DIR] [--all] [--freeze | --refreeze --reason R |
+    --manual AC-n --evidence E]`.
+
+    Args:
+        args: Parsed arguments: `name`, `task`, `worktree`, `all`, `freeze`, `refreeze`, `manual`, `reason`,
+            `evidence`. Plain form runs the frozen criteria (in `--worktree`, default the contest checkout).
+            `--all` re-checks every merged/done task in the contest checkout.
+
+    Returns:
+        0 GREEN, or the freeze/refreeze/manual action succeeded; 1 RED (any criterion, init.sh or changed
+        criteria) or the directory is not a house contest; 2 usage error (no task id and no `--all`;
+        `--refreeze` without `--reason`; `--manual` without `--evidence`). Errors such as a missing or already
+        frozen task are raised and reported by `main` with exit code 1.
+    """
     target = contest_dir(args.name)
     house = target / ".house"
     if not house.is_dir():
@@ -113,6 +161,15 @@ def cmd_check(args) -> int:
 
 
 def cmd_merge(args) -> int:
+    """Implement `house merge <name> T### [--worktree DIR]`: run the merge gate for a task in `review`.
+
+    Args:
+        args: Parsed arguments: `name`, `task` and `worktree` (default `.worktrees/<branch without task/>`).
+
+    Returns:
+        0 when merged (the message names the final status, `merged` or `done`); 1 when refused or reverted; the
+        message explains why.
+    """
     target = contest_dir(args.name)
     out = merge.merge_task(target, args.task, Path(args.worktree).resolve() if args.worktree else None)
     print(out.message)
@@ -120,6 +177,15 @@ def cmd_merge(args) -> int:
 
 
 def cmd_guard(args) -> int:
+    """Implement `house guard diff <name> T### [--worktree DIR]`: check a task branch against the guard rules.
+
+    Args:
+        args: Parsed arguments: `action` (only "diff"), `name`, `task`, `worktree` (default
+            `.worktrees/<branch without task/>`).
+
+    Returns:
+        0 when CLEAN; 1 when violations were printed as `VIOLATION ...`; 2 when the worktree does not exist.
+    """
     target = contest_dir(args.name)
     house = target / ".house"
     task = checks.load_task(house, args.task)
@@ -136,6 +202,14 @@ def cmd_guard(args) -> int:
 
 
 def cmd_notify(args) -> int:
+    """Implement `house notify <name> <text...>`: send a message to the owner and the contest's Signal group.
+
+    Args:
+        args: Parsed arguments: `name` and `text` (list of words, joined with spaces).
+
+    Returns:
+        0 always, also when Signal is not configured (then "nothing sent" is printed).
+    """
     target = contest_dir(args.name)
     sent, warnings = notify.send(target, " ".join(args.text))
     for w in warnings:
@@ -145,6 +219,15 @@ def cmd_notify(args) -> int:
 
 
 def cmd_ask(args) -> int:
+    """Implement `house ask <name> [Q-###]`: send open questions from `.house/QUESTIONS.md` to Signal.
+
+    Args:
+        args: Parsed arguments: `name` and `question`. With an id that question is (re)sent; without one all new
+            open questions are sent.
+
+    Returns:
+        0 on success (including nothing to send); 1 when the given question id is not in QUESTIONS.md.
+    """
     target = contest_dir(args.name)
     if args.question:
         text = (target / ".house/QUESTIONS.md").read_text()
@@ -160,11 +243,20 @@ def cmd_ask(args) -> int:
 
 
 def _all_contests() -> list[Path]:
+    """List contests registered in contests.yaml that exist locally and have a `.house/` directory."""
     names = registry.load(HOUSE_ROOT / "contests.yaml")
     return [HOUSE_ROOT / "contests" / n for n in names if (HOUSE_ROOT / "contests" / n / ".house").is_dir()]
 
 
 def cmd_inbox(args) -> int:
+    """Implement `house inbox [name]`: read Signal quote-replies into QUESTIONS.md / DECISIONS.md.
+
+    Args:
+        args: Parsed arguments: `name`, a single contest to process; None means every running contest.
+
+    Returns:
+        0 always; prints what was applied, or "no new answers".
+    """
     from .signal import from_config
     everyone = _all_contests()
     scope = [contest_dir(args.name)] if args.name else None
@@ -176,6 +268,14 @@ def cmd_inbox(args) -> int:
 
 
 def cmd_deadlines(args) -> int:
+    """Implement `house deadlines [name]`: remind about, or apply defaults of, critical questions past their deadline.
+
+    Args:
+        args: Parsed arguments: `name`, one contest; None means every running contest.
+
+    Returns:
+        0 always; prints what was done, or "nothing due".
+    """
     from .signal import from_config
     sig = from_config()
     contests = [contest_dir(args.name)] if args.name else inbox.running(_all_contests())
@@ -186,6 +286,16 @@ def cmd_deadlines(args) -> int:
 
 
 def cmd_night(args) -> int:
+    """Implement `house night <name> [--hours H] [--max-tasks N] [--dry-run]`: unattended run over ready tasks.
+
+    Args:
+        args: Parsed arguments: `name`, `hours` (float, default 8), `max_tasks` (int or None), `dry_run`
+            (preflight and list ready tasks only).
+
+    Returns:
+        0 when the night ran (or the dry run passed); 1 when preflight found problems (nothing started, the
+        owner is notified on Signal).
+    """
     target = contest_dir(args.name)
     problems, warnings = night.preflight(target, args.hours)
     for w in warnings:
@@ -208,6 +318,14 @@ def cmd_night(args) -> int:
 
 
 def cmd_new(args) -> int:
+    """Implement `house new <name> [--repo URL]`: scaffold a contest repo in `contests/<name>`.
+
+    Args:
+        args: Parsed arguments: `name` and `repo` (git URL to clone instead of `git init`, or None).
+
+    Returns:
+        0 when created; 1 on an invalid name, an existing contest or a git failure.
+    """
     try:
         path = scaffold.new_contest(args.name, args.repo)
     except (ValueError, FileExistsError, RuntimeError) as e:
@@ -219,6 +337,14 @@ def cmd_new(args) -> int:
 
 
 def cmd_adapt(args) -> int:
+    """Implement `house adapt <name>`: generate the Claude Code and Codex files for a contest.
+
+    Args:
+        args: Parsed arguments: `name`.
+
+    Returns:
+        0 on success; 1 when the contest has no `.house/` (run `house new`/`house adopt` first).
+    """
     target = contest_dir(args.name)
     if not (target / ".house").is_dir():
         print(f"error: {target} is not a house contest (run: bin/house new {args.name})", file=sys.stderr)
@@ -232,6 +358,14 @@ def cmd_adapt(args) -> int:
 
 
 def cmd_sync(args) -> int:
+    """Implement `house sync`: clone contests listed in contests.yaml that are missing locally.
+
+    Args:
+        args: Parsed arguments (none used).
+
+    Returns:
+        0 always; contests without a URL are reported as local only.
+    """
     entries = registry.load(HOUSE_ROOT / "contests.yaml")
     for name in registry.sync(HOUSE_ROOT):
         print(f"cloned {name}")
@@ -242,6 +376,15 @@ def cmd_sync(args) -> int:
 
 
 def cmd_export(args) -> int:
+    """Implement `house export <name> <dest> [--force]`: write a clean public copy of a contest.
+
+    Args:
+        args: Parsed arguments: `name`, `dest` (empty or missing directory) and `force` (export even when the
+            secret scan has hits).
+
+    Returns:
+        0 when exported; 1 when the contest is not a repo, `dest` is not empty, or the secret scan blocked it.
+    """
     target = contest_dir(args.name)
     if not (target / ".git").exists():
         print(f"error: {target} is not a contest repo", file=sys.stderr)
@@ -262,6 +405,15 @@ def cmd_export(args) -> int:
 
 
 def cmd_yc(args) -> int:
+    """Implement `house yc <query...> [--limit N]`: search the Y Combinator company directory.
+
+    Args:
+        args: Parsed arguments: `query` (list of words) and `limit` (default 15).
+
+    Returns:
+        0 always; prints matching companies, or "no YC companies match". Network failures with no cache are
+        reported by `main` with exit code 1.
+    """
     hits = yc.search(yc.load(), " ".join(args.query), limit=args.limit)
     if not hits:
         print("no YC companies match")
@@ -271,6 +423,14 @@ def cmd_yc(args) -> int:
 
 
 def cmd_setup(args) -> int:
+    """Implement `house setup`: install user-level skills, fetch the Remotion skill, check tools, print next steps.
+
+    Args:
+        args: Parsed arguments (none used).
+
+    Returns:
+        0 always; missing tools and offline skips are reported as hints.
+    """
     for name in setup.install_user_skills():
         print(f"✓ skill {name} → ~/.claude/skills/{name}")
     remotion = setup.fetch_remotion_skill()
@@ -296,6 +456,14 @@ def cmd_setup(args) -> int:
 
 
 def cmd_adopt(args) -> int:
+    """Implement `house adopt <name> <path>`: attach an existing repo as a contest (symlink, adds `.house/`).
+
+    Args:
+        args: Parsed arguments: `name` and `path` (root of an existing git repository). Nothing is committed.
+
+    Returns:
+        0 when adopted; invalid names, non-repos and existing links raise and `main` reports them with exit code 1.
+    """
     link = scaffold.adopt(args.name, Path(args.path))
     print(f"adopted {link.resolve()} as {link}")
     print("added .house/ (nothing committed). Choose the branch, then:")
@@ -305,6 +473,11 @@ def cmd_adopt(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser with one subcommand per `cmd_*` function.
+
+    Returns:
+        The `argparse.ArgumentParser` for `house`; each subparser sets `func` to its handler.
+    """
     p = argparse.ArgumentParser(prog="house", description="AI Software House toolkit")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -399,6 +572,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    """Run the `house` command line.
+
+    Args:
+        argv: Arguments without the program name, e.g. `["check", "my-contest", "T001"]`.
+
+    Returns:
+        The exit code of the command. ValueError, RuntimeError and OSError from a command are printed as
+        `error: ...` on stderr and give 1; invalid arguments exit with 2 via argparse.
+    """
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

@@ -2,6 +2,22 @@
 
 preflight → (pick ready tasks → fresh session in the task worktree → `house merge` gate)* → morning report.
 The dispatcher never writes code; workers never wait for a human (questions go to Signal, the task is blocked).
+
+Used by: `house night <contest> [--hours H] [--max-tasks N] [--dry-run]` (see `cli.cmd_night`), run by the owner
+or a scheduler. Workers are `claude -p --agent coder` sessions (or `bin/codex-task` for `coder-codex` tasks).
+
+Rules an agent should know:
+- Task status flow is todo → doing → review → merged → done, or blocked. Night picks `todo` tasks whose
+  `depends_on` are all merged/done, sets `doing`, and after a worker run sets `review` and calls `house merge`.
+- A worker must finish when `house check <contest> T### --worktree <wt>` prints GREEN, commit on the task branch
+  and set `status: review`. A decision only a human can take: write a Q-### (protocols/questions.md), set
+  `status: blocked`, stop. Never wait for input: stdin is /dev/null.
+- Frozen criteria (`.house/checks/T###.json`) and `merged`/`done` statuses are written by house only. Tampering
+  is restored from HEAD, the attempt counts as failed and the report lists it.
+- A task is blocked after MAX_ATTEMPTS failed attempts; the night stops after MAX_CONSECUTIVE_FAILURES failures
+  in a row, on `.house/STOP`, at the time limit, at `--max-tasks`, or when nothing is ready.
+- Only the merge gate (`merge.merge_task`) puts work on the main line; night never merges by itself.
+- Night commits only files it wrote itself (task file, PROGRESS.md, report), never all of `.house/`.
 """
 import json
 import os
@@ -26,6 +42,16 @@ POLL_SECONDS = 5
 
 @dataclass
 class Attempt:
+    """One worker run on one task and how it ended.
+
+    Attributes:
+        task: Task id, e.g. "T001".
+        n: Attempt number for this task within the night run, starting at 1.
+        outcome: One of "merged", "merge-refused", "reverted", "no-commits", "timeout", "blocked-by-worker",
+            "tampered", "interrupted", "error".
+        message: Human-readable details (the merge message, the tampering list, the error text).
+        log: Path of the worker's log, relative to the contest when possible; "" if no worker was started.
+    """
     task: str
     n: int
     outcome: str  # merged | merge-refused | reverted | no-commits | timeout | blocked-by-worker | error
@@ -35,20 +61,30 @@ class Attempt:
 
 @dataclass
 class NightReport:
+    """Result of `run_night`.
+
+    Attributes:
+        attempts: Every attempt in order, merged and failed.
+        stopped_because: Why the night ended, e.g. "STOP file", "time limit", "nothing ready", "interrupted".
+        report_path: The written `.house/reports/night-<date>.md`, or None before it is written.
+    """
     attempts: list[Attempt] = field(default_factory=list)
     stopped_because: str = ""
     report_path: Path | None = None
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run `git <args>` in cwd and return the CompletedProcess (text mode, never raises on a non-zero exit)."""
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
 def _spec(contest: Path) -> dict:
+    """Load the contest's `.house/spec.yaml` as a dict."""
     return specmod.load_spec(contest / ".house")
 
 
 def _tools(contest: Path) -> dict:
+    """Read `.house/tools.json` (written by `house doctor`); {} when missing or unreadable."""
     try:
         return json.loads((contest / ".house/tools.json").read_text())
     except (OSError, ValueError):
@@ -56,6 +92,7 @@ def _tools(contest: Path) -> dict:
 
 
 def _commit_house(contest: Path, message: str) -> None:
+    """Commit all pending changes under `.house/` with the given message, if there are any."""
     _git(contest, "add", "-A", "--", ".house")
     if _git(contest, "diff", "--cached", "--quiet", "--", ".house").returncode != 0:
         _git(contest, "commit", "-q", "-m", message, "--", ".house")
@@ -65,7 +102,22 @@ def _commit_house(contest: Path, message: str) -> None:
 
 def preflight(contest: Path, hours: float, now: datetime | None = None, run=subprocess.run,
               disk_free=shutil.disk_usage) -> tuple[list[str], list[str]]:
-    """(problems that stop the night, warnings)."""
+    """Check that an unattended night run can start.
+
+    Args:
+        contest: Path of the contest checkout (the directory that holds `.house/`).
+        hours: Planned length of the run in hours; the Claude login must stay valid that long.
+        now: Start time used to compute the end of the run; defaults to the current UTC time.
+        run: Callable with the signature of `subprocess.run`, used to call `claude auth status` and
+            `codex login status`; replace in tests.
+        disk_free: Callable with the signature of `shutil.disk_usage`, called with the contest path.
+
+    Returns:
+        A pair `(problems, warnings)` of message lists. Any problem means the night must not start: STOP file
+        present, uncommitted changes outside `.house/`, missing `.claude/settings.local.json`, a merged/done task
+        that is red on main, less than MIN_FREE_GB free, Claude not logged in or its login expiring before the end.
+        Warnings do not stop the run (low disk, Codex not logged in).
+    """
     house = contest / ".house"
     problems, warnings = [], []
     if (house / "STOP").exists():
@@ -108,6 +160,7 @@ def preflight(contest: Path, hours: float, now: datetime | None = None, run=subp
 # --- tasks and workers -------------------------------------------------------------------------------------
 
 def _tasks(house: Path) -> dict[str, dict]:
+    """Map task id (e.g. "T001") to the frontmatter of every parseable `.house/tasks/T*-*.md`."""
     out = {}
     for path in sorted((house / "tasks").glob("T*-*.md")):
         try:
@@ -118,6 +171,16 @@ def _tasks(house: Path) -> dict[str, dict]:
 
 
 def pick_ready(house: Path, running: set[str], limit: int) -> list[str]:
+    """Choose tasks a worker can start now.
+
+    Args:
+        house: Path of the contest's `.house/` directory.
+        running: Task ids that already have a live worker; they are skipped.
+        limit: Maximum number of ids to return; zero or negative returns none.
+
+    Returns:
+        Task ids, in file order, whose status is `todo` and whose `depends_on` tasks are all `merged` or `done`.
+    """
     tasks = _tasks(house)
     finished = {t for t, m in tasks.items() if m.get("status") in ("merged", "done")}
     ready = [t for t, m in tasks.items() if m.get("status") == "todo" and t not in running
@@ -126,6 +189,7 @@ def pick_ready(house: Path, running: set[str], limit: int) -> list[str]:
 
 
 def _set(task: checks.Task, **fields) -> None:
+    """Set frontmatter keys of the task file in place (other lines stay byte-identical)."""
     task.path.write_text(set_fields(task.path.read_text(), fields))
 
 
@@ -141,6 +205,21 @@ def _commit_paths(contest: Path, paths: list[Path], message: str) -> None:
 
 
 def prepare_worktree(contest: Path, task_id: str) -> Path:
+    """Create (or reuse) the task's git worktree and mark the task `doing`.
+
+    Args:
+        contest: Path of the contest checkout.
+        task_id: Task id, e.g. "T001".
+
+    Returns:
+        The worktree path, `<contest>/.worktrees/<branch without task/>`. The branch is the task's `branch`
+        field, else `task/<id>-<slug>`; it is created when it does not exist yet. The task file gets
+        `status: doing`, `owner` (its `agent`, default "coder") and `branch`, and is committed on its own.
+
+    Raises:
+        RuntimeError: `git worktree add` failed.
+        FileNotFoundError: The task file does not exist.
+    """
     house = contest / ".house"
     task = checks.load_task(house, task_id)
     slug = task.path.stem.split("-", 1)[1] if "-" in task.path.stem else task_id.lower()
@@ -158,6 +237,19 @@ def prepare_worktree(contest: Path, task_id: str) -> Path:
 
 
 def brief(contest: Path, task_id: str, worktree: Path, previous: str | None = None) -> str:
+    """Build the prompt for a worker session.
+
+    Args:
+        contest: Path of the contest checkout.
+        task_id: Task id, e.g. "T001".
+        worktree: The task worktree the worker runs in.
+        previous: Outcome text of the last failed attempt, if any; the first 600 characters are added so the worker
+            fixes that first.
+
+    Returns:
+        The brief: which task file to implement, the HOUSE_DIR, the GREEN condition (`house check ... --worktree`),
+        the `status: review` hand-off, and the rule to raise a Q-### and block instead of waiting for a human.
+    """
     task = checks.load_task(contest / ".house", task_id)
     text = (f"You are working unattended on contest `{contest.name}` (house night). Implement exactly one task: "
             f"{task.path} . HOUSE_DIR={contest / '.house'} . Your worktree: {worktree} . "
@@ -172,6 +264,20 @@ def brief(contest: Path, task_id: str, worktree: Path, previous: str | None = No
 
 def worker_command(contest: Path, task: checks.Task, worktree: Path, tools: dict,
                    previous: str | None = None) -> list[str]:
+    """Build the command line of a worker session.
+
+    Args:
+        contest: Path of the contest checkout (its `spec.yaml` supplies `night.model`, default "sonnet").
+        task: The loaded task (`checks.load_task`).
+        worktree: The task worktree; passed to `bin/codex-task` or named in the brief.
+        tools: Contents of `.house/tools.json`; a truthy `codex` entry enables Codex workers.
+        previous: Outcome text of the last failed attempt, forwarded to `brief`.
+
+    Returns:
+        `[bin/codex-task, <task file>, <worktree>]` for a `coder-codex` task when Codex is available, otherwise
+        `claude -p --agent coder --model <model> ... <brief>` with the contest's local settings, auto permission mode
+        and no permission prompts.
+    """
     if task.meta.get("agent") == "coder-codex" and tools.get("codex"):
         return [str(HOUSE_ROOT / "bin/codex-task"), str(task.path), str(worktree)]
     model = specmod.get(_spec(contest), "night.model") or "sonnet"
@@ -182,9 +288,22 @@ def worker_command(contest: Path, task: checks.Task, worktree: Path, tools: dict
 
 
 class Worker:
-    """A worker session in its own process group (so a timeout kills everything it started)."""
+    """A worker session in its own process group (so a timeout kills everything it started).
+
+    Attributes:
+        proc: The underlying `subprocess.Popen`.
+        pid: Process id (also the process group id).
+    """
 
     def __init__(self, cmd: list[str], cwd: Path, log: Path):
+        """Start the worker process.
+
+        Args:
+            cmd: Command line to execute.
+            cwd: Working directory (the task worktree). `HOUSE_DIR` is set to the contest's `.house/` when the
+                contest can be found from it.
+            log: File that receives stdout and stderr (overwritten; parent directories are created). stdin is /dev/null.
+        """
         log.parent.mkdir(parents=True, exist_ok=True)
         self._log = log.open("w")
         house = guard.contest_root(cwd)
@@ -194,15 +313,32 @@ class Worker:
         self.pid = self.proc.pid
 
     def poll(self):
+        """Check whether the worker has finished.
+
+        Returns:
+            The exit code, or None while it is still running. The log file is closed once it has finished.
+        """
         code = self.proc.poll()
         if code is not None:
             self._log.close()
         return code
 
     def wait(self, timeout=None):
+        """Block until the worker finishes.
+
+        Args:
+            timeout: Seconds to wait; None waits forever.
+
+        Returns:
+            The exit code.
+
+        Raises:
+            subprocess.TimeoutExpired: The worker is still running after `timeout` seconds.
+        """
         return self.proc.wait(timeout)
 
     def kill(self):
+        """Kill the worker's whole process group with SIGKILL, reap it and close the log."""
         try:
             os.killpg(self.proc.pid, sig_mod.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -212,17 +348,20 @@ class Worker:
 
 
 def _launch(cmd: list[str], cwd: Path, log: Path) -> Worker:
+    """Start a `Worker`; the default launcher of `run_night` (tests pass a fake one)."""
     return Worker(cmd, cwd, log)
 
 
 # --- the loop ----------------------------------------------------------------------------------------------
 
 def _ahead(contest: Path, branch: str) -> int:
+    """Count commits on `branch` that main (HEAD) does not have yet; 0 when git fails."""
     r = _git(contest, "rev-list", "--count", f"HEAD..{branch}")
     return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
 
 
 def _signal_round(contest: Path) -> None:
+    """Process Signal answers and question deadlines for this contest; any error is swallowed."""
     try:
         from . import inbox
         from .signal import from_config
@@ -238,6 +377,7 @@ def _signal_round(contest: Path) -> None:
 
 
 def _open_questions(house: Path) -> list[str]:
+    """List `<id> <title>` of open questions in `.house/QUESTIONS.md`."""
     from . import questions
     path = house / "QUESTIONS.md"
     if not path.exists():
@@ -246,6 +386,17 @@ def _open_questions(house: Path) -> list[str]:
 
 
 def _write_report(contest: Path, rep: NightReport, started: datetime, tampering: list[str]) -> Path:
+    """Write the morning report `.house/reports/night-<date>.md` and append a line to `.house/PROGRESS.md`.
+
+    Args:
+        contest: Path of the contest checkout.
+        rep: The finished night report.
+        started: Start time of the run (used in the file name).
+        tampering: Tampering messages to list in the report.
+
+    Returns:
+        The path of the report file.
+    """
     house = contest / ".house"
     path = house / "reports" / f"night-{started:%Y-%m-%d-%H%M}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +438,24 @@ def _after_failure(contest: Path, tid: str, n: int, outcome: str) -> None:
 def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
               launcher: Callable | None = None, now: Callable = time.monotonic,
               sleep: Callable = time.sleep) -> NightReport:
+    """Run the unattended loop: start workers, gate their results through `house merge`, write the morning report.
+
+    Args:
+        contest: Path of the contest checkout.
+        hours: Time limit of the whole run in hours (default 8). No new task is started after it.
+        max_tasks: Stop after starting this many attempts; None means no limit.
+        launcher: Callable `(cmd, cwd, log) -> worker` that starts a worker; defaults to `_launch` (a real process).
+            The worker needs `poll()` and `kill()`. Replace in tests.
+        now: Monotonic clock in seconds; replace in tests.
+        sleep: Sleep function used between polls (POLL_SECONDS); replace in tests.
+
+    Returns:
+        A `NightReport`. Parallelism is `limits.max_parallel_agents` (default 3), the per-task limit is
+        `night.task_minutes` (default 45). After MAX_ATTEMPTS failures a task becomes `blocked`; the run stops after
+        MAX_CONSECUTIVE_FAILURES failed attempts in a row (a worker that blocks its task does not count). On exit,
+        surviving workers are killed, their tasks go back to `todo`, the report is written and committed, and a
+        Signal message is sent (errors there are ignored). Ctrl+C ends the run cleanly with "interrupted".
+    """
     launcher = launcher or _launch
     house = contest / ".house"
     spec = _spec(contest)
@@ -392,7 +561,12 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
 
 
 def _restore_tampering(contest: Path, found: list[str]) -> None:
-    """Put back what only house may write: frozen criteria and hand-set merged/done statuses (from HEAD)."""
+    """Restore what only house may write from HEAD: frozen criteria and hand-set merged/done statuses.
+
+    Args:
+        contest: Path of the contest checkout.
+        found: Messages from `guard.frozen_tampering`; task files named in "T### set to ..." messages are restored.
+    """
     _git(contest, "checkout", "HEAD", "--", ".house/checks")
     for path in sorted((contest / ".house/tasks").glob("T*-*.md")):
         tid = path.name.split("-", 1)[0]
@@ -401,8 +575,17 @@ def _restore_tampering(contest: Path, found: list[str]) -> None:
 
 
 def _commit_leftovers(wt: Path, tid: str, contest: Path) -> list[str]:
-    """Commit what the worker left uncommitted, except secrets, protected files and .house/ (those stay
-    uncommitted, so the gate refuses the branch). Returns the paths left out."""
+    """Commit what the worker left uncommitted, except secrets, protected files and `.house/` (they stay uncommitted,
+    so the gate refuses the branch).
+
+    Args:
+        wt: The task worktree.
+        tid: Task id, used in the commit message.
+        contest: Path of the contest checkout (source of the protected-paths list).
+
+    Returns:
+        The paths that were left out.
+    """
     protected = guard.protected_paths(contest)
     keep, skipped = [], []
     for _, rel in guard._status(wt):
@@ -415,6 +598,22 @@ def _commit_leftovers(wt: Path, tid: str, contest: Path) -> list[str]:
 
 
 def _finish(contest: Path, tid: str, n: int, branch: str, wt: Path, log: Path, timed_out: bool) -> Attempt:
+    """Evaluate a finished (or timed-out) worker and run the merge gate.
+
+    Args:
+        contest: Path of the contest checkout.
+        tid: Task id.
+        n: Attempt number.
+        branch: Task branch name.
+        wt: The task worktree.
+        log: The worker's log file.
+        timed_out: True when the worker was killed for exceeding the time limit.
+
+    Returns:
+        An `Attempt`: "tampered" (restored from HEAD), "timeout", "blocked-by-worker", "no-commits", "error",
+        "reverted" or "merge-refused" (from `merge.merge_task`), or "merged". Otherwise the task is set to `review`
+        and merged through `merge.merge_task`.
+    """
     house = contest / ".house"
     rel_log = str(log.relative_to(contest)) if log.is_relative_to(contest) else str(log)
     tampered = guard.frozen_tampering(contest)

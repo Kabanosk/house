@@ -1,4 +1,9 @@
-"""Search the Y Combinator company directory (unofficial daily snapshot by yc-oss, from YC's own index)."""
+"""Search the Y Combinator company directory (unofficial daily snapshot by yc-oss, from YC's own index).
+
+Used by: `house yc <query...> [--limit N]`, for prior-art and market checks (researcher and ideator roles,
+or the owner). The snapshot is cached in `~/.cache/house/yc-companies.json` for a day. Matching is by
+word overlap with weights per field (one-liner > name = tags > industries = long description), not semantic.
+"""
 import json
 import re
 import time
@@ -13,13 +18,28 @@ WEIGHTS = {"name": 2, "one_liner": 3, "tags": 2, "industries": 1, "long_descript
 
 
 def _fetch(url: str) -> bytes:
+    """Download url and return the response body (60 s timeout)."""
     req = urllib.request.Request(url, headers={"User-Agent": "house-yc-search"})
     with urllib.request.urlopen(req, timeout=60) as r:
         return r.read()
 
 
 def load(cache: Path = CACHE, fetch=_fetch, max_age_s: int = MAX_AGE_S) -> list[dict]:
-    """Companies from the cache; refetch when older than max_age_s; fall back to a stale cache when offline."""
+    """Load the company list.
+
+    Args:
+        cache: Cache file path.
+        fetch: Callable `(url) -> bytes`; replace in tests.
+        max_age_s: Seconds after which the cache is refetched (default one day).
+
+    Returns:
+        A list of company dicts (keys such as name, batch, status, one_liner, tags, url). Offline, a stale cache is
+        used.
+
+    Raises:
+        OSError: Offline and no cache exists.
+        ValueError: The response was not JSON and no cache exists.
+    """
     fresh = cache.exists() and time.time() - cache.stat().st_mtime < max_age_s
     if not fresh:
         try:
@@ -34,10 +54,12 @@ def load(cache: Path = CACHE, fetch=_fetch, max_age_s: int = MAX_AGE_S) -> list[
 
 
 def _terms(text: str) -> list[str]:
+    """Split text into lowercase alphanumeric words without stopwords."""
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in STOPWORDS]
 
 
 def _field_text(company: dict, field: str) -> str:
+    """Return a company field as text (lists are joined with spaces; missing is empty)."""
     value = company.get(field)
     if isinstance(value, list):
         return " ".join(str(v) for v in value)
@@ -45,10 +67,20 @@ def _field_text(company: dict, field: str) -> str:
 
 
 def _stem(term: str) -> str:
+    """Strip a plural "s" from words longer than three letters."""
     return term[:-1] if len(term) > 3 and term.endswith("s") else term
 
 
 def score(company: dict, terms: list[str]) -> int:
+    """Score a company against query terms.
+
+    Args:
+        company: Company dict.
+        terms: Query words from `_terms`.
+
+    Returns:
+        The sum over WEIGHTS fields of weight times the number of query terms found in that field.
+    """
     total = 0
     for field, weight in WEIGHTS.items():
         words = {_stem(w) for w in _terms(_field_text(company, field))}
@@ -57,6 +89,17 @@ def score(company: dict, terms: list[str]) -> int:
 
 
 def search(companies: list[dict], query: str, limit: int = 15) -> list[dict]:
+    """Find the companies that best match a query.
+
+    Args:
+        companies: Company dicts from `load`.
+        query: What the idea does, in plain words.
+        limit: Maximum number of hits (default 15).
+
+    Returns:
+        Matching companies, best first; hits scoring below a third of the best score are dropped. Empty when
+        nothing matches.
+    """
     terms = _terms(query)
     scored = [(score(c, terms), c) for c in companies]
     hits = [(s, c) for s, c in scored if s > 0]
@@ -68,4 +111,12 @@ def search(companies: list[dict], query: str, limit: int = 15) -> list[dict]:
 
 
 def format_hit(c: dict) -> str:
+    """Format a company as one line.
+
+    Args:
+        c: Company dict.
+
+    Returns:
+        `- <name> (<batch>, <status>): <one-liner> — <url>`.
+    """
     return f"- {c.get('name')} ({c.get('batch')}, {c.get('status')}): {c.get('one_liner') or ''} — {c.get('url')}"

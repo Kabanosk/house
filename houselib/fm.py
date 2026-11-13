@@ -1,5 +1,12 @@
 """Minimal YAML-subset parser: flat `key: value`, inline lists, block lists (`- item`, one level of mappings),
-null/bool/int, quoted strings. Plus `set_fields` to update flat keys in place."""
+null/bool/int, quoted strings. Plus `set_fields` to update flat keys in place.
+
+Used by: every module that reads task files, agent profiles, `spec.yaml` or `contests.yaml` (frontmatter
+between `---` lines in `.house/tasks/T###-*.md`, `core/agents/*.md`, skills). Not a full YAML parser: nested
+mappings, multi-line strings and anchors are not supported and raise ValueError or are read as plain text.
+Agents editing task frontmatter should keep to this subset (status values: todo, doing, review, merged, done,
+blocked) and prefer `set_fields` for programmatic edits, which leaves every other line untouched.
+"""
 import json
 import re
 
@@ -7,6 +14,15 @@ _KEY_RE = re.compile(r"^[A-Za-z_][\w-]*$")
 
 
 def parse_scalar(s: str):
+    """Parse one YAML scalar or inline list.
+
+    Args:
+        s: The text of the value. Forms: `[a, b]` (list of strings), "double" (JSON escapes), 'single' (`''` is
+            a quote), empty string, `null` or `~`, `true`/`false`, an integer, anything else as a plain string.
+
+    Returns:
+        A list, str, None, bool or int.
+    """
     s = s.strip()
     if s.startswith("[") and s.endswith("]"):
         inner = s[1:-1].strip()
@@ -33,10 +49,12 @@ def parse_scalar(s: str):
 
 
 def _indent(line: str) -> int:
+    """Return the number of leading spaces of the line."""
     return len(line) - len(line.lstrip(" "))
 
 
 def _key_value(text: str) -> tuple[str, str] | None:
+    """Split `key: value` into `(key, raw value)`; None when the text is not a simple mapping entry."""
     key, sep, value = text.partition(":")
     if sep and _KEY_RE.fullmatch(key.strip()) and (value == "" or value.startswith(" ")):
         return key.strip(), value
@@ -44,7 +62,18 @@ def _key_value(text: str) -> tuple[str, str] | None:
 
 
 def _parse_block_list(lines: list[str], i: int) -> tuple[list, int]:
-    """Parse `- item` lines starting at lines[i]; return (items, index after the list)."""
+    """Parse `- item` lines starting at lines[i].
+
+    Args:
+        lines: All lines of the document.
+        i: Index of the first `- ` line.
+
+    Returns:
+        `(items, index after the list)`. An item is a scalar or a flat mapping (`- key: v` plus indented keys).
+
+    Raises:
+        ValueError: Deeper nesting than one mapping level, or bad indentation.
+    """
     items: list = []
     dash = _indent(lines[i])
     while i < len(lines):
@@ -80,6 +109,17 @@ def _parse_block_list(lines: list[str], i: int) -> tuple[list, int]:
 
 
 def parse_mapping(text: str) -> dict:
+    """Parse a document of top-level `key: value` lines (comments and blank lines allowed).
+
+    Args:
+        text: The YAML-subset text. A key with an empty value followed by `- ` lines becomes a block list.
+
+    Returns:
+        A dict of key to parsed value.
+
+    Raises:
+        ValueError: A line is not `key: value`, or a block list is nested too deeply.
+    """
     out = {}
     lines = text.splitlines()
     i = 0
@@ -104,6 +144,7 @@ def parse_mapping(text: str) -> dict:
 
 
 def _split(text: str) -> tuple[list[str], int]:
+    """Return the lines of the text and the index of the closing `---`; raise ValueError if there is no block."""
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         raise ValueError("missing frontmatter block")
@@ -114,11 +155,23 @@ def _split(text: str) -> tuple[list[str], int]:
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Split a Markdown file into frontmatter and body.
+
+    Args:
+        text: File content starting with a `---` line, the frontmatter, and a closing `---` line.
+
+    Returns:
+        `(frontmatter as a dict, the body after the closing line)`.
+
+    Raises:
+        ValueError: Missing or unterminated frontmatter block, or invalid content (see `parse_mapping`).
+    """
     lines, end = _split(text)
     return parse_mapping("".join(lines[1:end])), "".join(lines[end + 1:])
 
 
 def _render(value) -> str:
+    """Render a Python value as a YAML scalar, quoting it when plain form would be read back differently."""
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -132,7 +185,19 @@ def _render(value) -> str:
 
 
 def set_fields(text: str, updates: dict) -> str:
-    """Set top-level scalar keys in the frontmatter; every other line (block lists, body) stays byte-identical."""
+    """Set top-level scalar keys in the frontmatter; every other line (block lists, body) stays byte-identical.
+
+    Args:
+        text: File content with a frontmatter block.
+        updates: Key to new value (str, int, bool or None). Existing keys are replaced in place; new keys are
+            added at the end of the frontmatter.
+
+    Returns:
+        The new file content.
+
+    Raises:
+        ValueError: Missing or unterminated frontmatter block.
+    """
     lines, end = _split(text)
     todo = dict(updates)
     for i in range(1, end):

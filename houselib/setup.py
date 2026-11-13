@@ -1,4 +1,10 @@
-"""`house setup`: make a fresh machine ready (user-level skills + hints for missing tools)."""
+"""`house setup`: make a fresh machine ready (user-level skills + hints for missing tools).
+
+Used by: `house setup` (owner, once per machine, re-run to update). Installs `user-skills/*` into
+`~/.claude/skills`, fetches the Remotion skill (not vendored for licence reasons) and prints exact next steps
+for tools that `house doctor` found missing. An installed skill that differs from the shipped one is kept as
+`<name>.bak-<timestamp>`; nothing outside `~/.claude/skills` and `~/.cache/house` is written.
+"""
 import filecmp
 import shutil
 import subprocess
@@ -10,6 +16,7 @@ from . import HOUSE_ROOT
 
 
 def _same_tree(a: Path, b: Path) -> bool:
+    """Return True when two directories have the same files with identical content."""
     cmp = filecmp.dircmp(a, b)
     if cmp.left_only or cmp.right_only or cmp.diff_files or cmp.funny_files:
         return False
@@ -27,7 +34,15 @@ def _install_skill(src: Path, dst_root: Path) -> None:
 
 
 def install_user_skills(root: Path = HOUSE_ROOT, home: Path = Path.home()) -> list[str]:
-    """Copy user-skills/* to ~/.claude/skills."""
+    """Copy user-skills/* to ~/.claude/skills.
+
+    Args:
+        root: House repo root; sources are the folders in `root/user-skills`.
+        home: Home directory that holds `.claude/skills` (default the real one; override in tests).
+
+    Returns:
+        Names of the skills installed or already up to date.
+    """
     dst_root = home / ".claude/skills"
     dst_root.mkdir(parents=True, exist_ok=True)
     installed = []
@@ -46,6 +61,7 @@ GIT_TIMEOUT_S = 120
 
 
 def _git_clone_or_pull(url: str, dest: Path) -> None:
+    """Shallow-clone url into dest, or fast-forward an existing clone; raise RuntimeError on failure."""
     if (dest / ".git").is_dir():
         cmd = ["git", "-C", str(dest), "pull", "-q", "--ff-only"]
     else:
@@ -61,6 +77,13 @@ def fetch_remotion_skill(home: Path | None = None,
     """Fetch remotion-best-practices into ~/.claude/skills (not vendored: its repo has no licence to redistribute).
 
     Clones into ~/.cache/house/remotion-skills; offline, falls back to that cache. None = nothing installed.
+
+    Args:
+        home: Home directory for the cache and `.claude/skills`; defaults to the real one.
+        clone: Callable `(url, dest)` that clones or updates; replace in tests. Failures are ignored.
+
+    Returns:
+        The skill name `remotion-best-practices`, or None when there is no clone and no cache.
     """
     home = home or Path.home()
     cache = home / ".cache/house/remotion-skills"
@@ -78,7 +101,15 @@ def fetch_remotion_skill(home: Path | None = None,
 
 
 def hints(tools: dict) -> list[str]:
-    """Exact next steps for whatever is missing on this machine."""
+    """List the next steps for whatever is missing on this machine.
+
+    Args:
+        tools: The dict from `doctor.detect`.
+
+    Returns:
+        Instruction lines: install Claude Code, the superpowers plugin, uv, ruff, Codex CLI, ollama (and a model
+        when the GPU has enough VRAM), and a Remotion browser download hint.
+    """
     out = []
     if not tools.get("claude"):
         out.append("Claude Code: install from https://claude.com/claude-code, then run `claude` and log in")
