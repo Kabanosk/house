@@ -94,5 +94,28 @@ class HookTest(unittest.TestCase):
         self.assertLessEqual(len(out.splitlines()), 25)
 
 
+    def test_post_tool_on_questions_sends_new(self):
+        from unittest import mock
+
+        from houselib import hook
+        ev = {"hook_event_name": "PostToolUse", "cwd": str(self.c), "tool_name": "Edit",
+              "tool_input": {"file_path": str(self.c / ".house/QUESTIONS.md")}}
+        with mock.patch("houselib.notify.ask_new", return_value=["Q-001"]) as ask:
+            self.assertEqual(hook.post_tool(ev), "house: sent Q-001 to Signal")
+            ask.assert_called_once()
+        ev["tool_input"] = {"file_path": str(self.c / "app.py")}
+        with mock.patch("houselib.notify.ask_new") as ask:
+            self.assertEqual(hook.post_tool(ev), "")
+            ask.assert_not_called()
+
+    def test_doctor_alias_collisions(self):
+        from houselib import doctor
+        a, b, old = (Path(self._tmp.name) / n for n in ("a", "b", "old"))
+        for d, end in ((a, "null"), (b, "null"), (old, "2020-01-01")):
+            (d / ".house").mkdir(parents=True)
+            (d / ".house/spec.yaml").write_text(f"timeline:\n  end: {end}\nnotify:\n  alias: fr\n")
+        self.assertEqual(doctor.alias_collisions([a, b, old]), {"fr": ["a", "b"]})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,8 +11,11 @@ from . import (
     doctor,
     export,
     guard,
+    inbox,
     manifest,
     merge,
+    notify,
+    questions,
     registry,
     scaffold,
     setup,
@@ -31,6 +34,10 @@ def cmd_doctor(args) -> int:
         return 1
     tools = doctor.detect()
     print(doctor.summary(tools))
+    for line in doctor.signal_status():
+        print(line)
+    for alias, names in doctor.alias_collisions(_all_contests()).items():
+        print(f"! alias `{alias}` used by several running contests: {', '.join(names)} (spec notify.alias)")
     if args.name:
         target = contest_dir(args.name)
         if not (target / ".house").is_dir():
@@ -125,6 +132,56 @@ def cmd_guard(args) -> int:
         print(f"VIOLATION {v}")
     print("CLEAN" if not found else f"{len(found)} violation(s)")
     return 1 if found else 0
+
+
+def cmd_notify(args) -> int:
+    target = contest_dir(args.name)
+    sent, warnings = notify.send(target, " ".join(args.text))
+    for w in warnings:
+        print(f"! {w}")
+    print(f"sent {len(sent)} message(s)" if sent else "nothing sent (Signal not configured or unreachable)")
+    return 0
+
+
+def cmd_ask(args) -> int:
+    target = contest_dir(args.name)
+    if args.question:
+        text = (target / ".house/QUESTIONS.md").read_text()
+        q = next((q for q in questions.parse(text) if q.id == args.question), None)
+        if q is None:
+            print(f"error: no {args.question} in QUESTIONS.md", file=sys.stderr)
+            return 1
+        print(f"sent {args.question}" if notify.ask(target, q) else "nothing sent")
+        return 0
+    asked = notify.ask_new(target)
+    print("sent " + ", ".join(asked) if asked else "no new open questions")
+    return 0
+
+
+def _all_contests() -> list[Path]:
+    names = registry.load(HOUSE_ROOT / "contests.yaml")
+    return [HOUSE_ROOT / "contests" / n for n in names if (HOUSE_ROOT / "contests" / n / ".house").is_dir()]
+
+
+def cmd_inbox(args) -> int:
+    from .signal import from_config
+    everyone = _all_contests()
+    scope = [contest_dir(args.name)] if args.name else None
+    if scope and scope[0].resolve() not in {c.resolve() for c in everyone}:
+        everyone.append(scope[0])
+    for line in inbox.process(everyone, from_config(), scope=scope) or ["no new answers"]:
+        print(line)
+    return 0
+
+
+def cmd_deadlines(args) -> int:
+    from .signal import from_config
+    sig = from_config()
+    contests = [contest_dir(args.name)] if args.name else inbox.running(_all_contests())
+    lines = [line for c in contests for line in inbox.deadlines(c, sig)]
+    for line in lines or ["nothing due"]:
+        print(line)
+    return 0
 
 
 def cmd_new(args) -> int:
@@ -259,6 +316,24 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("task", help="task id, e.g. T001")
     gd.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
     gd.set_defaults(func=cmd_guard)
+
+    nt = sub.add_parser("notify", help="send a message to the owner (Signal Note to Self) and the contest group")
+    nt.add_argument("name")
+    nt.add_argument("text", nargs="+")
+    nt.set_defaults(func=cmd_notify)
+
+    ak = sub.add_parser("ask", help="send open questions from QUESTIONS.md (new ones, or one by id) to Signal")
+    ak.add_argument("name")
+    ak.add_argument("question", nargs="?", help="Q-### to (re)send")
+    ak.set_defaults(func=cmd_ask)
+
+    ib = sub.add_parser("inbox", help="read answers from Signal (quote-replies) into QUESTIONS.md / DECISIONS.md")
+    ib.add_argument("name", nargs="?", help="one contest (default: every running contest)")
+    ib.set_defaults(func=cmd_inbox)
+
+    dl = sub.add_parser("deadlines", help="remind about / apply defaults of critical questions past their deadline")
+    dl.add_argument("name", nargs="?")
+    dl.set_defaults(func=cmd_deadlines)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")

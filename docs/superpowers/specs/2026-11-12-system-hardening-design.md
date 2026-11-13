@@ -249,6 +249,10 @@ nie ma `AskUserQuestion`; nocny przebieg nie ma jak zawołać człowieka.
     „Notatkę do siebie” i grupy z `notify.signal_group` konkursów, resztę odrzuca bez zapisu.
   - Format w JSON z `signal-cli`: odpowiedź Wojtka w grupie = `syncMessage.sentMessage` z `groupInfo`;
     odpowiedź kolegi = `dataMessage` z `groupInfo` (do zweryfikowania na pierwszej prawdziwej wiadomości).
+  - **Sprawdzone 2026-11-13 (Q-900):** odpowiedź z cytatem w „Notatce do siebie” przychodzi jako
+    `syncMessage.sentMessage` z `destinationNumber` = własny numer, `message` = tekst i `quote.id` = timestamp
+    wysłanej wiadomości (ten, który zwraca `signal-cli send`). `envelope.sourceName` = nazwa profilu.
+    Odbiór zwraca też prywatne rozmowy konta: filtr odrzuca je przed jakimkolwiek zapisem lub wypisaniem.
 - **Odpowiedzi z telefonu**: `house inbox <konkurs>` czyta nowe wiadomości, rozpoznaje `Q-007: B` /
   `Q-007 tak` / dowolny tekst po `Q-007:`, zapisuje odpowiedź w `QUESTIONS.md` (`[answered]`, **Odpowiedź**),
   dopisuje D-### i odblokowuje zadania. Wiadomości bez `Q-###` ignoruje (to też Twoje zwykłe notatki).

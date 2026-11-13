@@ -65,3 +65,10 @@ tools: see tools.json   # wykrywa `house doctor`; nie edytuj ręcznie
 team:               # człowiek — system zajmuje się tylko tematami właściciela
   owner: Wojtek
   members: []       # {name, role, uses: claude|codex|cursor|grok-bot}
+
+notify:             # powiadomienia Signal (house notify / ask / inbox); konfiguracja konta: ~/.config/house/notify.env
+  alias: null       # krótki skrót konkursu w wiadomościach, np. fr; unikalny wśród trwających konkursów
+  signal_group: null  # nazwa grupy Signal drużyny; null = tylko Twoja „Notatka do siebie”
+
+guard:              # ochrona (hooki + house guard diff)
+  push_allow: [origin]  # remote'y, na które wolno pushować

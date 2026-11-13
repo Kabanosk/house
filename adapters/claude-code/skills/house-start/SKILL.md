@@ -15,7 +15,9 @@ If nothing was given, ask for it in one short message and stop.
    The researcher also fills `spec.deliverables` from the rules (video and its length, live demo, slides, repo,
    starter code, AI APIs, external data, cloud deploy, submission format). Never assume: an item the rules do
    not settle stays null and goes into the intake question.
-3. Fill the remaining gaps yourself, marking each `# proposed`. Raise ONE question in `QUESTIONS.md` listing all
+3. Notifications: ask the human for a short contest alias (`notify.alias`, e.g. `fr`; must differ from other
+   running contests) and the team's Signal group name (`notify.signal_group`, or null = only their Note to Self).
+   Fill the remaining gaps yourself, marking each `# proposed`. Raise ONE question in `QUESTIONS.md` listing all
    proposed values for approval (format: `protocols/questions.md`).
 4. Commit `.house/` (`chore(house): intake`). Append a Polish line to `PROGRESS.md`.
 5. Reply in Polish: what is filled, what is proposed, rules verdict, the next step (`/house-ideate`).
