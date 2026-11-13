@@ -154,6 +154,16 @@ w `.house/`, przechodzi przez bramkę `house merge` (ręczna zmiana kryteriów a
 
 Uprawnienia sesji: tryb `auto` + lista dozwolonych komend + hooki (bez `--dangerously-skip-permissions`).
 
+## Recenzja krzyżowa
+
+`house review <konkurs> T###` (gałąź zadania) albo `house review <konkurs> --since last` (wszystko od poprzedniej
+recenzji, na kamień milowy). Kod napisany przez Claude'a recenzuje Codex, a kod Codexa recenzuje Claude.
+Codex ma mniejsze limity, więc obowiązuje `limits.codex_reviews_per_day` (domyślnie 4); potem recenzuje świeża
+sesja Claude'a, a raport zaznacza słabszą niezależność. Brief jest „ślepy”: cel, kryteria i dokładny diff, bez
+raportu autora. Recenzja, która nie wróciła (zawieszenie, pusta odpowiedź, brak `VERDICT:`), jest porażką, a nie
+„brakiem uwag”. Zadania `review: always` (sprawdzarka, potok zgłoszeń, kontrakty) przejdą `house merge` dopiero z
+recenzją aktualnego commita i bez BLOCKER, albo z `--accept-review "powód"` (wpis D-###).
+
 ## Aktualizacja systemu
 
 Zmiany w `core/` albo `adapters/` (np. poprawiony playbook) przenosisz do konkursu przez `house adapt <nazwa>`.
@@ -189,6 +199,7 @@ każdej sesji (stare kopie identyczne z `vendor/` usuwa).
 | `frontend-design` | Anthropic (Apache-2.0) | coder przy zadaniach z UI |
 | `webapp-testing` | Anthropic (Apache-2.0) | judge: Playwright, zrzuty ekranu, błędy konsoli w demo |
 | `no-ai-slop` | Peter Yang (MIT) | pitch: skrypt, slajdy, README bez „AI slop” |
+| `second-opinion` | Jens van Bellen (MIT) | podstawa `house review`; interaktywnie: niezależna opinia innego modelu |
 | `video-director` | win4r (MIT) | pitch: reżyseria filmiku (hak w 3 s, `timeline.json`, kontrola `qa_video.py`) |
 
 Aktualizacja: sklonuj źródło na nowo i podmień folder (nie edytuj w miejscu).

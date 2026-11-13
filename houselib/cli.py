@@ -171,9 +171,36 @@ def cmd_merge(args) -> int:
         message explains why.
     """
     target = contest_dir(args.name)
-    out = merge.merge_task(target, args.task, Path(args.worktree).resolve() if args.worktree else None)
+    out = merge.merge_task(target, args.task, Path(args.worktree).resolve() if args.worktree else None,
+                           accept_review=args.accept_review)
     print(out.message)
     return 0 if out.ok else 1
+
+
+def cmd_review(args) -> int:
+    """Implement `house review <name> T###` / `house review <name> --since REF|last`.
+
+    Args:
+        args: Parsed arguments: `name`, optional `task`, optional `since`.
+
+    Returns:
+        0 when a review came back (findings are in the report, BLOCKERs included); 1 when the review failed
+        (timeout, empty answer, no VERDICT line); 2 on bad arguments.
+    """
+    from . import review
+    target = contest_dir(args.name)
+    if bool(args.task) == bool(args.since):
+        print("error: give a task id or --since REF|last", file=sys.stderr)
+        return 2
+    res = review.review_task(target, args.task) if args.task else review.review_since(target, args.since)
+    f = res.findings
+    print(f"reviewer: {res.reviewer} ({res.note})")
+    if not res.ok:
+        print(f"review failed: {res.why}")
+        return 1
+    print(f"BLOCKER {f.blockers} · MAJOR {f.majors} · MINOR {f.minors} · NIT {f.nits} · verdict: {f.verdict}")
+    print(f"report: {res.report}")
+    return 0
 
 
 def cmd_guard(args) -> int:
@@ -504,6 +531,8 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("name")
     mg.add_argument("task", help="task id, e.g. T001")
     mg.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
+    mg.add_argument("--accept-review", metavar="REASON",
+                    help="merge a review: always task despite BLOCKER findings (reason logged as D-###)")
     mg.set_defaults(func=cmd_merge)
 
     gd = sub.add_parser("guard", help="guard rules after the fact: `guard diff <contest> T###` checks a task branch")
@@ -537,6 +566,12 @@ def build_parser() -> argparse.ArgumentParser:
     nn.add_argument("--max-tasks", type=int)
     nn.add_argument("--dry-run", action="store_true", help="preflight and list ready tasks only")
     nn.set_defaults(func=cmd_night)
+
+    rv = sub.add_parser("review", help="independent review by another model family (Codex ↔ Claude)")
+    rv.add_argument("name")
+    rv.add_argument("task", nargs="?", help="task id: review its branch")
+    rv.add_argument("--since", metavar="REF", help="milestone review of main since REF (`last` = previous review)")
+    rv.set_defaults(func=cmd_review)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")

@@ -9,6 +9,8 @@ Run **stage 3: Plan** of `$HOUSE_DIR/playbooks/lifecycle.md`.
   (`run`, optional `expect`); at least one `run` criterion for every task with logic, `manual` only for what no
   command can check. Tests/scorers the worker must not loosen go to `protected`.
 - If the project can be started or smoke-tested, write `$HOUSE_DIR/init.sh` (checks run it first).
+- Add `review: always` to tasks that touch the local scorer, the submission pipeline or a contract between tasks:
+  `house merge` then requires an independent review (`house review`) of the task's current head.
 - Finally freeze every new task: `$HOUSE_ROOT/bin/house check <contest> T### --freeze` (contest name = the
   AGENTS.md title), then commit `.house/`.
 - Contracts (types / API / file formats) first when tasks meet at an interface.
