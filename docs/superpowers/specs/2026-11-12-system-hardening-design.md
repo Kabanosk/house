@@ -227,12 +227,18 @@ nie ma `AskUserQuestion`; nocny przebieg nie ma jak zawołać człowieka.
     skrót (np. kolejna TechArena znów `fr`); `house doctor` sprawdza kolizje tylko wśród trwających, a
     odpowiedzi dla zakończonego konkursu `house inbox` pomija. Wiadomości w grupie idą z numeru Wojtka (urządzenie połączone,
     bez osobnego numeru) z prefiksem `🤖 [fr]`, żeby było jasne, że pisze system i którego konkursu dotyczy.
-  - **Jak odpowiadać, od najwygodniejszego:**
-    1. **Odpowiedź z cytatem** (przeciągnięcie wiadomości w prawo w Signalu) i sama treść, np. `B`. `house`
-       zapamiętuje timestamp każdej wysłanej wiadomości → (konkurs, Q-###) w `~/.local/share/house/sent.jsonl`;
-       odpowiedź ma `quote.id` = ten timestamp, więc nic nie trzeba wpisywać.
-    2. Bez cytatu: `Q-007: B` (albo `Q7 B`), jeśli tylko jeden konkurs w tej grupie ma otwarte Q-007.
-    3. Inaczej ze skrótem: `fr Q-007: B` (albo `fr 7 B`). Niejednoznaczna odpowiedź → `house` dopytuje w grupie.
+  - **Jak odpowiadać: odpowiedź z cytatem** (Wojtek, 2026-11-13: „bez pierduł, tylko decyzja”). Przeciągasz
+    wiadomość bota w prawo i piszesz samą decyzję, np. `B` albo krótki tekst. `house` zapamiętuje timestamp
+    każdej wysłanej wiadomości → (konkurs, Q-###) w `~/.local/share/house/sent.jsonl`; odpowiedź ma `quote.id`
+    = ten timestamp, więc numer pytania i konkurs są znane. Każda wiadomość z pytaniem jest do tego ułożona:
+    ```
+    🤖 [fr] Q-007 Które zgłoszenie wybrać jako finalne?
+    A) lgbm-v3 (lokalnie 0.812, LB 0.801)  B) ensemble-v2 (0.819, LB 0.806)
+    Rekomendacja: B (lepszy na obu). Domyślnie B o 23:50.
+    ↩ odpowiedz cytatem: A / B / własny tekst
+    ```
+    Jedna wiadomość = jedno pytanie (cytat musi wskazywać jednoznacznie). Zapasowo, bez reklamowania:
+    `Q-007: B` lub `fr Q-007: B` bez cytatu też działa; niejednoznaczne → `house` dopytuje.
   - Kto odpowiedział, `house` wyciąga z samej wiadomości (`envelope.sourceName`, inaczej numer); nikt nie wpisuje
     swojego imienia.
   - **Odpowiadać może każdy**: Wojtek z „Notatki do siebie” albo z grupy, koledzy z grupy. **Liczy się pierwsza
