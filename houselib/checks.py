@@ -123,14 +123,21 @@ def _frozen_criteria(data: dict) -> list[Criterion]:
     return [Criterion(**c) for c in data["frozen"]["criteria"]]
 
 
-def freeze(house: Path, task_id: str) -> Path:
+def _hash_if_exists(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def freeze(house: Path, task_id: str, workdir: Path | None = None) -> Path:
+    """Freeze the task's criteria; protected files that already exist (in workdir, default the contest
+    checkout) are hashed now, the rest when the task is merged."""
     if _checks_path(house, task_id).exists():
         raise FileExistsError(f"{task_id} is already frozen; change criteria with --refreeze --reason")
     task = load_task(house, task_id)
     if not task.criteria:
         raise ValueError(f"{task_id} has no acceptance criteria; add at least one `run` or `manual` item")
     data = {"task": task_id, "frozen": {"criteria": [asdict(c) for c in task.criteria],
-                                        "protected": {p: None for p in task.protected}},
+                                        "protected": {p: _hash_if_exists((workdir or house.parent) / p)
+                                                      for p in task.protected}},
             "frozen_at": _now(), "results": {}}
     path = _save(house, task_id, data)
     _git_commit(house, [path], f"chore(house): freeze {task_id}")
@@ -159,7 +166,8 @@ def refreeze(house: Path, task_id: str, reason: str) -> str:
     new = [asdict(c) for c in task.criteria]
     keep = {c["id"] for c in new if old.get(c["id"]) == c}
     data["frozen"] = {"criteria": new,
-                      "protected": {p: data["frozen"]["protected"].get(p) for p in task.protected}}
+                      "protected": {p: data["frozen"]["protected"].get(p) or _hash_if_exists(house.parent / p)
+                                    for p in task.protected}}
     data["frozen_at"] = _now()
     data["results"] = {k: v for k, v in data["results"].items() if k in keep}
     _save(house, task_id, data)

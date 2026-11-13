@@ -143,6 +143,19 @@ class ChecksTest(unittest.TestCase):
         self.assertNotIn("AC-2", stored["results"])
         self.assertTrue(checks.run_checks(self.house, "T001", self.work).green)
 
+    def test_freeze_hashes_existing_protected_files(self):
+        (self.tmp / "tests").mkdir()
+        (self.tmp / "tests/test_a.py").write_text("x")
+        self.frozen(RUN_OK, protected="protected:\n  - tests/test_a.py\n  - tests/later.py\n")
+        prot = json.loads((self.house / "checks/T001.json").read_text())["frozen"]["protected"]
+        self.assertEqual(len(prot["tests/test_a.py"]), 64)
+        self.assertIsNone(prot["tests/later.py"])
+        (self.tmp / "tests/new.py").write_text("y")
+        self.write_task(task_text(RUN_OK, protected="protected:\n  - tests/test_a.py\n  - tests/later.py\n  - tests/new.py\n"))
+        checks.refreeze(self.house, "T001", "add new.py")
+        prot = json.loads((self.house / "checks/T001.json").read_text())["frozen"]["protected"]
+        self.assertEqual(len(prot["tests/new.py"]), 64)
+
     def test_seal_protected(self):
         self.frozen(RUN_OK, protected="protected:\n  - tests/test_a.py\n  - tests/missing.py\n")
         (self.work / "tests").mkdir()
