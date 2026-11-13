@@ -88,9 +88,15 @@ cache w `~/.cache/house/`, działa offline na starym zrzucie.
 ## Aktualizacja systemu
 
 Zmiany w `core/` albo `adapters/` (np. poprawiony playbook) przenosisz do konkursu przez `house adapt <nazwa>`.
-Nadpisuje to wygenerowane pliki (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.house/playbooks/`, `.house/protocols/`),
-ale nigdy specyfikacji, decyzji, pytań, zadań ani raportów. Własny `AGENTS.md`/`CLAUDE.md` z repo konkursu
-zostaje zachowany jako `*.orig`.
+Nadpisuje to wygenerowane pliki (`AGENTS.md`, `CLAUDE.md`, agenci i skille `house-*` w `.claude/`,
+`.house/playbooks/`, `.house/protocols/`), ale nigdy specyfikacji, decyzji, pytań, zadań ani raportów.
+Co wygenerował, zapisuje w `.house/generated.json` i rusza tylko te pliki: cudze pliki w `.claude/` (np. agenci
+drużyny) zostają i nie trafiają do commita. Wygenerowany plik zmieniony ręcznie oraz własny `AGENTS.md`/`CLAUDE.md`
+z repo konkursu zostają zachowane jako `*.orig` (z ostrzeżeniem). `house doctor <nazwa>` pokazuje, które
+wygenerowane pliki ktoś zmienił.
+
+Ile stałego kontekstu niesie sesja w konkursie (AGENTS.md, opisy skilli i agentów, duplikaty skilli):
+`house doctor --context <nazwa>`. Pomiary: [`docs/context-budget.md`](docs/context-budget.md).
 
 ## Gdy coś nie działa
 
@@ -104,7 +110,9 @@ zostaje zachowany jako `*.orig`.
 
 ## Skille zewnętrzne (`vendor/skills/`)
 
-Skopiowane bez zmian, z licencją i `ATTRIBUTION.md`; `house adapt` instaluje je w każdym konkursie.
+Skopiowane bez zmian, z licencją i `ATTRIBUTION.md`. Agenci czytają je po ścieżce z `vendor/skills/` (profile
+w `core/agents/` wskazują plik); `house adapt` nie kopiuje ich do konkursów, żeby ich opisy nie zajmowały kontekstu
+każdej sesji (stare kopie identyczne z `vendor/` usuwa).
 
 | Skill | Źródło | Kto używa |
 |---|---|---|

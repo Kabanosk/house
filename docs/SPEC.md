@@ -37,7 +37,7 @@ house/                          # repo systemu (GitHub, prywatne)
 │   ├── protocols/*.md          # pytania, briefing, decyzje, zgłoszenia, stagnacja, eksport
 │   └── templates/house/        # szablon katalogu .house/ dla nowego konkursu
 ├── adapters/
-│   ├── claude-code/            # generuje .claude/agents + .claude/skills w repo konkursu
+│   ├── claude-code/            # generuje .claude/agents + .claude/skills/house-* w repo konkursu
 │   └── codex/                  # AGENTS.md + wrapper `codex exec`
 ├── bin/house                   # CLI (Python, tylko stdlib)
 ├── contests.yaml               # spis konkursów: nazwa → URL repo
@@ -61,7 +61,7 @@ contests/<nazwa>/
 │   ├── state.json              # techniczny stan (np. czas ostatniego briefingu)
 │   └── playbooks/, protocols/  # kopia z core (żeby repo było samowystarczalne)
 ├── AGENTS.md, CLAUDE.md        # generowane przez nakładki
-├── .claude/agents, .claude/skills  # generowane przez nakładkę Claude Code
+├── .claude/agents, .claude/skills  # generowane przez nakładkę Claude Code (spis: .house/generated.json)
 └── … kod konkursowy …
 ```
 
