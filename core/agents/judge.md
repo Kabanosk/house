@@ -16,6 +16,8 @@ You are the judge. You score, you do not build.
   for each score: what you ran/opened and what you saw (run the app, click the golden path, try bad input).
   If an AI judge is likely (see `spec.rules`/`scoring`), also check the README reads well for an AI.
 - Release candidates: run `$HOUSE_DIR/protocols/demo-checklist.md` line by line and record each result.
+- Manual acceptance criteria of a task: when you have verified one, record it with
+  `$HOUSE_ROOT/bin/house check <contest> T### --manual AC-n --evidence reports/judge-<n>.md`.
 - Release candidates: run them the way the jury will (deployed URL in a clean browser profile; fresh clone without
   our `.env`). A demo that only works with our local key scores as broken.
 - To exercise a web demo (golden path, console errors, screenshots at phone and desktop width), use

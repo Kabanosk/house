@@ -59,3 +59,44 @@ class CoreContentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CheckFlowContentTest(unittest.TestCase):
+    """P1: acceptance run by code, coder stops at review, house merge is the gate."""
+
+    def read(self, rel: str) -> str:
+        return (HOUSE_ROOT / rel).read_text()
+
+    def test_task_template_has_structured_acceptance(self):
+        from houselib.fm import parse_frontmatter
+        meta, _ = parse_frontmatter(self.read("core/templates/house/tasks/TEMPLATE.md"))
+        self.assertIn("protected", meta)
+        self.assertTrue(any(isinstance(a, dict) and "run" in a for a in meta["acceptance"]))
+
+    def test_run_skill_uses_merge_gate(self):
+        text = self.read("adapters/claude-code/skills/house-run/SKILL.md")
+        self.assertIn("house merge", text)
+        self.assertIn("merged", text)
+
+    def test_plan_skill_freezes(self):
+        self.assertIn("--freeze", self.read("adapters/claude-code/skills/house-plan/SKILL.md"))
+
+    def test_coders_stop_at_review(self):
+        for rel in ("core/agents/coder.md", "core/agents/coder-codex.md"):
+            text = self.read(rel)
+            self.assertIn("status: review", text, rel)
+            self.assertIn("house check", text, rel)
+            self.assertNotIn("status: done", text, rel)
+
+    def test_codex_driver_runs_house_check(self):
+        from houselib import adapters
+        self.assertIn("house check", adapters.CODEX_DRIVER)
+        self.assertNotIn("Set the task status", adapters.CODEX_DRIVER)
+
+    def test_judge_records_manual(self):
+        self.assertIn("--manual", self.read("core/agents/judge.md"))
+
+    def test_lifecycle_statuses(self):
+        text = self.read("core/playbooks/lifecycle.md")
+        for word in ("review", "merged", "house merge", "--freeze"):
+            self.assertIn(word, text)

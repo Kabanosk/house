@@ -25,9 +25,11 @@ CODEX_DRIVER = """You are a thin driver around Codex CLI (separate usage pool). 
 3. Exit code 3 = codex not installed; 2 = bad arguments. Report it; the coordinator falls back to another agent.
 4. Afterwards, in the workdir: review `git status`, then commit Codex's changes on the task branch yourself
    (`git -C <workdir> add -A`, then `git -C <workdir> commit -m "<task id>: <title>"`); Codex does not commit.
-5. Re-run the acceptance checks (task file) and read the output. Make sure the expected outputs exist
-   (report in `$HOUSE_DIR/reports/`, rows in `$HOUSE_DIR/ideas.md`, ...); if Codex left them out, write them from
-   its output. Set the task status. Return a short summary + paths.
+5. Run `$HOUSE_ROOT/bin/house check <contest> T### --worktree <workdir>` (contest name = the AGENTS.md title)
+   and read the output. Make sure the expected outputs exist (report in `$HOUSE_DIR/reports/`, rows in
+   `$HOUSE_DIR/ideas.md`, ...); if Codex left them out, write them from its output. GREEN → set `status: review`
+   (never `done`; the coordinator's `house merge` does the rest); RED → say which criteria failed.
+   Return a short summary + paths.
 
 --- Instructions for Codex ---
 """

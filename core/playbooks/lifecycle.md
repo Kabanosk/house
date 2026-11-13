@@ -33,20 +33,28 @@ At the start of every session: read `spec.yaml`, `DECISIONS.md`, open questions 
 
 ## 3. Plan
 - Break the chosen idea into a DAG of tasks (one file each, template in `tasks/TEMPLATE.md`). Each task has a
-  checkable `acceptance` list and declares `depends_on`.
+  `acceptance` list of commands (`run`, optional `expect`) that a machine can check; `manual` only for what no
+  command can check. Tests or scorers a worker must not loosen go to `protected`. Declares `depends_on`.
+- Optional `.house/init.sh`: starts the app / runs a smoke test; every check runs it first.
+- End of planning: `$HOUSE_ROOT/bin/house check <contest> T### --freeze` for every new task, then commit `.house/`.
+  From then on criteria change only with `--refreeze --reason` (logged as D-###).
 - Parallelize only independent tasks, never more than `limits.max_parallel_agents` at once.
 - If the work is essentially sequential, use ONE worker. More agents on sequential work makes results worse.
 - Define contracts (API types, file formats) as their own first task when two tasks meet at an interface.
 
 ## 4. Execution
 - Each worker: own branch `task/T###-slug` in its own worktree; sets task `status: doing`, `owner`, `branch`.
-- Worker verifies its acceptance checks by running them, writes `reports/T###.md` (English), appends one line to
-  `PROGRESS.md` (Polish), sets `status: done` (or `blocked` + Q-###).
-- Coordinator merges finished tasks into `main` early and often; integration is never left to the end.
+- Worker runs `house check <contest> T### --worktree <path>` until GREEN, writes `reports/T###.md` (English),
+  appends one line to `PROGRESS.md` (Polish), sets `status: review` (or `blocked` + Q-###). Never `done`.
+- Coordinator runs `house merge <contest> T###` for every task in `review`, early and often: it checks the branch,
+  merges, re-runs the checks of every `merged`/`done` task on main and reverts the merge on regression
+  (task → `blocked`). Status after the gate: `merged`, or `done` when manual criteria are also recorded.
+  Never `git merge` a task branch by hand. `depends_on` is satisfied by `merged` or `done`.
 - Agents communicate through files, not long chats. Pass paths, not pasted logs. Raw data stays in files.
 
 ## 5. Evaluation
 - Judge evaluates against `scoring` with evidence (commands, screenshots, numbers), never vibes.
+- Manual criteria: the judge records each with `house check <contest> T### --manual AC-n --evidence <report>`.
 - Judge may decide small things itself (log D-###); hard decisions per `protocols/questions.md`.
 
 ## 6. Release
