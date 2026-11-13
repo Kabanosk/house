@@ -201,6 +201,18 @@ nie ma `AskUserQuestion`; nocny przebieg nie ma jak zawołać człowieka.
   - **Pierwszy krok P3 to spike** (pół godziny): link, wysłanie, odbiór odpowiedzi z telefonu, format JSON.
     Jeśli odbiór z „Notatki do siebie” nie działa wiarygodnie, przejście na Discord (REST, stdlib) i sygnał
     dla Wojtka.
+  - **Spike zrobiony 2026-11-13, działa.** `signal-cli` 0.14.10 (natywna wersja, bez Javy) w
+    `~/.local/opt/`, link w `~/.local/bin/`. Konfiguracja: `~/.config/house/notify.env`
+    (`HOUSE_NOTIFY_CHANNEL=signal`, `HOUSE_SIGNAL_ACCOUNT=…`). Wysyłka z `--note-to-self --notify-self` daje
+    powiadomienie na telefonie. Odpowiedź z telefonu przychodzi jako
+    `envelope.syncMessage.sentMessage` z `destinationNumber` = własny numer i `message` = tekst; pozostałe
+    wiadomości synchronizacji (odczyty, kontakty) mają puste `message` i są pomijane.
+  - `receive` **zużywa** wiadomości (drugi odczyt ich nie zwróci): `house inbox` zapisuje każdą odebraną
+    wiadomość do `~/.local/share/house/inbox.jsonl` i dopiero z tego pliku rozdziela odpowiedzi na konkursy;
+    obsłużone oznacza w `.house/state.json` (ostatni timestamp).
+  - Signal wymaga regularnego odbioru na połączonym urządzeniu (inaczej może je odłączyć): `house night` i hook
+    `SessionStart` wołają `house inbox`; `house doctor` ostrzega, gdy ostatni odbiór był dawno.
+  - Linkowanie: kod QR jest ważny ok. 2 minuty; `house setup` generuje go i od razu pokazuje.
   - Ryzyko: stare wersje `signal-cli` przestają działać po zmianach protokołu; `doctor` pokazuje wersję,
     `setup` aktualizuje.
 - **Odpowiedzi z telefonu**: `house inbox <konkurs>` czyta nowe wiadomości, rozpoznaje `Q-007: B` /
