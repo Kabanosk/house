@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from houselib import HOUSE_ROOT, adapters, scaffold
+from houselib import HOUSE_ROOT, adapters, manifest, scaffold
 from houselib.fm import parse_frontmatter
 from tests.helpers import FAKE_TOOLS, make_root
 
@@ -18,7 +18,7 @@ SKILLS = ["house-start", "house-status", "house-ideate", "house-plan",
 def house_hash(contest: Path) -> str:
     h = hashlib.sha256()
     for p in sorted((contest / ".house").rglob("*")):
-        if p.is_file() and p.name != "tools.json":
+        if p.is_file() and p.name not in ("tools.json", "generated.json"):  # adapt's own files
             h.update(str(p.relative_to(contest)).encode() + p.read_bytes())
     return h.hexdigest()
 
@@ -94,6 +94,63 @@ class AdaptTest(unittest.TestCase):
         before = house_hash(self.contest)
         adapters.adapt(self.contest, self.root, detect=lambda: ALL)
         self.assertEqual(house_hash(self.contest), before)
+
+
+class ManifestAdaptTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_root(Path(self._tmp.name))
+        self.c = scaffold.new_contest("c1", None, root=self.root, detect=lambda: FAKE_TOOLS)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def adapt(self, tools=NONE):
+        return adapters.adapt(self.c, self.root, detect=lambda: tools)
+
+    def test_teammate_agent_survives_and_is_not_committed(self):
+        from tests.helpers import git
+        mate = self.c / ".claude/agents/teammate.md"
+        mate.parent.mkdir(parents=True)
+        mate.write_text("---\nname: teammate\n---\nmine\n")
+        self.adapt()
+        self.adapt(ALL)
+        self.assertEqual(mate.read_text(), "---\nname: teammate\n---\nmine\n")
+        self.assertIn("?? .claude/agents/teammate.md", git(self.c, "status", "--porcelain"))
+
+    def test_manifest_written_and_committed(self):
+        from tests.helpers import git
+        self.adapt()
+        files = manifest.load(self.c)
+        for rel in ("AGENTS.md", "CLAUDE.md", ".claude/agents/coder.md", ".claude/skills/house-run/SKILL.md"):
+            self.assertIn(rel, files)
+        self.assertIn(".house/generated.json", git(self.c, "ls-files"))
+        self.assertEqual(git(self.c, "status", "--porcelain").strip(), "")
+
+    def test_hand_edit_kept_as_orig(self):
+        self.adapt()
+        coder = self.c / ".claude/agents/coder.md"
+        coder.write_text(coder.read_text() + "\nmy local rule\n")
+        res = self.adapt()
+        self.assertIn("my local rule", (self.c / ".claude/agents/coder.md.orig").read_text())
+        self.assertNotIn("my local rule", coder.read_text())
+        self.assertTrue(res.warnings)
+
+    def test_stale_agent_removed_and_deletion_committed(self):
+        from tests.helpers import git
+        self.adapt(ALL)
+        self.assertTrue((self.c / ".claude/agents/coder-codex.md").exists())
+        self.adapt(NONE)
+        self.assertFalse((self.c / ".claude/agents/coder-codex.md").exists())
+        self.assertNotIn(".claude/agents/coder-codex.md", git(self.c, "ls-files"))
+
+    def test_legacy_contest_no_spurious_orig(self):
+        (self.c / "AGENTS.md").write_text(adapters.MARKER + "\nold generated\n")
+        agent = self.c / ".claude/agents/coder.md"
+        agent.parent.mkdir(parents=True)
+        agent.write_text("old generated agent\n")
+        self.adapt()
+        self.assertEqual(list(self.c.rglob("*.orig")), [])
 
 
 class CodexTaskTest(unittest.TestCase):

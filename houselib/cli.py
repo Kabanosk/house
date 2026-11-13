@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, context, doctor, export, registry, scaffold, setup, yc
+from . import HOUSE_ROOT, adapters, context, doctor, export, manifest, registry, scaffold, setup, yc
 
 
 def contest_dir(name: str) -> Path:
@@ -23,6 +23,11 @@ def cmd_doctor(args) -> int:
             print(f"error: {target} is not a house contest", file=sys.stderr)
             return 1
         print(f"wrote {doctor.write(target, tools)}")
+        changed = manifest.drift(target)
+        for rel, state in changed:
+            print(f"drift: {rel} ({state}); `house adapt {args.name}` keeps your edit as {rel}.orig")
+        if not changed and manifest.load(target) is not None:
+            print("generated files: in sync")
         if args.context:
             print("\n" + context.format_report(context.measure(target.resolve(), Path.home())))
     return 0
@@ -44,8 +49,11 @@ def cmd_adapt(args) -> int:
     if not (target / ".house").is_dir():
         print(f"error: {target} is not a house contest (run: bin/house new {args.name})", file=sys.stderr)
         return 1
-    for path in adapters.adapt(target):
+    res = adapters.adapt(target)
+    for path in res.written:
         print(f"wrote {path.relative_to(target)}")
+    for warning in res.warnings:
+        print(f"! {warning}")
     return 0
 
 
