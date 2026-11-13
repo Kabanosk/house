@@ -1,4 +1,9 @@
-"""Detect which tools are available on this machine."""
+"""Detect which tools are available on this machine.
+
+Used by: `house doctor [contest]` (prints the summary and, with a contest, writes `.house/tools.json`),
+`house setup`, `house adapt` and `house new`. The coordinator reads `.house/tools.json` to decide which
+agents can run (codex and local-model tiers fall back to other agents when missing).
+"""
 import json
 import shutil
 import subprocess
@@ -7,6 +12,7 @@ from pathlib import Path
 
 
 def _run(cmd: list[str]) -> str | None:
+    """Run a command with a 5 s timeout; return its stdout, or None when it fails, times out or is missing."""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
@@ -15,6 +21,7 @@ def _run(cmd: list[str]) -> str | None:
 
 
 def _gpu(out: str | None) -> dict | None:
+    """Parse the first line of `nvidia-smi` CSV output into `{name, vram_mib}`; None when absent or malformed."""
     if not out:
         return None
     name, sep, mem = out.splitlines()[0].rpartition(",")
@@ -24,6 +31,16 @@ def _gpu(out: str | None) -> dict | None:
 
 
 def detect(which=shutil.which, run=_run) -> dict:
+    """Detect the available tools.
+
+    Args:
+        which: Function like `shutil.which` to look up executables; replace in tests.
+        run: Function `(cmd list) -> stdout or None` used for `ollama list`, `dpkg-query` and `nvidia-smi`.
+
+    Returns:
+        A dict with booleans `claude`, `codex`, `cursor`, `uv`, `ruff`, `grok_bot`, `ollama`
+        (`{"installed": bool, "models": [names]}`) and `gpu` (`{"name", "vram_mib"}` or None).
+    """
     ollama = bool(which("ollama"))
     models = []
     if ollama:
@@ -42,6 +59,15 @@ def detect(which=shutil.which, run=_run) -> dict:
 
 
 def write(contest_dir: Path, tools: dict) -> Path:
+    """Write `.house/tools.json`.
+
+    Args:
+        contest_dir: Path of the contest checkout; `.house/` must exist.
+        tools: The dict from `detect`; a `checked_at` timestamp is added.
+
+    Returns:
+        The path of the file.
+    """
     path = contest_dir / ".house" / "tools.json"
     data = dict(tools, checked_at=datetime.now().astimezone().isoformat(timespec="seconds"))
     path.write_text(json.dumps(data, indent=2) + "\n")
@@ -49,6 +75,14 @@ def write(contest_dir: Path, tools: dict) -> Path:
 
 
 def summary(tools: dict) -> str:
+    """Format the tools dict for display.
+
+    Args:
+        tools: The dict from `detect`.
+
+    Returns:
+        One line per tool, with ✓ or ✗, plus ollama models and the GPU.
+    """
     mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
     lines = [f"{mark(tools[k])} {k}" for k in ("claude", "codex", "cursor", "grok_bot", "uv", "ruff")]
     o = tools["ollama"]
@@ -59,7 +93,14 @@ def summary(tools: dict) -> str:
 
 
 def alias_collisions(contests: list[Path]) -> dict[str, list[str]]:
-    """notify.alias values shared by several running contests (ended contests may reuse an alias)."""
+    """Find Signal aliases (spec `notify.alias`) used by several running contests.
+
+    Args:
+        contests: Contest paths to examine; ended contests may reuse an alias and are ignored.
+
+    Returns:
+        Alias to sorted contest names, only for aliases used more than once.
+    """
     from . import inbox, notify
     seen: dict[str, list[str]] = {}
     for c in inbox.running(contests):
@@ -68,7 +109,12 @@ def alias_collisions(contests: list[Path]) -> dict[str, list[str]]:
 
 
 def signal_status() -> list[str]:
-    """Human-readable Signal checks for `house doctor`."""
+    """Check the Signal setup for `house doctor`.
+
+    Returns:
+        Human-readable lines: not configured, signal-cli missing, or OK plus a warning when `house inbox` has not
+        run for over 7 days.
+    """
     import time
 
     from . import notify

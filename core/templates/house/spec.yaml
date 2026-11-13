@@ -72,3 +72,7 @@ notify:             # powiadomienia Signal (house notify / ask / inbox); konfigu
 
 guard:              # ochrona (hooki + house guard diff)
   push_allow: [origin]  # remote'y, na które wolno pushować
+
+night:              # house night (tryb nocny)
+  task_minutes: 45  # limit jednej sesji workera
+  model: sonnet     # model workera Claude w nocy

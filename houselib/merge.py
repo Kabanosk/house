@@ -2,6 +2,21 @@
 
 refuse tampering → check the task branch → merge → re-check every merged task on the result → roll back on a
 regression this merge caused.
+
+Used by: `house merge <contest> T### [--worktree DIR]` (the coordinator, after a coder set `status: review`)
+and by `house night` as its gate. Coders never merge; nobody edits `merged`/`done` statuses by hand.
+
+What `house merge` refuses (nothing changes on main; exit code 1):
+- the task is not frozen, or its status is not `review` (status flow: todo → doing → review → merged → done,
+  or blocked);
+- uncommitted changes in the contest checkout outside `.house/`, or in the task worktree;
+- tampering with frozen criteria or hand-set `merged`/`done` statuses, and guard violations in the branch diff
+  (changed protected files, secrets in any commit, `.house/` files carried by the branch);
+- a task without `branch`, or without a worktree;
+- a task that is red on its own branch, or a merge conflict.
+After a successful merge every merged/done task is re-checked on main; a regression caused by this merge is
+reverted, the task becomes `blocked` and its branch is rebased onto the new main on the next attempt.
+The task ends as `done` when all its criteria pass (manual ones included), otherwise `merged`.
 """
 import json
 import subprocess
@@ -17,6 +32,15 @@ FINISHED = ("merged", "done")
 
 @dataclass
 class MergeOutcome:
+    """Result of `merge_task`.
+
+    Attributes:
+        ok: True when the task was merged.
+        status: The task's status afterwards ("done", "merged", "blocked"), or the unchanged one when refused
+            ("?" when the task could not even be loaded).
+        message: What happened, including `note:` lines for non-fatal problems; shown by `house merge`.
+        reverted: True when the merge was made and then cleanly undone (regression or crash in the re-checks).
+    """
     ok: bool
     status: str
     message: str
@@ -24,29 +48,35 @@ class MergeOutcome:
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run `git <args>` in cwd and return the CompletedProcess (text mode, never raises on a non-zero exit)."""
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
 def _set_status(task: checks.Task, status: str) -> None:
+    """Set the `status` field of the task file."""
     task.path.write_text(set_fields(task.path.read_text(), {"status": status}))
 
 
 def _commit_house(contest: Path, message: str) -> None:
+    """Commit all pending changes under `.house/` with the given message, if there are any."""
     _git(contest, "add", "-A", "--", ".house")
     if _git(contest, "diff", "--cached", "--quiet", "--", ".house").returncode != 0:
         _git(contest, "commit", "-q", "-m", message, "--", ".house")
 
 
 def _porcelain_paths(cwd: Path, *extra: str) -> list[str]:
+    """List paths reported by `git status --porcelain` in cwd (extra args are passed to git status)."""
     out = _git(cwd, "-c", "core.quotePath=false", "status", "--porcelain", "-z", *extra).stdout
     return [entry[3:] for entry in out.split("\0") if len(entry) > 3]
 
 
 def _dirty_outside_house(contest: Path) -> list[str]:
+    """List tracked files with uncommitted changes outside `.house/` in the contest checkout."""
     return [p for p in _porcelain_paths(contest, "--untracked-files=no") if not p.startswith(".house/")]
 
 
 def _failures(rep: checks.CheckReport) -> str:
+    """Describe what is red in a `CheckReport` as a comma-separated string."""
     bad = [f"{r.id} ({'timeout' if r.exit is None else f'exit {r.exit}'})"
            for r in rep.results if rep.kinds[r.id] == "run" and not r.passes]
     if not rep.init_ok:
@@ -57,7 +87,14 @@ def _failures(rep: checks.CheckReport) -> str:
 
 
 def _finished_frozen(house: Path) -> tuple[list[str], list[str]]:
-    """(merged/done tasks with frozen criteria, merged/done tasks from before freezing existed)."""
+    """Split merged/done tasks by whether they have frozen criteria.
+
+    Args:
+        house: Path of the contest's `.house/` directory.
+
+    Returns:
+        `(tasks with frozen criteria, tasks from before freezing existed)`.
+    """
     frozen, legacy = [], []
     for path in sorted((house / "tasks").glob("T*-*.md")):
         tid = path.name.split("-", 1)[0]
@@ -93,6 +130,21 @@ def _red_before(contest: Path, house: Path, task_ids: list[str]) -> set[str]:
 
 
 def merge_task(contest: Path, task_id: str, worktree: Path | None = None) -> MergeOutcome:
+    """Gate a reviewed task branch into main, or refuse.
+
+    Args:
+        contest: Path of the contest checkout (the directory that holds `.house/`); its current branch is the target.
+        task_id: Task id, e.g. "T001"; the task must be frozen and have `status: review`.
+        worktree: The task's worktree; defaults to `<contest>/.worktrees/<branch without task/>`. Its changes must
+            be committed. After a successful merge the worktree and branch are removed when possible.
+
+    Returns:
+        A `MergeOutcome`; never raises for refusals. A KeyboardInterrupt during the re-checks undoes the merge
+        and is re-raised. Steps: refuse (see module docstring) → commit pending `.house/` state → rebase a branch
+        that was reverted before → run the task's checks on its branch → `git merge --no-ff` → re-run checks of the
+        task and every merged/done task on main (tasks already red before the merge are only reported) → on a
+        regression revert and block the task → otherwise seal protected files, set `done` or `merged`, commit.
+    """
     house = contest / ".house"
     try:
         task = checks.load_task(house, task_id)
@@ -151,6 +203,9 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None) -> Mer
                 red_after[tid] = _failures(after)
         already_red = _red_before(contest, house, [t for t in red_after if t != task_id])
         regressions = {t: why for t, why in red_after.items() if t not in already_red}
+    except KeyboardInterrupt:  # Ctrl+C during the re-checks: undo the merge, then stop
+        _rollback(contest, pre_head)
+        raise
     except Exception as e:  # noqa: BLE001 — whatever broke, main must not keep an unchecked merge
         err = _rollback(contest, pre_head)
         return MergeOutcome(False, status, f"checks crashed after merging ({e!r}); merge undone"

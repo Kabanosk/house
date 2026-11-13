@@ -1,4 +1,16 @@
-"""Translate the neutral core into tool-specific files (Claude Code, Codex)."""
+"""Translate the neutral core into tool-specific files (Claude Code, Codex).
+
+Used by: `house adapt <contest>` (`adapt`). Input: agent profiles in `core/agents/*.md`, the playbooks and
+protocols in `core/`, the skills in `adapters/`, and the contest's `.house/tools.json` (from `house doctor`).
+Output in the contest repo: `AGENTS.md` (Codex and generic tools; roster of agents plus the coordinator
+playbook), `CLAUDE.md`, `.claude/agents/<id>.md` (every profile except the coordinator, which is the main
+session), `.claude/skills/`, and `.claude/settings.local.json` (guard hooks and an allowlist, never committed).
+
+Rules for agents: generated files carry a marker comment; edit `core/` or `adapters/` in the house repo and
+re-run `house adapt`, never the generated files. A profile whose model tier is unavailable here (codex, local)
+is dropped or falls back to its `fallback` profile (e.g. coder-codex becomes coder). Files edited by hand are
+kept as `<name>.orig`; see `manifest`.
+"""
 import json
 import shutil
 import subprocess
@@ -53,6 +65,14 @@ CLAUDE_MD = f"""@AGENTS.md
 
 
 def load_profiles(root: Path = HOUSE_ROOT) -> dict[str, tuple[dict, str]]:
+    """Read the agent profiles.
+
+    Args:
+        root: House repo root; profiles are `root/core/agents/*.md`.
+
+    Returns:
+        Profile id (frontmatter `id`) to `(frontmatter, body)`.
+    """
     out = {}
     for f in sorted((root / "core/agents").glob("*.md")):
         meta, body = parse_frontmatter(f.read_text())
@@ -61,6 +81,17 @@ def load_profiles(root: Path = HOUSE_ROOT) -> dict[str, tuple[dict, str]]:
 
 
 def resolve_tier(profile: tuple[dict, str], tools: dict, profiles: dict) -> str | None:
+    """Decide which model tier an agent profile gets on this machine.
+
+    Args:
+        profile: `(frontmatter, body)` of the profile; frontmatter has `model_tier` and optional `fallback`.
+        tools: Contents of `.house/tools.json`; "codex" needs a truthy `codex`, "local" needs ollama models.
+        profiles: All profiles, to follow `fallback` links to other profiles.
+
+    Returns:
+        The tier ("opus", "sonnet", "haiku", "codex", "local"), the fallback's tier, or None when the tier is
+        unavailable and there is no fallback.
+    """
     meta = profile[0]
     tier = meta["model_tier"]
     available = {"codex": tools.get("codex"), "local": bool(tools.get("ollama", {}).get("models"))}
@@ -73,14 +104,31 @@ def resolve_tier(profile: tuple[dict, str], tools: dict, profiles: dict) -> str 
 
 
 def omitted_for(meta: dict, tier: str | None, profiles: dict) -> str | None:
-    """Profile id that replaces an omitted agent (e.g. coder-codex without codex → coder), else None."""
+    """Tell which profile replaces an agent that is omitted on this machine.
+
+    Args:
+        meta: Frontmatter of the profile.
+        tier: Tier from `resolve_tier`.
+        profiles: All profiles.
+
+    Returns:
+        The fallback profile id for a codex-tier agent that cannot use codex, else None.
+    """
     if meta["model_tier"] == "codex" and meta.get("fallback") in profiles and tier != "codex":
         return meta["fallback"]
     return None
 
 
 def short(desc: str, limit: int = 110) -> str:
-    """Roster blurb: the description cut on a word boundary (AGENTS.md is always in context; keep it lean)."""
+    """Cut a description for the roster in AGENTS.md.
+
+    Args:
+        desc: Agent description; whitespace is collapsed.
+        limit: Maximum length before the cut (default 110).
+
+    Returns:
+        The description, or a cut on a word boundary ending with "…".
+    """
     desc = " ".join(str(desc).split())
     if len(desc) <= limit:
         return desc
@@ -88,14 +136,17 @@ def short(desc: str, limit: int = 110) -> str:
 
 
 def _read_tools(contest: Path) -> dict:
+    """Read the contest's `.house/tools.json`."""
     return json.loads((contest / ".house/tools.json").read_text())
 
 
 def _paths(contest: Path, root: Path) -> dict[str, str]:
+    """Return the placeholder map for `$HOUSE_DIR` and `$HOUSE_ROOT` (resolved absolute paths)."""
     return {"$HOUSE_DIR": str((contest / ".house").resolve()), "$HOUSE_ROOT": str(root.resolve())}
 
 
 def _substitute(text: str, paths: dict[str, str]) -> str:
+    """Replace every placeholder key of paths with its value in the text."""
     for var, value in paths.items():
         text = text.replace(var, value)
     return text
@@ -104,8 +155,17 @@ def _substitute(text: str, paths: dict[str, str]) -> str:
 
 
 def claude_code(contest: Path, root: Path = HOUSE_ROOT) -> dict[str, str]:
-    """Claude Code files for a contest: relpath -> text. Vendor skills are not copied: agents read them from
-    $HOUSE_ROOT/vendor/skills by path (copies would only add their descriptions to every session)."""
+    """Render the Claude Code files of a contest. Vendor skills are not copied: agents read them from
+    $HOUSE_ROOT/vendor/skills by path (copies would only add their descriptions to every session).
+
+    Args:
+        contest: Path of the contest checkout (must contain `.house/tools.json`).
+        root: House repo root.
+
+    Returns:
+        Relative path to text for `.claude/agents/<id>.md` (all but the coordinator; Codex agents get the driver
+        prompt prepended), `.claude/skills/<name>/SKILL.md` and `CLAUDE.md`. Nothing is written to disk.
+    """
     tools, profiles, paths = _read_tools(contest), load_profiles(root), _paths(contest, root)
     out = {}
     for pid, (meta, body) in profiles.items():
@@ -126,6 +186,16 @@ def claude_code(contest: Path, root: Path = HOUSE_ROOT) -> dict[str, str]:
 
 
 def codex(contest: Path, root: Path = HOUSE_ROOT) -> dict[str, str]:
+    """Render the `AGENTS.md` for Codex and generic tools.
+
+    Args:
+        contest: Path of the contest checkout (must contain `.house/tools.json`).
+        root: House repo root; the template is `adapters/codex/AGENTS.md.tmpl`.
+
+    Returns:
+        `{"AGENTS.md": text}` with the agent roster, the coordinator playbook and resolved paths. Nothing is
+        written to disk.
+    """
     tools, profiles = _read_tools(contest), load_profiles(root)
     rows = ["| Agent | Model on this machine | Use for |", "|---|---|---|"]
     for pid, (meta, body) in profiles.items():
@@ -146,8 +216,15 @@ def codex(contest: Path, root: Path = HOUSE_ROOT) -> dict[str, str]:
 
 
 def remove_legacy_vendor_copies(contest: Path, root: Path) -> tuple[list[str], list[str]]:
-    """Older adapts copied vendor/skills into .claude/skills. Remove copies identical to the vendor version;
-    keep (and report) copies someone edited."""
+    """Remove vendor skill copies that older adapts put into `.claude/skills`.
+
+    Args:
+        contest: Path of the contest checkout.
+        root: House repo root; the reference copies are `root/vendor/skills/*`.
+
+    Returns:
+        `(removed, kept)` relative paths; copies identical to the vendor version are deleted, edited ones are kept.
+    """
     removed, kept = [], []
     vendor = root / "vendor/skills"
     for src in sorted(vendor.iterdir()) if vendor.is_dir() else []:
@@ -163,13 +240,12 @@ def remove_legacy_vendor_copies(contest: Path, root: Path) -> tuple[list[str], l
 
 
 def _has_marker(path: Path) -> bool:
+    """Return True when the file is a regular file (not a link) that contains the generated-file marker."""
     return path.is_file() and not path.is_symlink() and MARKER in path.read_text(errors="replace")
 
 
 def _legacy_owned(contest: Path, root: Path) -> Callable[[str], bool]:
-    """Ownership for contests without a manifest. Only if an older adapt demonstrably ran here (our marker in
-    AGENTS.md or CLAUDE.md) are our profile and skill names under .claude/ ours; otherwise everything is foreign
-    (a freshly adopted team repo may have its own `researcher.md`)."""
+    """Build the ownership test for contests without a manifest (see `manifest.apply`)."""
     adapted_before = _has_marker(contest / "AGENTS.md") or _has_marker(contest / "CLAUDE.md")
     agents = {f".claude/agents/{pid}.md" for pid in load_profiles(root)}
     skills = {f".claude/skills/{d.name}/SKILL.md" for d in (root / "adapters/claude-code/skills").iterdir()}
@@ -182,8 +258,7 @@ def _legacy_owned(contest: Path, root: Path) -> Callable[[str], bool]:
 
 
 def _commit_owned(contest: Path, paths: list[str]) -> None:
-    """Commit exactly the paths adapt owns (written, removed, backups, house files), skipping gitignored ones and
-    never the user's other work."""
+    """Commit exactly the paths adapt owns, skipping gitignored ones and never the user's other work."""
     candidates = [p for p in dict.fromkeys(paths)
                   if (contest / p).exists() or git(contest, "ls-files", "--", p).strip()]
     if not candidates:
@@ -206,7 +281,15 @@ ALLOW_COMMANDS = ["git status:*", "git diff:*", "git log:*", "git show:*", "git 
 
 
 def claude_settings(root: Path = HOUSE_ROOT) -> dict:
-    """House's part of .claude/settings.local.json: guard hooks + an allowlist for headless sessions."""
+    """Build house's part of `.claude/settings.local.json`.
+
+    Args:
+        root: House repo root; the hook is `<root>/bin/house-hook`.
+
+    Returns:
+        A settings dict: PreToolUse, PostToolUse and SessionStart guard hooks, and an allowlist of Bash commands
+        (house, codex-task, git, test and lint tools) so headless sessions need no permission prompts.
+    """
     hook = f"{root.resolve()}/bin/house-hook"
     return {
         "hooks": {
@@ -222,11 +305,21 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
 
 
 def _is_house_hook(hook) -> bool:
+    """Return True for a hook entry whose command runs house-hook."""
     return isinstance(hook, dict) and "house-hook" in str(hook.get("command", ""))
 
 
 def merge_settings(existing: dict, ours: dict) -> dict:
-    """Keep every user key, permission and hook; replace house's own hook commands; no duplicate allow rules."""
+    """Combine existing Claude settings with house's.
+
+    Args:
+        existing: Settings already in the file (any user keys, hooks, permissions).
+        ours: House's settings from `claude_settings`.
+
+    Returns:
+        A new dict that keeps every user key, hook and permission, replaces house's own hook commands, and has
+        no duplicate allow rules.
+    """
     out = dict(existing)
     hooks: dict = {}
     for event, entries in (existing.get("hooks") or {}).items():
@@ -252,8 +345,18 @@ def merge_settings(existing: dict, ours: dict) -> dict:
 
 
 def write_local_settings(contest: Path, root: Path = HOUSE_ROOT) -> Path:
-    """Hooks live only in .claude/settings.local.json (never committed; listed in .git/info/exclude): the hook
-    path is this machine's, and teammates' Claude Code must not run our rules."""
+    """Write `.claude/settings.local.json` and exclude it from git.
+
+    Hooks live only there (never committed, listed in .git/info/exclude): the hook path is this machine's, and
+    teammates' Claude Code must not run our rules.
+
+    Args:
+        contest: Path of the contest checkout.
+        root: House repo root.
+
+    Returns:
+        The path of the settings file. An unparseable existing file is moved to `<name>.orig`.
+    """
     path = contest / ".claude/settings.local.json"
     try:
         existing = json.loads(path.read_text()) if path.exists() else {}
@@ -275,6 +378,7 @@ def write_local_settings(contest: Path, root: Path = HOUSE_ROOT) -> Path:
 
 
 def _backup_name(path: Path) -> Path:
+    """Return `<name>.orig`, or `<name>.orig-<n>` when that exists."""
     n, backup = 0, path.with_name(path.name + ".orig")
     while backup.exists():
         n += 1
@@ -284,11 +388,29 @@ def _backup_name(path: Path) -> Path:
 
 @dataclass
 class AdaptResult:
+    """Result of `adapt`.
+
+    Attributes:
+        written: Absolute paths of the generated files that were written.
+        warnings: Messages for the owner: backups made, hand-edited files left in place, rebuilt manifest.
+    """
     written: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
 def adapt(contest: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> AdaptResult:
+    """Generate and install all tool-specific files for a contest, then commit the ones house owns.
+
+    Args:
+        contest: Path of the contest checkout; its `.house/` must exist.
+        root: House repo root (source of core, adapters and vendor skills).
+        detect: Callable returning the tools dict (default `doctor.detect`); replace in tests.
+
+    Returns:
+        An `AdaptResult`. Steps: refresh playbooks/protocols, write `.house/tools.json`, render Codex and Claude
+        files, write them through the manifest (backing up hand edits), commit exactly the owned paths on the
+        current branch, write `.claude/settings.local.json`.
+    """
     install_core(contest, root)  # refresh playbooks/protocols from core; never touches other .house files
     doctor.write(contest, detect())
     generated = {**codex(contest, root), **claude_code(contest, root)}

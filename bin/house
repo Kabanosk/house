@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Entry point of the `house` command: hands the arguments to `houselib.cli.main`.
+
+Usage: bin/house <command> [args] (see `bin/house --help`). Exit codes: 0 success, 1 failure or refusal,
+2 usage error; the exact codes per command are in the `cmd_*` docstrings of `houselib/cli.py`.
+"""
 import sys
 from pathlib import Path
 

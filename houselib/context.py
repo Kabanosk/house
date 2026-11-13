@@ -3,6 +3,10 @@
 What the model always sees: AGENTS.md/CLAUDE.md (contest + user), the name and description of every
 model-invocable skill, and the description of every subagent. Bodies load only when used.
 Estimate only: tokens ≈ characters / 4.
+
+Used by: `house doctor <contest> --context`, which prints `format_report(measure(...))`. Rules for agents that
+write skills or agent profiles: keep `description` short (it is paid in every session), put the detail in the
+body, and avoid the same skill name in several places (the report lists duplicates).
 """
 import json
 import math
@@ -14,6 +18,15 @@ from .fm import parse_frontmatter
 
 @dataclass
 class SkillEntry:
+    """One skill found on disk.
+
+    Attributes:
+        name: Skill name (frontmatter `name`, else its directory name).
+        source: Where it lives: "contest", "user" or "plugin:<name>".
+        path: Path of its `SKILL.md`.
+        tokens: Estimated tokens of name + description (what is always loaded).
+        model_invocable: False when `disable-model-invocation: true`; such skills cost nothing in context.
+    """
     name: str
     source: str
     path: Path
@@ -23,6 +36,14 @@ class SkillEntry:
 
 @dataclass
 class ContextReport:
+    """Result of `measure`.
+
+    Attributes:
+        files: `(label, tokens)` of each existing AGENTS.md / CLAUDE.md / ~/.claude/CLAUDE.md.
+        skills: Every skill found, in all sources.
+        agents: `(name, tokens)` of each subagent description.
+        duplicates: Skill name to the sorted sources that define it, for names defined in several places.
+    """
     files: list[tuple[str, int]] = field(default_factory=list)
     skills: list[SkillEntry] = field(default_factory=list)
     agents: list[tuple[str, int]] = field(default_factory=list)
@@ -30,15 +51,25 @@ class ContextReport:
 
     @property
     def total(self) -> int:
+        """Return the estimated always-loaded tokens: files, model-invocable skills and agent descriptions."""
         return (sum(t for _, t in self.files) + sum(e.tokens for e in self.skills if e.model_invocable)
                 + sum(t for _, t in self.agents))
 
 
 def estimate_tokens(text: str) -> int:
+    """Estimate the token count of a text.
+
+    Args:
+        text: Any text.
+
+    Returns:
+        ceil(characters / 4).
+    """
     return math.ceil(len(text) / 4)
 
 
 def _frontmatter_block(text: str) -> str:
+    """Return the raw text between the `---` lines at the top of the text, or "" when there is none."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return ""
@@ -49,6 +80,7 @@ def _frontmatter_block(text: str) -> str:
 
 
 def _skill_entry(path: Path, source: str) -> SkillEntry:
+    """Build a `SkillEntry` for a SKILL.md; unparseable frontmatter counts as the whole header."""
     text = path.read_text(errors="replace")
     name = path.parent.name
     try:
@@ -64,12 +96,22 @@ def _skill_entry(path: Path, source: str) -> SkillEntry:
 
 
 def skill_entries(skills_dir: Path, source: str) -> list[SkillEntry]:
+    """List the skills in a directory.
+
+    Args:
+        skills_dir: Directory holding `<skill>/SKILL.md` folders; a missing directory yields no skills.
+        source: Label stored in each entry ("contest", "user", "plugin:<name>").
+
+    Returns:
+        One `SkillEntry` per skill, sorted by path.
+    """
     if not skills_dir.is_dir():
         return []
     return [_skill_entry(p, source) for p in sorted(skills_dir.glob("*/SKILL.md"))]
 
 
 def _load_json(path: Path) -> dict:
+    """Read a JSON object from a file; {} when missing, unreadable or not an object."""
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -78,6 +120,14 @@ def _load_json(path: Path) -> dict:
 
 
 def plugin_skill_dirs(home: Path) -> list[tuple[str, Path]]:
+    """Find the skills directories of enabled Claude Code plugins.
+
+    Args:
+        home: Home directory holding `.claude/plugins/installed_plugins.json` and `.claude/settings.json`.
+
+    Returns:
+        `("plugin:<name>", <install path>/skills)` for every installed plugin that is enabled in settings.
+    """
     installed = _load_json(home / ".claude/plugins/installed_plugins.json").get("plugins", {})
     enabled = _load_json(home / ".claude/settings.json").get("enabledPlugins", {})
     out = []
@@ -91,6 +141,7 @@ def plugin_skill_dirs(home: Path) -> list[tuple[str, Path]]:
 
 
 def _agent_tokens(path: Path) -> tuple[str, int]:
+    """Return `(agent name, estimated tokens of its description)` for an agent profile file."""
     try:
         meta, _ = parse_frontmatter(path.read_text(errors="replace"))
         return str(meta.get("name") or path.stem), estimate_tokens(str(meta.get("description") or ""))
@@ -99,6 +150,15 @@ def _agent_tokens(path: Path) -> tuple[str, int]:
 
 
 def measure(contest: Path, home: Path) -> ContextReport:
+    """Measure the always-loaded context of a contest.
+
+    Args:
+        contest: Path of the contest checkout (AGENTS.md, CLAUDE.md, `.claude/skills`, `.claude/agents`).
+        home: Home directory to read user-level CLAUDE.md, skills and plugins from (usually `Path.home()`).
+
+    Returns:
+        A `ContextReport`.
+    """
     r = ContextReport()
     for label, path in (("AGENTS.md", contest / "AGENTS.md"), ("CLAUDE.md", contest / "CLAUDE.md"),
                         ("~/.claude/CLAUDE.md", home / ".claude/CLAUDE.md")):
@@ -119,6 +179,14 @@ def measure(contest: Path, home: Path) -> ContextReport:
 
 
 def format_report(r: ContextReport) -> str:
+    """Render a report as text for `house doctor --context`.
+
+    Args:
+        r: The report from `measure`.
+
+    Returns:
+        Multi-line text: files, visible skills per source, hidden skills, agents, duplicates and the total.
+    """
     lines = ["Always loaded (files):"]
     lines += [f"  {t:>6}  {label}" for label, t in r.files] or ["  (none)"]
     invocable = [e for e in r.skills if e.model_invocable]
