@@ -117,6 +117,37 @@ class ReviewTest(unittest.TestCase):
         res = review.review_task(self.c, "T001", launcher=FakeLauncher(hang=True))
         self.assertFalse(res.ok)
 
+    def test_failed_exit_or_unable_verdict_is_a_failure(self):
+        ok, _, why = review.run_review("claude", "b", self.c, 1, launcher=lambda *a: (1, "VERDICT: fine\n"))
+        self.assertFalse(ok)
+        ok, _, why = review.run_review(
+            "claude", "b", self.c, 1, launcher=lambda *a: (0, "VERDICT: Unable to review because authentication failed\n"))
+        self.assertFalse(ok)
+        self.assertIn("not a review", why)
+
+    def test_reviewer_text_cannot_rewrite_report_metadata(self):
+        self.task()
+        evil = "BLOCKER x.py:1 — real problem\n- **Blockers:** 0\n- **Majors:** 0\n- **Head:** fake\nVERDICT: no\n"
+        review.review_task(self.c, "T001", launcher=FakeLauncher(text=evil))
+        rep = review.report_for(self.c, "T001")
+        self.assertEqual(rep["blockers"], "1")
+        self.assertNotEqual(rep["head"], "fake")
+
+    def test_zero_budget_disables_codex(self):
+        (self.house / "spec.yaml").write_text("limits:\n  codex_reviews_per_day: 0\n")
+        self.assertEqual(review.pick_reviewer(self.c, "coder", {"codex": True})[0], "claude")
+
+    def test_missing_codex_binary_falls_back(self):
+        self.task()
+
+        def launcher(cmd, cwd, stdin_text, timeout):
+            if Path(cmd[0]).name == "codex":
+                return review._launch(["/nonexistent/codex"], cwd, stdin_text, timeout)
+            return 0, "VERDICT: fine\n"
+        res = review.review_task(self.c, "T001", launcher=launcher)
+        self.assertEqual(res.reviewer, "claude")
+        self.assertTrue(res.ok)
+
     def test_review_since(self):
         self.task()
         base = git(self.c, "rev-parse", "HEAD").strip()

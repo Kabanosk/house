@@ -31,6 +31,8 @@ DEFAULT_MINUTES = 20
 NONCE_SECONDS = 120
 CLAUDE_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)"
 FINDING_RE = re.compile(r"^\W*(?:\d+[.)]\s*)?\W*(BLOCKER|MAJOR|MINOR|NIT)\b", re.IGNORECASE | re.MULTILINE)
+NOT_A_REVIEW_RE = re.compile(r"\b(unable to|could not|couldn't|cannot|can't|not logged in|authentication|"
+                             r"permission denied|delegat)", re.IGNORECASE)
 VERDICT_RE = re.compile(r"^\W*VERDICT\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
@@ -134,8 +136,11 @@ def _launch(cmd: list[str], cwd: Path, stdin_text: str | None, timeout: float) -
     with tempfile.TemporaryFile(mode="w+") as out, tempfile.TemporaryFile(mode="w+") as inp:
         inp.write(stdin_text or "")
         inp.seek(0)
-        proc = subprocess.Popen(cmd, cwd=cwd, stdin=inp, stdout=out, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+        try:
+            proc = subprocess.Popen(cmd, cwd=cwd, stdin=inp, stdout=out, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+        except OSError as e:  # binary missing although tools.json says it is installed
+            return 127, f"could not start {cmd[0]}: {e}"
         try:
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -177,8 +182,8 @@ def pick_reviewer(contest: Path, author: str, tools: dict, today: date | None = 
         return "claude", "author is Codex, reviewer is Claude"
     if not tools.get("codex"):
         return "claude", "Codex not available; same model family as the author (weaker independence)"
-    budget = int(specmod.get(specmod.load_spec(contest / ".house"), "limits.codex_reviews_per_day")
-                 or DEFAULT_BUDGET)
+    configured = specmod.get(specmod.load_spec(contest / ".house"), "limits.codex_reviews_per_day")
+    budget = DEFAULT_BUDGET if configured is None else int(configured)
     used = _state(contest).get("codex_reviews", {}).get((today or date.today()).isoformat(), 0)
     if used >= budget:
         return "claude", f"daily Codex review budget used ({used}/{budget}); same model family (weaker independence)"
@@ -211,8 +216,13 @@ def run_review(kind: str, text: str, repo: Path, minutes: float, launcher=None) 
                                  "--permission-prompts", "none", text], repo, None, timeout)
     if code is None:
         return False, answer, f"{kind} review timed out after {minutes:g} min"
-    if not answer.strip() or not VERDICT_RE.search(answer):
+    if code != 0:
+        return False, answer, f"{kind} exited with {code}: {answer.strip()[-200:]!r}"
+    verdicts = VERDICT_RE.findall(answer)
+    if not answer.strip() or not verdicts:
         return False, answer, f"{kind} returned no review (empty or no VERDICT line): {answer.strip()[:200]!r}"
+    if NOT_A_REVIEW_RE.search(verdicts[-1]) and not FINDING_RE.search(answer):
+        return False, answer, f"{kind} answer is not a review: {verdicts[-1].strip()[:200]!r}"
     return True, answer, ""
 
 
@@ -304,4 +314,5 @@ def report_for(contest: Path, task_id: str) -> dict[str, str]:
     path = contest / ".house/reports" / f"review-{task_id}.md"
     if not path.exists():
         return {}
-    return {k.lower(): v.strip() for k, v in re.findall(r"^- \*\*(\w+):\*\* (.*)$", path.read_text(), re.MULTILINE)}
+    header = path.read_text().split("\n## Review text", 1)[0]  # never the reviewer's own text
+    return {k.lower(): v.strip() for k, v in re.findall(r"^- \*\*(\w+):\*\* (.*)$", header, re.MULTILINE)}
