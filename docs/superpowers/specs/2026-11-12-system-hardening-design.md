@@ -215,6 +215,40 @@ nie ma `AskUserQuestion`; nocny przebieg nie ma jak zawołać człowieka.
   - Linkowanie: kod QR jest ważny ok. 2 minuty; `house setup` generuje go i od razu pokazuje.
   - Ryzyko: stare wersje `signal-cli` przestają działać po zmianach protokołu; `doctor` pokazuje wersję,
     `setup` aktualizuje.
+- **Grupa drużyny** (decyzje Wojtka, 2026-11-13):
+  - Każde powiadomienie idzie **do „Notatki do siebie” (dla Wojtka, z powiadomieniem) i do grupy Signal
+    konkursu**, jeśli jest ustawiona. Grupę podaje się w specyfikacji konkursu:
+    `spec.yaml` → `notify: {signal_group: "<nazwa grupy>"}` (wypełniane na `/house-start`; `house` rozwiązuje
+    nazwę na ID grupy przez `signal-cli listGroups`, niejednoznaczna lub nieznana nazwa → ostrzeżenie i tylko
+    „Notatka do siebie”).
+  - **Skrót konkursu** (Wojtek, 2026-11-13; jedna grupa może obsługiwać kilka konkursów):
+    `spec.yaml` → `notify.alias` (np. `fr`, `fi`, `collab`; małe litery/cyfry). Unikalny tylko wśród
+    **trwających** konkursów: trwający = `timeline.end` w przyszłości albo puste. Zakończone mogą mieć ten sam
+    skrót (np. kolejna TechArena znów `fr`); `house doctor` sprawdza kolizje tylko wśród trwających, a
+    odpowiedzi dla zakończonego konkursu `house inbox` pomija. Wiadomości w grupie idą z numeru Wojtka (urządzenie połączone,
+    bez osobnego numeru) z prefiksem `🤖 [fr]`, żeby było jasne, że pisze system i którego konkursu dotyczy.
+  - **Jak odpowiadać: odpowiedź z cytatem** (Wojtek, 2026-11-13: „bez pierduł, tylko decyzja”). Przeciągasz
+    wiadomość bota w prawo i piszesz samą decyzję, np. `B` albo krótki tekst. `house` zapamiętuje timestamp
+    każdej wysłanej wiadomości → (konkurs, Q-###) w `~/.local/share/house/sent.jsonl`; odpowiedź ma `quote.id`
+    = ten timestamp, więc numer pytania i konkurs są znane. Każda wiadomość z pytaniem jest do tego ułożona:
+    ```
+    🤖 [fr] Q-007 Które zgłoszenie wybrać jako finalne?
+    A) lgbm-v3 (lokalnie 0.812, LB 0.801)  B) ensemble-v2 (0.819, LB 0.806)
+    Rekomendacja: B (lepszy na obu). Domyślnie B o 23:50.
+    ↩ odpowiedz cytatem: A / B / własny tekst
+    ```
+    Jedna wiadomość = jedno pytanie (cytat musi wskazywać jednoznacznie). Zapasowo, bez reklamowania:
+    `Q-007: B` lub `fr Q-007: B` bez cytatu też działa; niejednoznaczne → `house` dopytuje.
+  - Kto odpowiedział, `house` wyciąga z samej wiadomości (`envelope.sourceName`, inaczej numer); nikt nie wpisuje
+    swojego imienia.
+  - **Odpowiadać może każdy**: Wojtek z „Notatki do siebie” albo z grupy, koledzy z grupy. **Liczy się pierwsza
+    odpowiedź** (najwcześniejszy timestamp Signala); kto odpowiedział, trafia do `QUESTIONS.md` i D-###
+    (`Kto: człowiek (<imię lub numer>)`). Po zapisaniu `house` potwierdza w grupie: `✓ [fr] Q-007: B (<kto>)`.
+    Późniejsze odpowiedzi na rozstrzygnięte pytanie: krótka informacja, kto i jak już rozstrzygnął.
+  - Prywatność: połączone urządzenie odbiera wszystkie wiadomości konta; `house inbox` zapisuje tylko
+    „Notatkę do siebie” i grupy z `notify.signal_group` konkursów, resztę odrzuca bez zapisu.
+  - Format w JSON z `signal-cli`: odpowiedź Wojtka w grupie = `syncMessage.sentMessage` z `groupInfo`;
+    odpowiedź kolegi = `dataMessage` z `groupInfo` (do zweryfikowania na pierwszej prawdziwej wiadomości).
 - **Odpowiedzi z telefonu**: `house inbox <konkurs>` czyta nowe wiadomości, rozpoznaje `Q-007: B` /
   `Q-007 tak` / dowolny tekst po `Q-007:`, zapisuje odpowiedź w `QUESTIONS.md` (`[answered]`, **Odpowiedź**),
   dopisuje D-### i odblokowuje zadania. Wiadomości bez `Q-###` ignoruje (to też Twoje zwykłe notatki).

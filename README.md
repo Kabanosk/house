@@ -27,8 +27,8 @@ W Claude Code:
 |---|---|
 | `/house-start` + wklejony regulamin, zadanie, kryteria | uzupełnia `.house/spec.yaml`, sprawdza regulamin, zadaje pytania o luki |
 | `/house-ideate` | pomysły od ideatora, ocena sędziego według kryteriów, wybór (Ty albo sędzia) |
-| `/house-plan` | rozpisuje zadania (DAG) w `.house/tasks/` |
-| `/house-run` | odpala koderów w osobnych worktree, scala wyniki |
+| `/house-plan` | rozpisuje zadania (DAG) w `.house/tasks/` z kryteriami jako komendami i je zamraża |
+| `/house-run` | odpala koderów w osobnych worktree, scala przez `house merge` (bramka) |
 | `/house-judge` | ocena według rubryki/metryki z dowodami |
 | `/house-ship` | deploy, pitch, slajdy, README zgłoszenia, czysty eksport |
 | `/house-submit` | zgłoszenie w konkursie optymalizacyjnym |
@@ -65,8 +65,10 @@ Uwaga: `AGENTS.md`/`CLAUDE.md` na wspólnej gałęzi czytają też narzędzia re
 1. `/house-ideate` → pomysły, do każdego karta „co już istnieje” (katalog YC, YC Requests for Startups,
    zwycięzcy hackathonów, Product Hunt), ocena sędziego na podstawie kart → wybierasz Ty (`copilot`) albo sędzia
    (`autopilot`). Bez karty pomysł nie może zostać wybrany.
-2. `/house-plan` → zadania w `.house/tasks/`. Przejrzyj je; to najtańszy moment na korektę.
-3. `/house-run` → koderzy (Claude i Codex) w osobnych worktree w `.worktrees/`, scalanie do `main` na bieżąco.
+2. `/house-plan` → zadania w `.house/tasks/`. Przejrzyj je, zwłaszcza kryteria akceptacji (komendy), zanim
+   zostaną zamrożone; to najtańszy moment na korektę.
+3. `/house-run` → koderzy (Claude i Codex) w osobnych worktree w `.worktrees/`, scalanie do `main` na bieżąco
+   przez `house merge` (patrz „Sprawdzenia i bramka scalania”).
 4. `/house-judge` przed każdym kamieniem milowym → oceny 1–5 według kryteriów i jedna najtańsza poprawa.
 5. `/house-ship` → demo, pitch (`pitch/script.md`, `pitch/slides.html`), README zgłoszenia, czysty eksport.
 
@@ -84,6 +86,24 @@ na publiczne repo. Samego repo konkursu nigdy nie upubliczniaj.
 **Sprawdzenie pomysłu w katalogu YC** (też ręcznie): `house yc AI agents that negotiate prices` → najbliższe
 firmy YC z edycją, statusem i linkiem. Dane: codzienny zrzut katalogu YC ([yc-oss](https://github.com/yc-oss/api)),
 cache w `~/.cache/house/`, działa offline na starym zrzucie.
+
+## Sprawdzenia i bramka scalania
+
+Kryteria akceptacji zadania to komendy (`run`, opcjonalnie `expect`, np. `score >= 0.71`); `manual` tylko dla
+tego, czego nie sprawdzi komenda. Na końcu planowania są zamrażane (`.house/checks/T###.json`), więc koder ich nie
+poluzuje; zmiana tylko z powodem (`--refreeze --reason`, wpis D-###).
+
+| Komenda | Co robi |
+|---|---|
+| `house check <konkurs> T### [--worktree P]` | uruchamia zamrożone kryteria (najpierw `.house/init.sh`, jeśli jest), GREEN/RED |
+| `house check <konkurs> --all` | to samo dla wszystkich zadań `merged`/`done` na głównej gałęzi |
+| `house check <konkurs> T### --freeze` / `--refreeze --reason …` | zamraża / zmienia kryteria |
+| `house check <konkurs> T### --manual AC-n --evidence …` | judge zapisuje kryterium ręczne |
+| `house merge <konkurs> T###` | sprawdza gałąź → scala → sprawdza wszystkie scalone zadania → przy regresji cofa |
+
+Statusy: `todo` → `doing` → `review` (tu kończy koder) → `merged` (bramka przeszła) → `done` (także kryteria
+ręczne); `blocked`, gdy utknęło albo scalenie zostało cofnięte. `house merge` odmawia, gdy w katalogu konkursu są
+niezapisane zmiany w kodzie.
 
 ## Aktualizacja systemu
 

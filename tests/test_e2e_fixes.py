@@ -12,10 +12,11 @@ class E2EFixesTest(unittest.TestCase):
         self.assertIn("git -C", tmpl)
         self.assertIn("cd", tmpl.split("## Shell")[1].split("##")[0])
 
-    def test_run_cleans_up_worktrees_after_merge(self):
-        text = (SKILLS / "house-run/SKILL.md").read_text()
-        self.assertIn("git worktree remove", text)
-        self.assertIn("git branch -d", text)
+    def test_run_cleans_up_worktrees_after_merge(self):  # cleanup now lives in `house merge`
+        self.assertIn("house merge", (SKILLS / "house-run/SKILL.md").read_text())
+        code = (HOUSE_ROOT / "houselib/merge.py").read_text()
+        self.assertIn('"worktree", "remove"', code)
+        self.assertIn('"branch", "-d"', code)
 
     def test_codex_driver_raises_bash_timeout(self):  # ideator's codex run was killed at the 2 min default
         self.assertIn("600000", adapters.CODEX_DRIVER)

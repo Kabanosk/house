@@ -6,9 +6,22 @@ owner: null
 branch: null
 depends_on: []
 capabilities: []
-acceptance: []
+acceptance:
+  - id: AC-1
+    run: "<command run in the task's worktree; exit 0 = pass>"
+    timeout: 600
+  - id: AC-2
+    run: "<optional: command whose stdout is checked>"
+    expect: "<regex, or a threshold like: score >= 0.71>"
+  - id: AC-3
+    manual: <only what no command can check; the judge records evidence>
+protected:
+  - <test or scorer files the worker must not change>
 ---
-<!-- Copy to tasks/T###-slug.md and set status: todo. Files with status: template are ignored. -->
+<!-- Copy to tasks/T###-slug.md and set status: todo. Files with status: template are ignored.
+Status: todo → doing → review (worker stops here) → merged (house merge passed) → done (manual criteria too);
+blocked when stuck or reverted. Criteria are frozen by `house check <contest> T### --freeze` at the end of
+planning; changing them later needs `--refreeze --reason` (logged as D-###). -->
 ## Objective
 One paragraph: what done looks like for this task.
 

@@ -6,10 +6,12 @@ from pathlib import Path
 from . import (
     HOUSE_ROOT,
     adapters,
+    checks,
     context,
     doctor,
     export,
     manifest,
+    merge,
     registry,
     scaffold,
     setup,
@@ -42,6 +44,70 @@ def cmd_doctor(args) -> int:
         if args.context:
             print("\n" + context.format_report(context.measure(target.resolve(), Path.home())))
     return 0
+
+
+def _print_report(rep: checks.CheckReport) -> None:
+    for r in rep.results:
+        if rep.kinds[r.id] == "manual":
+            print(f"MANUAL {r.id} {'ok' if r.passes else 'pending'}")
+        elif r.passes:
+            print(f"PASS {r.id}")
+        else:
+            detail = "timeout" if r.exit is None else f"exit {r.exit}"
+            print(f"FAIL {r.id} ({detail})")
+            for line in r.output_tail.splitlines()[-5:]:
+                print(f"    {line}")
+    if not rep.init_ok:
+        print("FAIL init.sh")
+    if rep.mismatch:
+        print("criteria changed since freeze (house check --refreeze --reason ...)")
+
+
+def cmd_check(args) -> int:
+    target = contest_dir(args.name)
+    house = target / ".house"
+    if not house.is_dir():
+        print(f"error: {target} is not a house contest", file=sys.stderr)
+        return 1
+    if args.all:
+        ok = True
+        for path in sorted((house / "tasks").glob("T*-*.md")):
+            tid = path.name.split("-", 1)[0]
+            if checks.load_task(house, tid).meta.get("status") not in ("merged", "done"):
+                continue
+            rep = checks.run_checks(house, tid, target)
+            print(f"{tid} {'GREEN' if rep.green else 'RED'}")
+            if not rep.green:
+                _print_report(rep)
+            ok = ok and rep.green
+        return 0 if ok else 1
+    if not args.task:
+        print("error: give a task id (T###) or --all", file=sys.stderr)
+        return 2
+    if (args.refreeze and not args.reason) or (args.manual and not args.evidence):
+        print("error: --refreeze needs --reason, --manual needs --evidence", file=sys.stderr)
+        return 2
+    if args.freeze:
+        print(f"froze {checks.freeze(house, args.task)}")
+        return 0
+    if args.refreeze:
+        print(f"refroze {args.task}, logged {checks.refreeze(house, args.task, args.reason)}")
+        return 0
+    if args.manual:
+        checks.record_manual(house, args.task, args.manual, args.evidence)
+        print(f"recorded {args.task} {args.manual}: {args.evidence}")
+        return 0
+    rep = checks.run_checks(house, args.task, Path(args.worktree).resolve() if args.worktree else target)
+    _print_report(rep)
+    print("GREEN" if rep.green else "RED")
+    return 0 if rep.green else 1
+
+
+def cmd_merge(args) -> int:
+    target = contest_dir(args.name)
+    out = merge.merge_task(target, args.task, Path(args.worktree).resolve() if args.worktree else None)
+    print(out.message)
+    return 0 if out.ok else 1
 
 
 def cmd_new(args) -> int:
@@ -150,6 +216,25 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--context", action="store_true",
                    help="estimate the always-loaded context of the contest (AGENTS.md, skills, agents)")
     d.set_defaults(func=cmd_doctor)
+
+    ck = sub.add_parser("check", help="run a task's frozen acceptance checks (or freeze / refreeze / record manual)")
+    ck.add_argument("name")
+    ck.add_argument("task", nargs="?", help="task id, e.g. T001")
+    ck.add_argument("--worktree", help="run in this checkout (default: the contest checkout)")
+    ck.add_argument("--all", action="store_true", help="every merged/done task, in the contest checkout")
+    mode = ck.add_mutually_exclusive_group()
+    mode.add_argument("--freeze", action="store_true", help="freeze the task's acceptance criteria")
+    mode.add_argument("--refreeze", action="store_true", help="re-freeze changed criteria (needs --reason)")
+    mode.add_argument("--manual", metavar="AC-n", help="record a manual criterion as passed (needs --evidence)")
+    ck.add_argument("--reason")
+    ck.add_argument("--evidence")
+    ck.set_defaults(func=cmd_check)
+
+    mg = sub.add_parser("merge", help="gate: check a task branch, merge it, re-check main, revert on regression")
+    mg.add_argument("name")
+    mg.add_argument("task", help="task id, e.g. T001")
+    mg.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
+    mg.set_defaults(func=cmd_merge)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")

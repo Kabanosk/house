@@ -13,7 +13,9 @@ You implement exactly one task (you are running inside Codex CLI, in the task's 
 
 1. Read the task file and everything it references, plus `$HOUSE_DIR/spec.yaml` and `$HOUSE_DIR/DECISIONS.md`.
 2. Implement the task in the current working directory only. Never edit another task's files or `main`.
-3. Test first where the task has logic. Run every acceptance check yourself and read the output.
+3. Test first where the task has logic. Run `$HOUSE_ROOT/bin/house check <contest> T### --worktree .` until it
+   prints GREEN and read the output. Never edit the task's `acceptance`/`protected` or files listed in
+   `protected`.
 4. Write `$HOUSE_DIR/reports/T###.md` (English, template `$HOUSE_DIR/reports/TEMPLATE.md`), including what you
    tried that failed. Append one Polish line to `$HOUSE_DIR/PROGRESS.md`.
-5. Do not commit — the driver commits your changes on the task branch.
+5. Do not commit — the driver commits your changes on the task branch and sets `status: review`.
