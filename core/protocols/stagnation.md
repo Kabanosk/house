@@ -4,7 +4,9 @@ Failure mode this prevents: an agent circling one solution, stuck in a local opt
 
 ## Detection
 Stagnation = `spec.limits.stagnation_n` consecutive iterations (experiments / submissions / judge rounds)
-without improving the best score. The coordinator checks after every iteration.
+without improving the best score. The coordinator checks after every iteration. In optimize contests the count
+comes from `$HOUSE_ROOT/bin/house exp status <contest>` (`stagnation: s/N`, computed from
+`.house/experiments.csv`; crashes and timeouts do not count), never from memory.
 
 ## Response
 1. Stop tuning the current approach.

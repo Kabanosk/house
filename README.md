@@ -72,8 +72,9 @@ Uwaga: `AGENTS.md`/`CLAUDE.md` na wspólnej gałęzi czytają też narzędzia re
 4. `/house-judge` przed każdym kamieniem milowym → oceny 1–5 według kryteriów i jedna najtańsza poprawa.
 5. `/house-ship` → demo, pitch (`pitch/script.md`, `pitch/slides.html`), README zgłoszenia, czysty eksport.
 
-**W trakcie (konkurs optymalizacyjny)**: to samo do `/house-run`, potem pętla eksperyment → `/house-judge` →
-`/house-submit`. Każde zgłoszenie ląduje w `.house/submissions.csv` z wynikiem lokalnym i z leaderboardu.
+**W trakcie (konkurs optymalizacyjny)**: to samo do `/house-run`, potem pętla eksperymentów `house exp`
+(patrz „Pętla eksperymentów”) → `/house-judge` → `/house-submit`. Każde zgłoszenie ląduje w
+`.house/submissions.csv` z wynikiem lokalnym i z leaderboardu.
 
 **Po powrocie od komputera**: napisz „jak tam”. Najpierw dostajesz briefing (co się zmieniło, wynik, decyzje
 podjęte bez Ciebie, ryzyka), potem pytania po jednym. Twoje odpowiedzi trafiają do `DECISIONS.md`.
@@ -154,6 +155,29 @@ w `.house/`, przechodzi przez bramkę `house merge` (ręczna zmiana kryteriów a
 
 Uprawnienia sesji: tryb `auto` + lista dozwolonych komend + hooki (bez `--dangerously-skip-permissions`).
 
+## Pętla eksperymentów (optimize)
+
+Każda próba to jedna mała zmiana rodzica, uruchomiona ze stałym limitem czasu i oceniona lokalną sprawdzarką.
+O tym, czy zmiana zostaje, decyduje kod, nie agent:
+
+```bash
+house exp new <konkurs> --from best --idea I-003 --note "lgbm zamiast rf"   # → E-007 .worktrees/exp-E-007
+# agent zmienia kod w tym worktree
+house exp run <konkurs> E-007 --budget 5m -- python train.py                  # → E-007 keep 0.873
+house exp run <konkurs> --from best -- python train.py --lr 0.03               # zmiana = sama komenda
+house exp status <konkurs>                                                     # najlepszy, drzewo, stagnacja
+```
+
+- Lepszy od rodzica → `keep` (worktree zostaje, bo są w nim predykcje i wagi do zgłoszenia), inaczej `revert`
+  (worktree znika). `crash`/`timeout` naprawia się jako dziecko: `--from E-###`. Remis to `revert`.
+- Wszystko trafia do `.house/experiments.csv` (`id, parent, commit, idea_id, budget, duration, score, status, …`),
+  a każdy commit zostaje jako `refs/exp/E-###`. Stagnację liczy `house exp status` z tego pliku.
+- W `spec.yaml` ustaw `scoring.local_scorer` (drukuje `score: <liczba>`) i `scoring.direction: max|min`. Dane
+  spoza gita wpisz w `exp.shared` (np. `[data]`), wtedy każdy worktree dostaje do nich link.
+- Eksperyment, który zmienia sprawdzarkę albo zamrożony test, kończy się `crash` („tampered”). Ocena zawsze
+  używa aktualnej sprawdzarki z konkursu. Po poprawce sprawdzarki starsze wyniki nie są porównywane z nowymi.
+- `house exp prune <konkurs> --keep 3` usuwa worktree słabszych `keep` (commity zostają).
+
 ## Recenzja krzyżowa
 
 `house review <konkurs> T###` (gałąź zadania) albo `house review <konkurs> --since last` (wszystko od poprzedniej
@@ -231,6 +255,7 @@ Stan konkursu żyje w `contests/<nazwa>/.house/`:
 | `PROGRESS.md` | drużyna | krótki ślad postępu (PL) |
 | `tasks/`, `reports/` | agenci, drużyna | zadania (DAG) i raporty (EN) |
 | `ideas.md`, `submissions.csv` | agenci | archiwum pomysłów, zgłoszenia lokalnie vs leaderboard |
+| `experiments.csv` | `house exp` | drzewo eksperymentów: rodzic, commit, budżet, wynik, keep/revert |
 
 Tryby (`mode` w `spec.yaml`): `copilot` pyta o wybór pomysłu, zmianę kierunku i duże koszty;
 `autopilot` decyduje sam i loguje decyzje. W końcówce konkursu oba pytają przed zgłoszeniem.

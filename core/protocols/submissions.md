@@ -13,4 +13,6 @@
 ## After submitting
 - Append a row: `time,submission_id,commit,kind,local_score,leaderboard_score,note`. Fill `leaderboard_score`
   as soon as it is known. The commit hash must reproduce the submission exactly.
+- A candidate from `house exp` is a `keep` experiment: `commit` and `local_score` come from its row in
+  `.house/experiments.csv`, and `note` starts with its id (`E-###`). Its outputs are in `.worktrees/exp-E-###`.
 - Update the local↔leaderboard agreement (see `playbooks/optimize.md`) and mention it in the next report.
