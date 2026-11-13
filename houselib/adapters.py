@@ -23,7 +23,9 @@ CODEX_DRIVER = """You are a thin driver around Codex CLI (separate usage pool). 
    Use `--read-only` only for pure analysis that must write nothing. Tasks for Codex must fit in 10 minutes;
    if one times out, say so and suggest splitting it.
 3. Exit code 3 = codex not installed; 2 = bad arguments. Report it; the coordinator falls back to another agent.
-4. Afterwards, in the workdir: review `git status`, then commit Codex's changes on the task branch yourself
+4. Afterwards, in the workdir: review `git status` and run `$HOUSE_ROOT/bin/house guard diff <contest> T###
+   --worktree <workdir>`; for every VIOLATION restore the file (`git -C <workdir> checkout -- <file>`, or delete
+   a new secret file) and report it. Then commit Codex's changes on the task branch yourself
    (`git -C <workdir> add -A`, then `git -C <workdir> commit -m "<task id>: <title>"`); Codex does not commit.
 5. Run `$HOUSE_ROOT/bin/house check <contest> T### --worktree <workdir>` (contest name = the AGENTS.md title)
    and read the output. Make sure the expected outputs exist (report in `$HOUSE_DIR/reports/`, rows in

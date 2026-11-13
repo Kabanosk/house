@@ -209,6 +209,36 @@ class MergeTest(unittest.TestCase):
         self.assertFalse(out.ok)
         self.assertEqual((self.c / "calc.py").read_text(), CALC_OK)
 
+    def test_branch_editing_protected_test_refused(self):
+        (self.c / "test_calc.py").write_text(TEST_CALC)
+        git(self.c, "add", "test_calc.py")
+        git(self.c, "commit", "-q", "-m", "planner writes the test")
+        self.add_task("T001", "calc", '  - id: AC-1\n    run: "python3 -m unittest -q test_calc"\n',
+                      {"calc.py": CALC_BAD, "test_calc.py": TEST_CALC.replace("5)", "-1)")},
+                      protected="protected:\n  - test_calc.py\n")
+        out = merge.merge_task(self.c, "T001")
+        self.assertFalse(out.ok)
+        self.assertIn("test_calc.py", out.message)
+        self.assertFalse((self.c / "calc.py").exists())
+
+    def test_cli_guard_diff(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        from houselib import cli
+        self.calc_task()
+        with mock.patch.object(cli, "HOUSE_ROOT", self.root), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cli.main(["guard", "diff", "c1", "T001"]), 0)
+            (self.c / ".worktrees/T001-calc/.env.prod").write_text("K=sk-abcdefghijklmnopqrstuvwxyz0123\n")
+            (self.c / ".worktrees/T001-calc/.gitignore").write_text("")
+            self.assertEqual(cli.main(["guard", "diff", "c1", "T001"]), 1)
+        self.assertIn(".env.prod", out.getvalue())
+
+    def test_codex_driver_runs_guard_diff(self):
+        from houselib import adapters
+        self.assertIn("house guard diff", adapters.CODEX_DRIVER)
+
     def test_cli_exit_codes(self):
         import io
         from contextlib import redirect_stdout

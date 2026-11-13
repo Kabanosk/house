@@ -10,6 +10,7 @@ from . import (
     context,
     doctor,
     export,
+    guard,
     manifest,
     merge,
     registry,
@@ -108,6 +109,22 @@ def cmd_merge(args) -> int:
     out = merge.merge_task(target, args.task, Path(args.worktree).resolve() if args.worktree else None)
     print(out.message)
     return 0 if out.ok else 1
+
+
+def cmd_guard(args) -> int:
+    target = contest_dir(args.name)
+    house = target / ".house"
+    task = checks.load_task(house, args.task)
+    branch = str(task.meta.get("branch") or "")
+    wt = Path(args.worktree).resolve() if args.worktree else target / ".worktrees" / branch.removeprefix("task/")
+    if not wt.is_dir():
+        print(f"error: no worktree at {wt} (pass --worktree)", file=sys.stderr)
+        return 2
+    found = guard.diff_violations(target, args.task, wt)
+    for v in found:
+        print(f"VIOLATION {v}")
+    print("CLEAN" if not found else f"{len(found)} violation(s)")
+    return 1 if found else 0
 
 
 def cmd_new(args) -> int:
@@ -235,6 +252,13 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("task", help="task id, e.g. T001")
     mg.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
     mg.set_defaults(func=cmd_merge)
+
+    gd = sub.add_parser("guard", help="guard rules after the fact: `guard diff <contest> T###` checks a task branch")
+    gd.add_argument("action", choices=["diff"])
+    gd.add_argument("name")
+    gd.add_argument("task", help="task id, e.g. T001")
+    gd.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
+    gd.set_defaults(func=cmd_guard)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")
