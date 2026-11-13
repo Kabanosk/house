@@ -26,15 +26,27 @@ class VendoredSkillsTest(unittest.TestCase):
             body = (HOUSE_ROOT / "core/agents" / f"{agent}.md").read_text()
             self.assertIn(f"vendor/skills/{skill}/SKILL.md", body, agent)
 
-    def test_adapt_installs_vendored_skills(self):
+    def test_adapt_does_not_copy_vendored_skills(self):
         with tempfile.TemporaryDirectory() as d:
             root = make_root(Path(d))
             c = scaffold.new_contest("c1", None, root=root, detect=lambda: FAKE_TOOLS)
             adapters.adapt(c, root, detect=lambda: FAKE_TOOLS)
             for name in VENDORED:
-                self.assertTrue((c / ".claude/skills" / name / "SKILL.md").is_file(), name)
-            self.assertTrue((c / ".claude/skills/webapp-testing/scripts/with_server.py").is_file())
+                self.assertFalse((c / ".claude/skills" / name).exists(), name)
 
+    def test_legacy_vendor_copies_cleaned(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as d:
+            root = make_root(Path(d))
+            c = scaffold.new_contest("c1", None, root=root, detect=lambda: FAKE_TOOLS)
+            shutil.copytree(root / "vendor/skills/frontend-design", c / ".claude/skills/frontend-design")
+            shutil.copytree(root / "vendor/skills/webapp-testing", c / ".claude/skills/webapp-testing")
+            with (c / ".claude/skills/webapp-testing/SKILL.md").open("a") as f:
+                f.write("\nlocal tweak\n")
+            res = adapters.adapt(c, root, detect=lambda: FAKE_TOOLS)
+            self.assertFalse((c / ".claude/skills/frontend-design").exists())
+            self.assertTrue((c / ".claude/skills/webapp-testing/SKILL.md").is_file())
+            self.assertTrue(any("webapp-testing" in w for w in res.warnings), res.warnings)
 
 if __name__ == "__main__":
     unittest.main()

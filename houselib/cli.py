@@ -3,7 +3,18 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, doctor, export, registry, scaffold, setup, yc
+from . import (
+    HOUSE_ROOT,
+    adapters,
+    context,
+    doctor,
+    export,
+    manifest,
+    registry,
+    scaffold,
+    setup,
+    yc,
+)
 
 
 def contest_dir(name: str) -> Path:
@@ -12,6 +23,9 @@ def contest_dir(name: str) -> Path:
 
 
 def cmd_doctor(args) -> int:
+    if args.context and not args.name:
+        print("error: --context needs a contest name (house doctor --context <name>)", file=sys.stderr)
+        return 1
     tools = doctor.detect()
     print(doctor.summary(tools))
     if args.name:
@@ -20,6 +34,13 @@ def cmd_doctor(args) -> int:
             print(f"error: {target} is not a house contest", file=sys.stderr)
             return 1
         print(f"wrote {doctor.write(target, tools)}")
+        changed = manifest.drift(target)
+        for rel, state in changed:
+            print(f"drift: {rel} ({state}); `house adapt {args.name}` keeps your edit as {rel}.orig")
+        if not changed and manifest.load(target) is not None:
+            print("generated files: in sync")
+        if args.context:
+            print("\n" + context.format_report(context.measure(target.resolve(), Path.home())))
     return 0
 
 
@@ -39,8 +60,11 @@ def cmd_adapt(args) -> int:
     if not (target / ".house").is_dir():
         print(f"error: {target} is not a house contest (run: bin/house new {args.name})", file=sys.stderr)
         return 1
-    for path in adapters.adapt(target):
+    res = adapters.adapt(target)
+    for path in res.written:
         print(f"wrote {path.relative_to(target)}")
+    for warning in res.warnings:
+        print(f"! {warning}")
     return 0
 
 
@@ -123,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("doctor", help="detect available tools (claude, codex, ollama, gpu, ...)")
     d.add_argument("name", nargs="?", help="contest name: also write .house/tools.json")
+    d.add_argument("--context", action="store_true",
+                   help="estimate the always-loaded context of the contest (AGENTS.md, skills, agents)")
     d.set_defaults(func=cmd_doctor)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
