@@ -53,7 +53,7 @@ def _parse_block_list(lines: list[str], i: int) -> tuple[list, int]:
             i += 1
             continue
         ind = _indent(line)
-        if ind < dash or (ind == dash and not line.lstrip().startswith("- ")) or ind == 0:
+        if ind < dash or (ind == dash and not line.lstrip().startswith("- ")):
             break
         if ind > dash:
             raise ValueError(f"unexpected indentation: {line!r}")
@@ -96,7 +96,7 @@ def parse_mapping(text: str) -> dict:
             j = i
             while j < len(lines) and not lines[j].strip():
                 j += 1
-            if j < len(lines) and _indent(lines[j]) > 0 and lines[j].lstrip().startswith("- "):
+            if j < len(lines) and lines[j].lstrip().startswith("- "):  # indented or at column 0
                 out[key.strip()], i = _parse_block_list(lines, j)
                 continue
         out[key.strip()] = parse_scalar(value)

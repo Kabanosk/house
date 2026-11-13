@@ -154,5 +154,33 @@ class ChecksTest(unittest.TestCase):
         self.assertIsNone(prot["tests/missing.py"])
 
 
+    def test_freeze_refuses_task_without_criteria(self):
+        self.write_task(task_text("  []\n".replace("  []\n", ""), protected="protected: []\n").replace("acceptance:\n", "acceptance: []\n"))
+        with self.assertRaises(ValueError):
+            checks.freeze(self.house, "T001")
+
+    def test_bad_expect_regex_is_a_failure(self):
+        self.frozen('  - id: AC-1\n    run: "echo x"\n    expect: "([unclosed"\n')
+        r = checks.run_checks(self.house, "T001", self.work)
+        self.assertFalse(r.results[0].passes)
+        self.assertIn("expect", r.results[0].output_tail)
+
+    def test_init_with_background_process_does_not_hang(self):
+        self.frozen(RUN_OK)
+        (self.house / "init.sh").write_text("sleep 30 &\necho started\n")
+        t = time.monotonic()
+        r = checks.run_checks(self.house, "T001", self.work)
+        self.assertLess(time.monotonic() - t, 10)
+        self.assertTrue(r.green)
+
+    def test_timeout_kills_child_processes(self):
+        import subprocess as sp
+        self.frozen('  - id: AC-1\n    run: "sleep 7731; echo x"\n    timeout: 1\n')
+        checks.run_checks(self.house, "T001", self.work)
+        time.sleep(0.3)
+        left = sp.run(["pgrep", "-f", "^sleep 7731"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(left, "")
+
+
 if __name__ == "__main__":
     unittest.main()

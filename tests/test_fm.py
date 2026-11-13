@@ -69,6 +69,13 @@ class BlockListTest(unittest.TestCase):
             parse_frontmatter("---\nacceptance:\n  - id: AC-1\n    run:\n      - nested\n---\n")
 
 
+    def test_zero_indent_block_list(self):
+        meta, _ = parse_frontmatter("---\nacceptance:\n- id: AC-1\n  run: \"false\"\nprotected:\n- a.py\nstatus: todo\n---\n")
+        self.assertEqual(meta["acceptance"], [{"id": "AC-1", "run": "false"}])
+        self.assertEqual(meta["protected"], ["a.py"])
+        self.assertEqual(meta["status"], "todo")
+
+
 class SetFieldsTest(unittest.TestCase):
     def test_set_fields_replaces_and_appends(self):
         out = set_fields(TASK, {"status": "review", "branch": "task/T001-x", "owner": "coder"})

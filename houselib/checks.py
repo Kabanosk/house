@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from pathlib import Path
 from .fm import parse_frontmatter
 
 DEFAULT_TIMEOUT = 600
+INIT_TIMEOUT = 300
 TAIL_LINES = 20
 _CMP_RE = re.compile(r"^\s*(?P<label>[A-Za-z_][\w .-]*?)\s*(?P<op>>=|<=|==|>|<)\s*(?P<num>-?\d+(?:\.\d+)?)\s*$")
 _OPS = {">=": float.__ge__, "<=": float.__le__, "==": float.__eq__, ">": float.__gt__, "<": float.__lt__}
@@ -124,10 +127,24 @@ def freeze(house: Path, task_id: str) -> Path:
     if _checks_path(house, task_id).exists():
         raise FileExistsError(f"{task_id} is already frozen; change criteria with --refreeze --reason")
     task = load_task(house, task_id)
+    if not task.criteria:
+        raise ValueError(f"{task_id} has no acceptance criteria; add at least one `run` or `manual` item")
     data = {"task": task_id, "frozen": {"criteria": [asdict(c) for c in task.criteria],
                                         "protected": {p: None for p in task.protected}},
             "frozen_at": _now(), "results": {}}
-    return _save(house, task_id, data)
+    path = _save(house, task_id, data)
+    _git_commit(house, [path], f"chore(house): freeze {task_id}")
+    return path
+
+
+def _git_commit(house: Path, paths: list[Path], message: str) -> None:
+    """Commit frozen criteria right away: at merge time any uncommitted change to `frozen` is tampering."""
+    repo = house.parent
+    if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True, check=False).returncode:
+        return
+    rels = [str(p.relative_to(repo)) for p in paths]
+    subprocess.run(["git", "add", "--", *rels], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-q", "-m", message, "--", *rels], cwd=repo, capture_output=True, check=False)
 
 
 def _next_decision_id(text: str) -> str:
@@ -155,6 +172,7 @@ def refreeze(house: Path, task_id: str, reason: str) -> str:
              f"- **Dlaczego:** {reason}\n- **Kto:** coordinator\n"
              f"- **Data:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
     decisions.write_text(text.rstrip("\n") + "\n" + entry)
+    _git_commit(house, [_checks_path(house, task_id), decisions], f"chore(house): refreeze {task_id} ({did})")
     return did
 
 
@@ -183,14 +201,44 @@ def _env() -> dict[str, str]:
     return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
 
 
-def _run_one(c: Criterion, workdir: Path, commit: str | None) -> Result:
+def _kill_group(pgid: int) -> None:
     try:
-        r = subprocess.run(c.run, shell=True, cwd=workdir, capture_output=True, text=True, env=_env(),
-                           timeout=c.timeout, check=False)
-    except subprocess.TimeoutExpired:
-        return Result(c.id, False, None, f"timeout after {c.timeout} s", _now(), commit)
-    ok = r.returncode == 0 and expect_ok(c.expect, r.stdout)
-    return Result(c.id, ok, r.returncode, _tail(r.stdout + r.stderr), _now(), commit)
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _start(cmd: list[str] | str, workdir: Path, out) -> subprocess.Popen:
+    """Own process group, output to a file (not a pipe): background children can neither hang us nor survive."""
+    return subprocess.Popen(cmd, shell=isinstance(cmd, str), cwd=workdir, env=_env(), stdout=out,
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+
+
+def _run_cmd(cmd: list[str] | str, workdir: Path, timeout: int, keep_group: bool = False):
+    """(exit code or None on timeout, output, process group id)."""
+    with tempfile.TemporaryFile(mode="w+") as out:
+        proc = _start(cmd, workdir, out)
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc.pid)
+            proc.wait()
+            code = None
+        if not keep_group:
+            _kill_group(proc.pid)
+        out.seek(0)
+        return code, out.read(), proc.pid
+
+
+def _run_one(c: Criterion, workdir: Path, commit: str | None) -> Result:
+    code, output, _ = _run_cmd(c.run, workdir, c.timeout)
+    if code is None:
+        return Result(c.id, False, None, f"timeout after {c.timeout} s\n" + _tail(output), _now(), commit)
+    try:
+        ok = code == 0 and expect_ok(c.expect, output)
+    except re.error as e:
+        return Result(c.id, False, code, f"invalid expect pattern {c.expect!r}: {e}", _now(), commit)
+    return Result(c.id, ok, code, _tail(output), _now(), commit)
 
 
 def _same_definition(task: Task, data: dict) -> bool:
@@ -198,27 +246,36 @@ def _same_definition(task: Task, data: dict) -> bool:
             and sorted(task.protected) == sorted(data["frozen"]["protected"]))
 
 
-def run_checks(house: Path, task_id: str, workdir: Path) -> CheckReport:
+def is_frozen(house: Path, task_id: str) -> bool:
+    return _checks_path(house, task_id).exists()
+
+
+def run_checks(house: Path, task_id: str, workdir: Path, record: bool = True) -> CheckReport:
     data = _load(house, task_id)
     task = load_task(house, task_id)
     criteria = _frozen_criteria(data)
-    init_ok = True
+    init_ok, init_group = True, None
     init = house / "init.sh"
-    if init.exists():
-        r = subprocess.run(["bash", str(init)], cwd=workdir, capture_output=True, text=True, check=False)
-        init_ok = r.returncode == 0
-    commit = _commit(workdir)
-    results = []
-    for c in criteria:
-        if c.kind == "run":
-            res = _run_one(c, workdir, commit)
-            data["results"][c.id] = asdict(res)
-        else:
-            stored = data["results"].get(c.id) or {}
-            res = Result(c.id, stored.get("passes"), None, stored.get("output_tail", ""),
-                         stored.get("ran_at"), stored.get("commit"))
-        results.append(res)
-    _save(house, task_id, data)
+    if init.exists():  # may start the app in the background; it lives until the criteria are done
+        code, _, init_group = _run_cmd(["bash", str(init)], workdir, INIT_TIMEOUT, keep_group=True)
+        init_ok = code == 0
+    try:
+        commit = _commit(workdir)
+        results = []
+        for c in criteria:
+            if c.kind == "run":
+                res = _run_one(c, workdir, commit)
+                data["results"][c.id] = asdict(res)
+            else:
+                stored = data["results"].get(c.id) or {}
+                res = Result(c.id, stored.get("passes"), None, stored.get("output_tail", ""),
+                             stored.get("ran_at"), stored.get("commit"))
+            results.append(res)
+    finally:
+        if init_group is not None:
+            _kill_group(init_group)
+    if record:
+        _save(house, task_id, data)
     return CheckReport(task_id, results, not _same_definition(task, data), init_ok,
                        {c.id: c.kind for c in criteria})
 
