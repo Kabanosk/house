@@ -1,4 +1,22 @@
-"""`.house/QUESTIONS.md`: parse entries, record answers (first one wins), deadlines with defaults (spec §7a)."""
+"""`.house/QUESTIONS.md`: parse entries, record answers (first one wins), deadlines with defaults (spec §7a).
+
+Used by agents (they add entries), `notify` (sends open questions), `inbox` (records answers from Signal) and
+the human owner. Agents only write new entries; answering is done by `answer()` so DECISIONS.md and the blocked
+tasks stay consistent. File format (Polish field names; the parser is tolerant of spacing and case):
+
+    ## Q-007 [open] Short title
+    - **Poziom:** krytyczny            (only this level gets a default applied at the deadline)
+    - **Termin:** 2026-11-14 18:00     (local time; trailing notes allowed)
+    - **Domyślnie:** B                 (default taken at the deadline if nobody answers)
+    - **Opcje:** A / B / ...
+    - **Rekomendacja:** ...
+    - **Blokuje:** T012, T013          (tasks set to todo again once the question is answered)
+    - **Odpowiedź:** —                 (filled by `answer()`)
+
+Rules: the status in brackets is `open` until answered, then `answered <date>`; the first answer wins and later
+ones are refused; every answer also adds a `D-###` entry to DECISIONS.md and a commit of `.house`. Answers are
+flattened to one line (see `clean_answer`) so a reply cannot inject new `## Q-`/`## D-` entries.
+"""
 import json
 import re
 import subprocess
@@ -17,6 +35,23 @@ EMPTY = {"", "—", "-", "–"}
 
 @dataclass
 class Question:
+    """One `## Q-### [status] title` entry of QUESTIONS.md.
+
+    Attributes:
+        id: Question id, e.g. "Q-007".
+        status: "open" or the first word of the bracket, lower case (e.g. "answered").
+        title: Text after the bracket on the header line.
+        level: Lower-case `Poziom` field (e.g. "krytyczny"), or None.
+        deadline: `Termin` as a naive local datetime, or None if absent or unparsable.
+        default: `Domyślnie` text, or None.
+        options: `Opcje` text, or None.
+        recommendation: `Rekomendacja` text, or None.
+        blocks: Task ids named in `Blokuje` (e.g. ["T012"]).
+        answer: `Odpowiedź` text, or None while it is empty or a dash.
+        start: Offset of the entry's header in the file text.
+        end: Offset where the entry ends (start of the next header or end of text).
+    """
+
     id: str
     status: str
     title: str
@@ -35,7 +70,7 @@ DATETIME_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})")
 
 
 def _parse_deadline(value: str | None) -> datetime | None:
-    """First `YYYY-MM-DD HH:MM` in the value (local time); trailing notes like "(koniec − 10 min)" are fine."""
+    """Return the first `YYYY-MM-DD HH:MM` in `value` (local time) or None; notes like "(koniec − 10 min)" are ok."""
     m = DATETIME_RE.search(value or "")
     if not m:
         return None
@@ -46,12 +81,34 @@ def _parse_deadline(value: str | None) -> datetime | None:
 
 
 def clean_answer(text: str) -> str:
-    """One line, no markdown structure: a reply must not be able to add `## Q-…` / `## D-…` entries."""
+    """Flatten untrusted text to one safe line.
+
+    Whitespace (including newlines) is collapsed, leading `#` characters are removed so the text cannot start a
+    markdown heading, and the result is cut to 500 characters.
+
+    Args:
+        text: Any answer or name; converted with `str()`.
+
+    Returns:
+        The cleaned line, or "—" if nothing is left.
+    """
     one_line = " ".join(str(text).split())
     return one_line.lstrip("#").strip()[:500] or "—"
 
 
 def parse(text: str) -> list[Question]:
+    """Parse the content of QUESTIONS.md into questions, in file order.
+
+    Args:
+        text: Full file content. Entries start at `## Q-<n> [<status>] <title>`; fields are `- **Name:** value`
+            lines below the header (names: Poziom, Termin, Domyślnie, Opcje, Rekomendacja, Blokuje, Odpowiedź).
+
+    Returns:
+        One `Question` per header; empty when there are none. Missing fields become None / [].
+
+    Raises:
+        IndexError: If a header has empty brackets (`[]`).
+    """
     heads = list(HEADER_RE.finditer(text))
     out = []
     for n, m in enumerate(heads):
@@ -74,6 +131,7 @@ def parse(text: str) -> list[Question]:
 
 
 def _commit(house: Path, message: str) -> None:
+    """Commit only the `.house` folder of the enclosing git repo; do nothing outside a repo or on failure."""
     repo = house.parent
     if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True, check=False).returncode:
         return
@@ -84,7 +142,28 @@ def _commit(house: Path, message: str) -> None:
 
 def answer(house: Path, qid: str, text: str, who: str, via: str, today: str | None = None,
            kto: str | None = None) -> str | None:
-    """Record the answer to an open question: QUESTIONS.md, D-###, unblock tasks, commit. None if not open."""
+    """Record the answer to an open question: update QUESTIONS.md, log a D-### decision, unblock tasks, commit.
+
+    The header becomes `[answered <today>]` and the `Odpowiedź` line `<text> (<who>, <via>)`. DECISIONS.md gets a
+    new `D-###` entry. Tasks listed in `Blokuje` (`.house/tasks/T###-*.md`) whose status is `blocked` are set to
+    `todo`. The change to `.house` is committed (skipped outside a git repo). First answer wins: an already
+    answered question is left untouched.
+
+    Args:
+        house: The contest's `.house` directory.
+        qid: Question id such as "Q-007".
+        text: The answer; flattened with `clean_answer`.
+        who: Who answered (name or number); flattened with `clean_answer`.
+        via: Channel label for the record, e.g. "Signal" or "CLI".
+        today: Date `YYYY-MM-DD` for the header. Defaults to the current date.
+        kto: Text for the `Kto` field of the decision. Defaults to "człowiek (<who>)".
+
+    Returns:
+        The new decision id (e.g. "D-012"), or None if the question does not exist or is not open.
+
+    Raises:
+        OSError: If QUESTIONS.md cannot be read or written.
+    """
     path = house / "QUESTIONS.md"
     content = path.read_text()
     q = next((q for q in parse(content) if q.id == qid), None)
@@ -122,6 +201,7 @@ def answer(house: Path, qid: str, text: str, who: str, via: str, today: str | No
 
 
 def _state(house: Path) -> dict:
+    """Load `.house/state.json`; {} if missing or invalid."""
     try:
         return json.loads((house / "state.json").read_text())
     except (OSError, ValueError):
@@ -129,10 +209,17 @@ def _state(house: Path) -> dict:
 
 
 def _save_state(house: Path, data: dict) -> None:
+    """Write `data` to `.house/state.json` as indented JSON."""
     (house / "state.json").write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def mark_reminded(house: Path, qid: str) -> None:
+    """Remember in `.house/state.json` that the half-time reminder for `qid` was sent (idempotent).
+
+    Args:
+        house: The contest's `.house` directory.
+        qid: Question id such as "Q-007".
+    """
     data = _state(house)
     data.setdefault("reminded", [])
     if qid not in data["reminded"]:
@@ -141,7 +228,20 @@ def mark_reminded(house: Path, qid: str) -> None:
 
 
 def due(house: Path, now: datetime | None = None) -> tuple[list[Question], list[Question]]:
-    """(critical questions whose deadline passed → apply the default, questions past half-time → remind once)."""
+    """Find questions that need a default applied or a reminder.
+
+    Only open questions with level `krytyczny`, a deadline and a default qualify. A reminder is due when the
+    question was sent (`sent_questions` in state.json), has not been reminded yet and half of the time between
+    sending and the deadline has passed. A question never sent through Signal gets no reminder.
+
+    Args:
+        house: The contest's `.house` directory.
+        now: Reference time (local, naive). Defaults to the current time.
+
+    Returns:
+        (apply, remind): questions whose deadline has passed (take the default) and questions past half-time
+        (remind once). Both are empty when QUESTIONS.md does not exist.
+    """
     now = now or datetime.now()
     path = house / "QUESTIONS.md"
     if not path.exists():
