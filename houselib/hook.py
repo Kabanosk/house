@@ -2,6 +2,16 @@
 
 Hooks must never break a session: anything unexpected → exit 0 with a one-line warning (fail open). Only a
 guard rule blocks (exit 2, reason on stderr, which Claude Code shows to the model).
+
+Callers and contract:
+  * `bin/house-hook` reads the JSON event Claude Code sends on stdin and calls `pre_tool` (PreToolUse, matcher
+    for Edit/Write/MultiEdit/NotebookEdit/Bash) or `session_start` (SessionStart); `house adapt` registers both in
+    the contest's `settings.local.json`.
+  * Outside a house contest both hooks do nothing (exit 0, no output).
+  * Exit code 2 from `pre_tool` blocks the tool call; the message goes to stderr and the model reads it. Any
+    other outcome allows the call. `HOUSE_GUARD=off` in the environment disables blocking (the first use per
+    session is logged to `.house/PROGRESS.md`).
+  * `session_start` prints a short state summary (at most 25 lines) that Claude Code adds to the session context.
 """
 import json
 import os
@@ -17,6 +27,22 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
 
 def pre_tool(event: dict, env: dict) -> tuple[int, str]:
+    """Decide whether a tool call may run (PreToolUse hook), applying the guard rules.
+
+    Edit-type tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
+    `Bash` with `guard.check_bash` on its `command`. Other tools are always allowed.
+
+    Args:
+        event: Decoded hook event from Claude Code. Keys used: `cwd` (default: process cwd), `session_id`,
+            `tool_name`, `tool_input` (dict with `file_path`, `notebook_path` or `command`).
+        env: Environment variables (a plain dict, normally `dict(os.environ)`). `HOUSE_GUARD=off` disables
+            blocking and notes the session in `.house/PROGRESS.md`.
+
+    Returns:
+        (exit code, stderr message). `(0, "")` allows the call. `(2, "house guard: <reason>. ...")` blocks it;
+        Claude Code shows the message to the model, so agents depend on its wording (it points to asking the
+        coordinator or `house check --refreeze --reason`).
+    """
     cwd = Path(event.get("cwd") or os.getcwd())
     contest = guard.contest_root(cwd)
     if contest is None:
@@ -39,6 +65,7 @@ def pre_tool(event: dict, env: dict) -> tuple[int, str]:
 
 
 def _note_guard_off(contest: Path, session: str) -> None:
+    """Append a one-time-per-session line to `.house/PROGRESS.md` saying the guard is off (marker in `.house/tmp`)."""
     marker = contest / ".house/tmp" / f"guard-off-{re.sub(r'[^A-Za-z0-9_-]', '_', session)}"
     if marker.exists():
         return
@@ -50,6 +77,7 @@ def _note_guard_off(contest: Path, session: str) -> None:
 
 
 def _tasks(house: Path) -> dict[str, dict]:
+    """Load front matter of `.house/tasks/T*-*.md` as {task id: meta}, skipping templates and unreadable files."""
     out = {}
     for path in sorted((house / "tasks").glob("T*-*.md")):
         try:
@@ -62,6 +90,20 @@ def _tasks(house: Path) -> dict[str, dict]:
 
 
 def session_start(event: dict) -> str:
+    """Build the state summary Claude Code adds to a new session (SessionStart hook).
+
+    Lines: contest name, kind and mode; the goal (cut to 120 characters); open questions from
+    `.house/QUESTIONS.md` (first 6 ids); task counts per status and which `todo` tasks are ready (all
+    `depends_on` merged or done); red checks (first 8); hours since the last briefing; a reminder to start with
+    `protocols/briefing.md` when the human is returning. Missing or malformed files are skipped.
+
+    Args:
+        event: Decoded hook event from Claude Code. Key used: `cwd` (default: process cwd).
+
+    Returns:
+        Text of at most 25 lines ending in a newline, to be printed to stdout as is; "" when `cwd` is not inside
+        a house contest.
+    """
     contest = guard.contest_root(Path(event.get("cwd") or os.getcwd()))
     if contest is None:
         return ""

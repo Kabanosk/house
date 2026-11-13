@@ -2,6 +2,11 @@
 
 Only what house code needs (guard rules, notify, limits); agents read the file themselves. Anything nested
 deeper than house reads (e.g. a rubric with per-level descriptions) becomes None instead of failing.
+
+Used by `guard` (e.g. `guard.push_allow`, `scoring.local_scorer`), by `hook.session_start` and by other `house`
+commands through `load_spec` + `get`. This is a small purpose-built reader, not a YAML parser: no anchors, no
+multi-line scalars, no nesting beyond `section: key: value`. It never raises on a missing or odd file (a missing
+file gives `{}`), so a lookup always needs a default for absent keys.
 """
 from pathlib import Path
 
@@ -23,6 +28,7 @@ def _strip_comment(line: str) -> str:
 
 
 def _indent(line: str) -> int:
+    """Count leading spaces of `line`."""
     return len(line) - len(line.lstrip(" "))
 
 
@@ -42,7 +48,7 @@ def _parse_entry(head: str, deeper: list[str]):
 
 
 def _parse_section(lines: list[str]) -> dict:
-    """The mapping at indent 0 of `lines`."""
+    """Parse the mapping at indent 0 of `lines`."""
     out: dict = {}
     i = 0
     while i < len(lines):
@@ -59,6 +65,16 @@ def _parse_section(lines: list[str]) -> dict:
 
 
 def load_spec(house: Path) -> dict:
+    """Parse `<house>/spec.yaml` into nested dicts (section → key → scalar, list or nested dict).
+
+    Comments are stripped. A value nested deeper than house reads becomes None.
+
+    Args:
+        house: The contest's `.house` directory (not the contest root).
+
+    Returns:
+        The parsed mapping; `{}` when `spec.yaml` does not exist.
+    """
     path = house / "spec.yaml"
     if not path.is_file():
         return {}
@@ -66,6 +82,16 @@ def load_spec(house: Path) -> dict:
 
 
 def get(spec: dict, dotted: str, default=None):
+    """Look up a value by dotted path, e.g. `get(spec, "guard.push_allow")`.
+
+    Args:
+        spec: Mapping returned by `load_spec`.
+        dotted: Keys joined by dots, one per nesting level.
+        default: Returned when any key on the path is missing or an intermediate value is not a mapping.
+
+    Returns:
+        The value found (a key present with a None value returns None, not `default`), else `default`.
+    """
     node = spec
     for part in dotted.split("."):
         if not isinstance(node, dict) or part not in node:

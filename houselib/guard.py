@@ -2,6 +2,18 @@
 
 Used by the Claude Code hook (`bin/house-hook`, before a tool runs), by `house guard diff` and by `house merge`
 (after the fact, on a task branch — this also covers Codex, which has no hooks).
+
+What an agent should know:
+  * Frozen acceptance criteria (`.house/checks/*.json`) are written only by `house check`; the acceptance tests
+    and the local scorer pinned in them (`protected_paths`) must not be edited by workers.
+  * Task branches must not carry `.house/` files (write through `$HOUSE_DIR` instead) or anything that looks like
+    a secret; `git add` / `git commit -a` of a secret and pushes to a remote outside `guard.push_allow` (default
+    `origin`) or forced pushes to the contest's main branch are refused.
+  * Pre-tool checks (`check_edit`, `check_bash`) return a human-readable reason to refuse, or None to allow. They
+    never raise on odd input and are best effort: shell parsing is heuristic, so the after-the-fact check
+    (`diff_violations`, `frozen_tampering`) is the backstop that `house merge` relies on.
+  * Paths in this module are strings relative to a checkout root (the contest checkout or one of its task
+    worktrees) unless a parameter says otherwise.
 """
 import hashlib
 import json
@@ -20,11 +32,20 @@ FINISHED = ("merged", "done")
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run `git *args` in `cwd`, capturing text output; never raises on a non-zero exit."""
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
 def contest_root(cwd: Path) -> Path | None:
-    """The main checkout (with `.house/`) that cwd belongs to, also from a task worktree anywhere."""
+    """Find the main checkout (the one holding `.house/`) that `cwd` belongs to, also from a task worktree anywhere.
+
+    Args:
+        cwd: Any directory (or file path) inside the contest checkout or inside one of its git worktrees,
+            including worktrees that live outside the contest directory. Relative paths are resolved.
+
+    Returns:
+        Absolute path of the contest checkout, or None when `cwd` is not part of a house contest.
+    """
     cwd = Path(cwd).resolve()
     for d in (cwd, *cwd.parents):
         if (d / ".house").is_dir() and (d / ".git").is_dir():  # a worktree has a .git *file* and its own
@@ -40,7 +61,18 @@ def contest_root(cwd: Path) -> Path | None:
 
 
 def repo_relative(path: str, cwd: Path, contest: Path) -> str | None:
-    """`path` relative to the checkout it lives in (the contest checkout or one of its worktrees)."""
+    """Express `path` relative to the checkout it lives in (the contest checkout or one of its worktrees).
+
+    Args:
+        path: File path as a tool received it: absolute, or relative to `cwd`. It need not exist.
+        cwd: Directory that a relative `path` is resolved against.
+        contest: Contest checkout root, as returned by `contest_root`.
+
+    Returns:
+        Path relative to the contest checkout, or to the task worktree under `<contest>/.worktrees/<name>/` (or an
+        external worktree of the same repo) that contains it. None when the path is outside the contest or is a
+        worktree directory itself.
+    """
     p = Path(path)
     p = (p if p.is_absolute() else Path(cwd) / p).resolve()
     contest = contest.resolve()
@@ -57,6 +89,7 @@ def repo_relative(path: str, cwd: Path, contest: Path) -> str | None:
 
 
 def _checks(contest: Path) -> dict[str, dict]:
+    """Load every readable `.house/checks/*.json` as {task id: data}; unparsable files are skipped."""
     out = {}
     for path in sorted((contest / ".house/checks").glob("*.json")):
         try:
@@ -67,6 +100,7 @@ def _checks(contest: Path) -> dict[str, dict]:
 
 
 def _scorer_files(contest: Path) -> list[str]:
+    """List existing files named in the spec's `scoring.local_scorer` command (paths relative to the contest)."""
     scorer = specmod.get(specmod.load_spec(contest / ".house"), "scoring.local_scorer")
     if not isinstance(scorer, str):
         return []
@@ -78,7 +112,18 @@ def _scorer_files(contest: Path) -> list[str]:
 
 
 def protected_paths(contest: Path) -> dict[str, str]:
-    """rel path → owner (task id or "local_scorer"). Only files whose content is pinned (hash known)."""
+    """Map each protected file to the owner that pinned it.
+
+    Protected files are the acceptance tests frozen by `house check` (their hash is recorded in
+    `.house/checks/<task>.json` under `frozen.protected`) and the files of the spec's `scoring.local_scorer`.
+
+    Args:
+        contest: Contest checkout root.
+
+    Returns:
+        Dict {path relative to the checkout: owner}, where owner is a task id (e.g. "T001") or "local_scorer".
+        Only files whose content is pinned (hash known) are included.
+    """
     out = {}
     for tid, data in _checks(contest).items():
         for rel, sha in (data.get("frozen", {}).get("protected") or {}).items():
@@ -90,10 +135,22 @@ def protected_paths(contest: Path) -> dict[str, str]:
 
 
 def _in_checks(rel: str) -> bool:
+    """Tell whether `rel` is `.house/checks` or lies below it."""
     return rel == ".house/checks" or rel.startswith(".house/checks/")
 
 
 def check_edit(rel: str, contest: Path) -> str | None:
+    """Decide whether a worker may write the file `rel`.
+
+    Refuses `.house/checks/**` (written only by `house check`) and every file in `protected_paths`.
+
+    Args:
+        rel: File path relative to its checkout, as returned by `repo_relative`.
+        contest: Contest checkout root.
+
+    Returns:
+        A reason string to show the agent (it is part of the hook's stderr message), or None when allowed.
+    """
     if _in_checks(rel):
         return f"{rel} is written only by `house check` (frozen acceptance criteria)"
     owner = protected_paths(contest).get(rel)
@@ -127,6 +184,7 @@ def _normalize(command: str) -> str:
 
 
 def _tokens(command: str) -> list[str]:
+    """Split a shell command into tokens (operators such as `&&` and `;` are separate tokens); naive split on error."""
     lex = shlex.shlex(_normalize(command), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     try:
@@ -136,6 +194,7 @@ def _tokens(command: str) -> list[str]:
 
 
 def _segments(command: str) -> list[list[str]]:
+    """Split a shell command into simple commands at `&&`, `||`, `;`, `|`, `&`, dropping grouping tokens."""
     segs, cur = [], []
     for tok in _tokens(command):
         if tok in CONTROL:
@@ -200,6 +259,7 @@ MAX_SCAN_BYTES = 1_000_000
 
 
 def _secret_file(path: Path) -> bool:
+    """Tell whether `path` is a regular text file that looks like a secret (`.env*` or a key/token pattern)."""
     if path.is_symlink() or not path.is_file():
         return False  # deleting a secret is fine; links and dirs carry no content of their own
     name = path.name
@@ -217,6 +277,7 @@ def _secret_file(path: Path) -> bool:
 
 
 def _status(cwd: Path) -> list[tuple[str, str]]:
+    """Parse `git status --porcelain -z` in `cwd` into [(two-letter XY code, path)]; renames give the new path."""
     out = _git(cwd, "-c", "core.quotePath=false", "status", "--porcelain", "-z", "--untracked-files=all").stdout
     entries, result, skip = out.split("\0"), [], False
     for e in entries:
@@ -230,6 +291,7 @@ def _status(cwd: Path) -> list[tuple[str, str]]:
 
 
 def _staging_candidates(sub: list[str], cwd: Path) -> list[str]:
+    """List changed paths that `git add ...` / `git commit -a` (given as `sub` = [name, args…]) would stage."""
     name = sub[0] if sub else ""
     opts = [a for a in sub[1:] if a.startswith("-")]
     paths = [a for a in sub[1:] if not a.startswith("-") and a != "--"]
@@ -250,6 +312,7 @@ def _staging_candidates(sub: list[str], cwd: Path) -> list[str]:
 
 
 def _push_remote(sub: list[str], cwd: Path) -> str:
+    """Name the remote a `git push` (`sub` = ["push", args…]) targets; falls back to git config, then `origin`."""
     for a in sub[1:]:
         if a.startswith("--repo="):
             return a.split("=", 1)[1]
@@ -268,6 +331,7 @@ def _push_remote(sub: list[str], cwd: Path) -> str:
 
 
 def _push_problem(sub: list[str], cwd: Path, contest: Path) -> str | None:
+    """Return why a `git push` is refused (remote not in `guard.push_allow`, force push to main), else None."""
     args = sub[1:]
     force = any(a in ("--force",) or a.startswith("--force-with-lease") or a.startswith("--force-if")
                 or (a.startswith("-") and not a.startswith("--") and "f" in a) for a in args)
@@ -286,6 +350,27 @@ def _push_problem(sub: list[str], cwd: Path, contest: Path) -> str | None:
 
 
 def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
+    """Decide whether a Bash tool command may run; the first violation found wins.
+
+    The command is split into simple commands (heredoc bodies are ignored, newlines count as `;`). Refuses:
+      * writes or deletes of `.house/checks/**` or protected files (see `check_edit`) through redirections
+        (`>`, `>>`, `&>` …), `tee`, `rm`, `mv`, `truncate`, `shred`, `unlink`, `sed -i` / `perl -i`, the destination
+        of `cp` / `install` / `ln`, `git rm` / `git mv`, and `git checkout <rev> --` / `git restore --source`
+        from anything but HEAD (restoring from HEAD is allowed);
+      * `git add` / `git commit -a` that would stage a file that looks like a secret (`.env*` except
+        `.env.example`, or a key/token pattern);
+      * `git push` to a remote not listed in spec `guard.push_allow` (default `["origin"]`) or a force push
+        (`--force`, `--force-with-lease`, `-f`, `+ref`) to the contest's main branch.
+    Best effort: it understands `git -C dir` and `-c k=v`, but not variables, subshell expansion or scripts.
+
+    Args:
+        command: The shell command line exactly as the Bash tool received it.
+        cwd: Directory the command runs in; relative paths and `git -C` are resolved against it.
+        contest: Contest checkout root, as returned by `contest_root`.
+
+    Returns:
+        A reason string shown to the agent, or None when the command is allowed.
+    """
     protected = protected_paths(contest)
     for seg in _segments(command):
         for target, base in _written_paths(seg, cwd):
@@ -308,16 +393,31 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
 
 
 def _sha(path: Path) -> str | None:
+    """Return the SHA-256 hex digest of the file at `path`, or None when it is not a file."""
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
 def _at_head(repo: Path, rel: str) -> str | None:
+    """Return the content of `rel` at HEAD in `repo`, or None when HEAD does not have it."""
     r = _git(repo, "show", f"HEAD:{rel}")
     return r.stdout if r.returncode == 0 else None
 
 
 def frozen_tampering(contest: Path) -> list[str]:
-    """Changes only house may make, found uncommitted in the contest checkout (house commits them at once)."""
+    """Find uncommitted changes in the contest checkout that only house itself may make.
+
+    Compares the working tree with HEAD (house commits its own `.house/` changes at once, so any difference is
+    a hand edit). Reports: an unreadable `.house/checks/*.json`; a changed `frozen` section there (legitimate only
+    through `house check --freeze/--refreeze`); a task file `.house/tasks/T*-*.md` whose `status` was set to
+    `merged` / `done` by hand (only `house merge` sets it). Used by `house merge` as a gate and by
+    `diff_violations`.
+
+    Args:
+        contest: Contest checkout root.
+
+    Returns:
+        Human-readable messages, one per problem; an empty list means no tampering.
+    """
     house = contest / ".house"
     found = []
     for path in sorted((house / "checks").glob("*.json")):
@@ -345,7 +445,23 @@ def frozen_tampering(contest: Path) -> list[str]:
 
 
 def diff_violations(contest: Path, task_id: str, worktree: Path) -> list[str]:
-    """What a task branch (committed + uncommitted) changed that it must not, plus tampering in the checkout."""
+    """Report what a task branch changed that it must not, plus tampering in the contest checkout.
+
+    Looks at everything the branch changed since its merge-base with the contest HEAD (commits and uncommitted
+    or untracked files in the worktree). Reports: a protected file (see `protected_paths`) that changed (for the
+    local scorer any change counts; for frozen tests a content different from the pinned hash counts); any file
+    under `.house/` (workers write via `$HOUSE_DIR`); any changed file that looks like a secret; and everything
+    `frozen_tampering` finds. Backs `house guard diff` (prints `VIOLATION <message>` per item) and the
+    `house merge` gate (`refused by guard: ...`), so message texts are user-visible.
+
+    Args:
+        contest: Contest checkout root.
+        task_id: Task id (e.g. "T001"); currently unused, kept for the caller's signature.
+        worktree: The task's git worktree directory.
+
+    Returns:
+        Violation messages; an empty list means clean (exit 0 for the CLI).
+    """
     main_head = _git(contest, "rev-parse", "HEAD").stdout.strip()
     base = _git(worktree, "merge-base", main_head, "HEAD").stdout.strip() or main_head
     changed = set(filter(None, _git(worktree, "diff", "--name-only", base, "HEAD").stdout.splitlines()))
