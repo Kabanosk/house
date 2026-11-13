@@ -99,7 +99,7 @@ def _checks(contest: Path) -> dict[str, dict]:
     return out
 
 
-def _scorer_files(contest: Path) -> list[str]:
+def scorer_files(contest: Path) -> list[str]:
     """List existing files named in the spec's `scoring.local_scorer` command (paths relative to the contest)."""
     scorer = specmod.get(specmod.load_spec(contest / ".house"), "scoring.local_scorer")
     if not isinstance(scorer, str):
@@ -129,7 +129,7 @@ def protected_paths(contest: Path) -> dict[str, str]:
         for rel, sha in (data.get("frozen", {}).get("protected") or {}).items():
             if sha:
                 out[rel] = tid
-    for rel in _scorer_files(contest):
+    for rel in scorer_files(contest):
         out.setdefault(rel, "local_scorer")
     return out
 

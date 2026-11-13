@@ -24,10 +24,16 @@ Rules an agent should know:
 import contextlib
 import csv
 import fcntl
+import hashlib
 import os
 import re
+import subprocess
+import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
+from . import checks, gitutil, guard
 from . import spec as specmod
 
 COLUMNS = ["id", "parent", "commit", "idea_id", "budget", "duration", "score", "status", "scorer", "time", "note"]
@@ -36,6 +42,32 @@ _BUDGET_PART = re.compile(r"(\d+)([smh])")
 _NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
 _SCORE_RE = re.compile(rf"\bscore\s*[:=]\s*({_NUM})", re.IGNORECASE)
 _DIRECTION_RE = re.compile(r"\b(min|minimi[sz]e|max|maximi[sz]e)\b", re.IGNORECASE)
+DEFAULT_BUDGET = "5m"
+DEFAULT_SCORER_MINUTES = 10
+LOG_CAP = 1_000_000
+MAX_UNTRACKED_BYTES = 20 * 1024 * 1024  # bigger new files (weights, predictions) must be gitignored, not committed
+_NOT_SHARED = {".git", ".house", ".worktrees"}
+
+
+@dataclass
+class Result:
+    """Outcome of one `house exp run`.
+
+    Attributes:
+        id: Experiment id (`E-###`).
+        status: `keep`, `revert`, `crash` or `timeout`.
+        score: Score from the local scorer, or None (crash/timeout).
+        parent_score: The parent's comparable score, or None (raw commit, crash, other scorer).
+        note: Why (exit code, tampered files, missing score) plus the caller's note.
+        log: Path of `.house/experiments/E-###.log` (command and scorer output, capped at 1 MB).
+    """
+
+    id: str
+    status: str
+    score: float | None
+    parent_score: float | None
+    note: str
+    log: Path
 
 
 def parse_budget(text: str) -> int:
@@ -214,3 +246,309 @@ def stagnation(rows: list[dict], scorer: str, sense: str) -> int:
         else:
             count += 1
     return count
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run git without raising; callers check the return code."""
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+
+
+def _spec(contest: Path) -> dict:
+    """Load the contest's spec.yaml ({} when missing)."""
+    return specmod.load_spec(contest / ".house")
+
+
+def _requirements(contest: Path) -> tuple[str, str]:
+    """Return `(direction, scorer command)` or raise ValueError telling what to set in spec.yaml."""
+    spec = _spec(contest)
+    sense = direction(spec)
+    if sense is None:
+        raise ValueError("set scoring.direction (max or min) in .house/spec.yaml")
+    scorer = specmod.get(spec, "scoring.local_scorer")
+    if not isinstance(scorer, str) or not scorer.strip():
+        raise ValueError("set scoring.local_scorer (the local scorer command) in .house/spec.yaml")
+    return sense, scorer
+
+
+def scorer_hash(contest: Path) -> str:
+    """Fingerprint the current local scorer: its command and the content of the files it names.
+
+    Rows with another fingerprint were scored differently and are not compared (`best`, `stagnation`).
+
+    Args:
+        contest: Contest checkout root.
+
+    Returns:
+        12 hex characters of a sha256 over the command and each scorer file (`guard.scorer_files`).
+    """
+    h = hashlib.sha256(str(specmod.get(_spec(contest), "scoring.local_scorer") or "").encode())
+    for rel in sorted(guard.scorer_files(contest)):
+        h.update(b"\0" + rel.encode() + b"\0" + (contest / rel).read_bytes())
+    return h.hexdigest()[:12]
+
+
+def _worktree(contest: Path, exp_id: str) -> Path:
+    """Return the experiment's worktree path `.worktrees/exp-E-###`."""
+    return contest / ".worktrees" / f"exp-{exp_id}"
+
+
+def _commit_of(rows: list[dict], parent: str, contest: Path) -> str:
+    """Resolve an experiment id or any git revision to a commit hash (ValueError when impossible)."""
+    if re.fullmatch(r"E-\d+", parent):
+        r = next((r for r in rows if r["id"] == parent), None)
+        if r is None:
+            raise ValueError(f"unknown experiment {parent}")
+        if not r["commit"]:
+            raise ValueError(f"{parent} has not been run yet; run it or pick another parent")
+        return r["commit"]
+    out = _git(contest, "rev-parse", "--verify", "--quiet", f"{parent}^{{commit}}")
+    if out.returncode != 0:
+        raise ValueError(f"unknown parent {parent!r}: use best, an experiment id (E-###) or a commit")
+    return out.stdout.strip()
+
+
+def _resolve(contest: Path, rows: list[dict], parent: str) -> tuple[str, str]:
+    """Turn `--from` into `(parent label for the csv, commit)`; `best` falls back to HEAD without a keep."""
+    if parent == "best":
+        sense = direction(_spec(contest))
+        if sense is None:
+            raise ValueError("set scoring.direction (max or min) in .house/spec.yaml")
+        b = best(rows, scorer_hash(contest), sense)
+        if b:
+            return b["id"], b["commit"]
+        parent = "HEAD"
+    commit = _commit_of(rows, parent, contest)
+    return (parent if re.fullmatch(r"E-\d+", parent) else commit), commit
+
+
+def _link_shared(contest: Path, wt: Path) -> None:
+    """Symlink every `exp.shared` path that exists in the contest but not in the worktree, and git-exclude it."""
+    shared = specmod.get(_spec(contest), "exp.shared") or []
+    for rel in shared if isinstance(shared, list) else []:
+        rel = str(rel).strip().strip("/")
+        if not rel or Path(rel).parts[0] in _NOT_SHARED or ".." in Path(rel).parts:
+            continue
+        src, dst = contest / rel, wt / rel
+        if src.exists() and not dst.exists() and not dst.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(src.resolve(), target_is_directory=src.is_dir())
+            gitutil.exclude(contest, "/" + rel)
+
+
+def _now() -> str:
+    """Local time, ISO format, seconds precision."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def new(contest: Path, parent: str = "best", idea: str = "", note: str = "") -> tuple[str, Path]:
+    """Create an experiment: a detached worktree at the parent commit and a row with status `new`.
+
+    Make one change in the worktree, then call `run` (`house exp run <c> E-### -- <command>`).
+
+    Args:
+        contest: Contest checkout root.
+        parent: `best` (the best comparable keep, or HEAD when there is none), an experiment id (`E-###`, also a
+            crash or revert, e.g. to debug it) or any git revision.
+        idea: Idea id from `.house/ideas.md` (optional).
+        note: One-line description of the change (optional).
+
+    Returns:
+        `(experiment id, worktree path)`.
+
+    Raises:
+        ValueError: Unknown parent, a parent that has not run, or `best` without a known direction.
+        RuntimeError: git could not create the worktree.
+    """
+    gitutil.exclude(contest, ".worktrees/")
+    gitutil.exclude(contest, ".house/experiments/")
+    with _locked(contest):
+        rows = load(contest)
+        label, commit = _resolve(contest, rows, parent)
+        eid = next_id(rows)
+        wt = _worktree(contest, eid)
+        out = _git(contest, "worktree", "add", "--detach", "-q", str(wt), commit)
+        if out.returncode != 0:
+            raise RuntimeError(f"git worktree add failed: {out.stderr.strip()}")
+        _link_shared(contest, wt)
+        rows.append({**dict.fromkeys(COLUMNS, ""), "id": eid, "parent": label, "idea_id": idea, "status": "new",
+                     "time": _now(), "note": note})
+        _write(contest, rows)
+    return eid, wt
+
+
+def _remove_worktree(contest: Path, wt: Path) -> None:
+    """Delete an experiment worktree; shared symlinks are unlinked first so their targets are never touched."""
+    shared = specmod.get(_spec(contest), "exp.shared") or []
+    for rel in shared if isinstance(shared, list) else []:
+        link = wt / str(rel).strip().strip("/")
+        if link.is_symlink():
+            link.unlink()
+    _git(contest, "worktree", "remove", "--force", str(wt))
+    _git(contest, "worktree", "prune")
+
+
+def _large_untracked(wt: Path) -> list[str]:
+    """List untracked, not ignored files in the worktree above MAX_UNTRACKED_BYTES (they would bloat git)."""
+    out = _git(wt, "ls-files", "--others", "--exclude-standard", "-z").stdout
+    return [rel for rel in out.split("\0") if rel and (wt / rel).is_file() and not (wt / rel).is_symlink()
+            and (wt / rel).stat().st_size > MAX_UNTRACKED_BYTES]
+
+
+def _write_log(path: Path, parts: list[str]) -> None:
+    """Write the experiment log, keeping only its last LOG_CAP characters."""
+    text = "\n".join(parts)
+    path.write_text(text[-LOG_CAP:])
+
+
+def _command_text(command: list[str] | str) -> str | list[str]:
+    """A single string (or one-element list) runs through the shell; a longer list runs as is."""
+    if isinstance(command, list) and len(command) == 1:
+        return command[0]
+    return command
+
+
+def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None = None) -> Result:
+    """Run a `new` experiment: commit its change, run the command with the budget, score it, keep or revert.
+
+    Steps: everything in the worktree is committed (`refs/exp/E-###` pins it); a change to a protected file
+    (scorer, frozen acceptance test) against the parent makes it a `crash` ("tampered") without running; the
+    command runs in the worktree in its own process group, killed at the budget (`timeout`); a non-zero exit is a
+    `crash`; the scorer then runs in the worktree with the contest checkout's scorer files, and its score is
+    compared with the parent's: strictly better (or no comparable parent score) → `keep`, else `revert`. The row
+    is updated and `.house/experiments.csv` is committed on the contest checkout; the worktree is kept only for
+    `keep`.
+
+    Args:
+        contest: Contest checkout root.
+        exp_id: Id printed by `new`.
+        command: Command to run in the worktree: one string (shell) or an argument list.
+        budget: Seconds for the command; default `exp.budget` from the spec (else 5 minutes).
+
+    Returns:
+        The `Result`.
+
+    Raises:
+        ValueError: Unknown id, an id that already ran, a missing worktree, or the spec lacks
+            `scoring.direction` / `scoring.local_scorer`.
+    """
+    sense, scorer_cmd = _requirements(contest)
+    spec = _spec(contest)
+    if budget is None:
+        budget = parse_budget(str(specmod.get(spec, "exp.budget") or DEFAULT_BUDGET))
+    scorer_timeout = int(float(specmod.get(spec, "exp.scorer_minutes") or DEFAULT_SCORER_MINUTES) * 60)
+    rows = load(contest)
+    r = next((r for r in rows if r["id"] == exp_id), None)
+    if r is None:
+        raise ValueError(f"unknown experiment {exp_id}")
+    if r["status"] != "new":
+        raise ValueError(f"{exp_id} already ran ({r['status']}); start a new one with --from {exp_id}")
+    wt = _worktree(contest, exp_id)
+    if not wt.is_dir():
+        raise ValueError(f"worktree of {exp_id} is missing ({wt})")
+    parent_commit = _commit_of(rows, r["parent"], contest)
+    parent_row = next((p for p in rows if p["id"] == r["parent"]), None)
+
+    big = _large_untracked(wt)
+    if big:
+        raise ValueError(f"{exp_id}: large untracked files would be committed: {', '.join(big)}; "
+                         "add them to .gitignore or delete them, then run again")
+    _git(wt, "add", "-A")
+    if _git(wt, "diff", "--cached", "--quiet").returncode != 0:
+        msg = f"exp {exp_id}: {r['note'] or r['idea_id'] or 'change'}"
+        _git(wt, "commit", "-q", "--no-verify", "-m", msg)
+    commit = _git(wt, "rev-parse", "HEAD").stdout.strip()
+    _git(contest, "update-ref", f"refs/exp/{exp_id}", commit)
+
+    current = scorer_hash(contest)
+    env = {"HOUSE_EXP": exp_id, "HOUSE_CONTEST": str(contest)}
+    cmd = _command_text(command)
+    log = _state_dir(contest) / f"{exp_id}.log"
+    log_parts = [f"$ {cmd if isinstance(cmd, str) else ' '.join(cmd)}", f"budget: {budget} s"]
+    score = parent_score = None
+    duration = 0.0
+    changed = set(_git(contest, "diff", "--name-only", parent_commit, commit).stdout.split())
+    tampered = sorted(changed & set(guard.protected_paths(contest)))
+    if tampered:
+        status, why = "crash", "tampered: " + ", ".join(tampered) + " (scorer/acceptance tests must not change)"
+    else:
+        t0 = time.monotonic()
+        code, output, _ = checks._run_cmd(cmd, wt, budget, extra_env=env)
+        duration = time.monotonic() - t0
+        log_parts.append(output)
+        if code is None:
+            status, why = "timeout", f"timeout after {budget} s"
+        elif code != 0:
+            status, why = "crash", f"exit {code}"
+        else:
+            status, why, score = _score_in(contest, wt, commit, scorer_cmd, scorer_timeout, env, log_parts)
+            if status is None:
+                if (parent_row and parent_row["status"] in SCORED and parent_row["scorer"] == current
+                        and _score(parent_row) is not None):
+                    parent_score = _score(parent_row)
+                better = parent_score is None or _better(score, parent_score, sense)
+                status = "keep" if better else "revert"
+                why = "" if better else f"not better than {r['parent']} ({parent_score})"
+    log_parts.append(f"status: {status} {why}".rstrip())
+    _write_log(log, log_parts)
+    note = "; ".join(x for x in (r["note"], why) if x)
+    with _locked(contest):
+        rows = load(contest)
+        for row in rows:
+            if row["id"] == exp_id:
+                row.update(commit=commit, budget=str(budget), duration=f"{duration:.1f}", status=status,
+                           score="" if score is None else repr(score), scorer=current, note=note)
+        _write(contest, rows)
+        checks._git_commit(contest / ".house", [_csv_path(contest)],
+                           f"chore(exp): {exp_id} {status}" + ("" if score is None else f" {score}"))
+    if status != "keep":
+        _remove_worktree(contest, wt)
+    return Result(exp_id, status, score, parent_score, note, log)
+
+
+def _score_in(contest: Path, wt: Path, commit: str, scorer_cmd: str, timeout: int, env: dict,
+              log_parts: list[str]) -> tuple[str | None, str, float | None]:
+    """Run the scorer in the worktree with the contest's scorer files; returns (crash status or None, why, score)."""
+    files = guard.scorer_files(contest)
+    for rel in files:
+        (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+        (wt / rel).write_bytes((contest / rel).read_bytes())
+    try:
+        code, output, _ = checks._run_cmd(scorer_cmd, wt, timeout, extra_env=env)
+    finally:
+        for rel in files:
+            if _git(wt, "cat-file", "-e", f"{commit}:{rel}").returncode == 0:
+                _git(wt, "checkout", commit, "--", rel)
+            else:
+                (wt / rel).unlink(missing_ok=True)
+    log_parts += ["--- scorer ---", f"$ {scorer_cmd}", output]
+    if code is None:
+        return "crash", f"scorer timeout after {timeout} s", None
+    if code != 0:
+        return "crash", f"scorer failed (exit {code})", None
+    score = parse_score(output)
+    if score is None:
+        return "crash", "scorer printed no score; it must print `score: <number>`", None
+    return None, "", score
+
+
+def run_new(contest: Path, parent: str, command: list[str] | str, budget: int | None = None, idea: str = "",
+            note: str = "") -> Result:
+    """Create and run an experiment in one go (the change is the command line, e.g. a parameter sweep).
+
+    Args:
+        contest: Contest checkout root.
+        parent: As in `new` (`best`, `E-###` or a git revision).
+        command: As in `run`.
+        budget: As in `run`.
+        idea: Idea id (optional).
+        note: One-line description (optional).
+
+    Returns:
+        The `Result` of `run`.
+
+    Raises:
+        ValueError: As in `new` and `run`; the spec is checked before anything is created.
+    """
+    _requirements(contest)
+    eid, _ = new(contest, parent, idea=idea, note=note)
+    return run(contest, eid, command, budget)
