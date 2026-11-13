@@ -119,6 +119,25 @@ Hook to pierwsza linia obrony (łapie typowe komendy: przekierowania, `sed -i`, 
 ale nie każdą sztuczkę (np. `python3 -c "open(...,'w')"`); twardą granicą jest `house merge`, który sprawdza
 diff gałęzi niezależnie od tego, jak plik został zmieniony.
 
+## Signal: pytania i odpowiedzi z telefonu
+
+Konto: `signal-cli` jako urządzenie połączone z Twoim numerem (`~/.config/house/notify.env`:
+`HOUSE_NOTIFY_CHANNEL=signal`, `HOUSE_SIGNAL_ACCOUNT=+48…`). W `spec.yaml` konkursu: `notify.alias` (np. `fr`) i
+`notify.signal_group` (nazwa grupy drużyny). Każde nowe pytanie z `QUESTIONS.md` idzie jako osobna wiadomość
+`🤖 [fr] Q-007 …` do Twojej „Notatki do siebie” i do grupy. **Odpowiedź: przeciągnij wiadomość w prawo i napisz
+decyzję** (np. `B`). Odpowiadać może każdy z grupy; liczy się pierwsza odpowiedź, `house` potwierdza
+`✓ [fr] Q-007: B (Kuba)` i zapisuje ją w `QUESTIONS.md` + `DECISIONS.md`. Bez cytatu: `Q-007: B` albo
+`fr Q-007: B`. Pytania krytyczne mają `Termin` i `Domyślnie`: przypomnienie w połowie czasu, po terminie
+judge przyjmuje domyślną odpowiedź (z powiadomieniem). House zapisuje tylko „Notatkę do siebie” i grupy
+konkursów; inne rozmowy odrzuca bez zapisu.
+
+| Komenda | Co robi |
+|---|---|
+| `house notify <konkurs> "tekst"` | wiadomość do Ciebie i grupy |
+| `house ask <konkurs> [Q-###]` | wyślij nowe otwarte pytania (albo jedno ponownie) |
+| `house inbox [konkurs]` | odbierz odpowiedzi (robi to też start każdej sesji) |
+| `house deadlines [konkurs]` | przypomnienia i domyślne odpowiedzi po terminie |
+
 ## Aktualizacja systemu
 
 Zmiany w `core/` albo `adapters/` (np. poprawiony playbook) przenosisz do konkursu przez `house adapt <nazwa>`.

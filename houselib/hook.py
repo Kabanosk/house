@@ -64,6 +64,35 @@ def pre_tool(event: dict, env: dict) -> tuple[int, str]:
     return 0, ""
 
 
+def post_tool(event: dict) -> str:
+    """After an edit of QUESTIONS.md (or a shell command touching it): send new open questions to Signal."""
+    cwd = Path(event.get("cwd") or os.getcwd())
+    contest = guard.contest_root(cwd)
+    if contest is None:
+        return ""
+    args = event.get("tool_input") or {}
+    path = args.get("file_path") or args.get("notebook_path") or ""
+    touched = (Path(path).name == "QUESTIONS.md") if path else "QUESTIONS.md" in str(args.get("command", ""))
+    if not touched:
+        return ""
+    from . import notify
+    sent = notify.ask_new(contest)
+    return f"house: sent {', '.join(sent)} to Signal" if sent else ""
+
+
+def _signal_lines(contest: Path) -> list[str]:
+    """Pull answers and apply deadlines at session start (fail open: a slow or missing Signal changes nothing)."""
+    try:
+        from . import inbox
+        from .signal import from_config
+        sig = from_config()
+        if sig is None:
+            return []
+        return [f"signal: {line}" for line in (*inbox.process([contest], sig), *inbox.deadlines(contest, sig))]
+    except Exception as e:  # noqa: BLE001
+        return [f"signal: skipped ({type(e).__name__})"]
+
+
 def _note_guard_off(contest: Path, session: str) -> None:
     """Append a one-time-per-session line to `.house/PROGRESS.md` saying the guard is off (marker in `.house/tmp`)."""
     marker = contest / ".house/tmp" / f"guard-off-{re.sub(r'[^A-Za-z0-9_-]', '_', session)}"
@@ -107,6 +136,7 @@ def session_start(event: dict) -> str:
     contest = guard.contest_root(Path(event.get("cwd") or os.getcwd()))
     if contest is None:
         return ""
+    signal_lines = _signal_lines(contest)  # first, so the summary below already shows recorded answers
     house = contest / ".house"
     spec = specmod.load_spec(house)
     lines = [f"house: contest {contest.name} · kind {spec.get('kind')} · mode {spec.get('mode')}"]
@@ -149,5 +179,6 @@ def session_start(event: dict) -> str:
             pass
     else:
         lines.append("last briefing: never")
+    lines += signal_lines[:5]
     lines.append("If the human is just returning, start with protocols/briefing.md; answers: QUESTIONS.md.")
     return "\n".join(lines[:25]) + "\n"

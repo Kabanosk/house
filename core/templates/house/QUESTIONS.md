@@ -10,5 +10,8 @@ Format wpisu: nagłówek drugiego poziomu `Q-<kolejny numer, 3 cyfry> [open] <ty
 - **Opcje:** A) … B) …
 - **Rekomendacja:** … (jednym zdaniem dlaczego)
 - **Blokuje:** T### | nic
+- **Poziom:** krytyczny | zawsze człowiek
+- **Termin:** YYYY-MM-DD HH:MM (tylko krytyczny: po tym czasie judge przyjmuje „Domyślnie”)
+- **Domyślnie:** A (rekomendacja; pusta = brak domyślnej)
 - **Odpowiedź:** —
 ```

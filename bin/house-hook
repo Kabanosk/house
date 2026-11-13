@@ -35,6 +35,11 @@ def main() -> int:
             if message:
                 print(message, file=sys.stderr)
             return code
+        if mode == "post-tool":
+            note = hook.post_tool(event)
+            if note:
+                print(note)
+            return 0
         if mode == "session-start":
             sys.stdout.write(hook.session_start(event))
             return 0

@@ -34,6 +34,10 @@ def cmd_doctor(args) -> int:
         return 1
     tools = doctor.detect()
     print(doctor.summary(tools))
+    for line in doctor.signal_status():
+        print(line)
+    for alias, names in doctor.alias_collisions(_all_contests()).items():
+        print(f"! alias `{alias}` used by several running contests: {', '.join(names)} (spec notify.alias)")
     if args.name:
         target = contest_dir(args.name)
         if not (target / ".house").is_dir():

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from houselib import signal as sig
+from tests import helpers  # noqa: F401  (isolates Signal config)
 
 
 class FakeRun:
@@ -41,6 +42,9 @@ class SignalTest(unittest.TestCase):
     def test_list_groups(self):
         run = FakeRun('[{"id": "g1", "name": "Team", "isMember": true}]')
         self.assertEqual(sig.Signal("+1", "sc", run=run).list_groups(), [{"id": "g1", "name": "Team"}])
+
+    def test_tests_never_see_the_real_config(self):
+        self.assertIsNone(sig.from_config())
 
     def test_from_config(self):
         with tempfile.TemporaryDirectory() as d:

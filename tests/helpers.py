@@ -1,8 +1,14 @@
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from houselib import HOUSE_ROOT
+
+# Tests must never reach the owner's real Signal account or data (subprocesses inherit this environment).
+os.environ["HOUSE_NOTIFY_CONFIG"] = "/nonexistent/house-notify.env"
+os.environ.setdefault("HOUSE_DATA_DIR", tempfile.mkdtemp(prefix="house-test-data-"))
 
 NAME = "Test Owner"
 EMAIL = "owner@example.com"

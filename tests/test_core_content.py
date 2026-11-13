@@ -100,3 +100,37 @@ class CheckFlowContentTest(unittest.TestCase):
         text = self.read("core/playbooks/lifecycle.md")
         for word in ("review", "merged", "house merge", "--freeze"):
             self.assertIn(word, text)
+
+
+class SignalContentTest(unittest.TestCase):
+    """P3: notify section in spec, decision levels in QUESTIONS and the protocol."""
+
+    def read(self, rel: str) -> str:
+        return (HOUSE_ROOT / rel).read_text()
+
+    def test_spec_has_notify_and_guard(self):
+        import tempfile
+        from pathlib import Path
+
+        from houselib import spec
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "spec.yaml").write_text(self.read("core/templates/house/spec.yaml"))
+            s = spec.load_spec(Path(d))
+        self.assertIn("alias", s["notify"])
+        self.assertIn("signal_group", s["notify"])
+        self.assertEqual(spec.get(s, "guard.push_allow"), ["origin"])
+
+    def test_questions_template_has_levels(self):
+        text = self.read("core/templates/house/QUESTIONS.md")
+        for word in ("**Poziom:**", "**Termin:**", "**Domyślnie:**"):
+            self.assertIn(word, text)
+
+    def test_protocol_levels_and_notify(self):
+        text = self.read("core/protocols/questions.md")
+        for word in ("krytyczny", "zawsze człowiek", "Termin", "house notify", "house ask"):
+            self.assertIn(word, text)
+
+    def test_start_skill_asks_for_alias_and_group(self):
+        text = self.read("adapters/claude-code/skills/house-start/SKILL.md")
+        self.assertIn("notify.alias", text)
+        self.assertIn("signal_group", text)

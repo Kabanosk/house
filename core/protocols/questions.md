@@ -31,6 +31,22 @@ Everything else (library choice, task split, retries, which test to write) is NO
   answer first, then ask once, with a tight decision-ready brief: what was produced, why, the options, and links
   to the assets (reports, branches, scores). The human reads a brief, not a draft.
 
+## Decision levels and deadlines
+
+| Level | Examples | Who decides |
+|---|---|---|
+| mały | library, task split, retry | coordinator, log D-### |
+| średni | ideas with similar scores, pivot after stagnation in `autopilot`, cost > ~20% | judge, log D-###, then `$HOUSE_ROOT/bin/house notify <contest> "Zdecydowałem: … (D-###), możesz cofnąć"` |
+| krytyczny | idea choice in `copilot`, endgame submissions, the final submission, anything irreversible/public not allowed by spec | human, **with** `Termin` + `Domyślnie` (judge's recommendation) |
+| zawsze człowiek | rules ambiguity, organisers' consent | human, never defaulted |
+
+- `copilot`/`autopilot` only moves the line between średni and krytyczny (table in "Mode").
+- `Termin` = the latest sensible moment (push right); endgame example: final submission = contest end − 10 min.
+  `house deadlines` (run by the night loop and at session start) reminds once at half-time and, when the
+  deadline passes with no answer, records `Domyślnie` as `D-###` (Kto: judge, domyślnie) and notifies.
+- Every new open question is sent to Signal automatically (hook after editing `QUESTIONS.md`; by hand:
+  `house ask <contest>`). People answer with a quote-reply; `house inbox` records the first answer.
+
 ## How to ask
 1. Append to `.house/QUESTIONS.md` (Polish) using the template: `## Q-### [open] <title>`, context, options,
    recommendation with one-line reason, what it blocks.

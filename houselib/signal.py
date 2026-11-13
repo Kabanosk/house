@@ -3,6 +3,7 @@
 Every call degrades to "nothing happened" (None / []) on failure: notifications must never break a run.
 """
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -55,7 +56,12 @@ class Signal:
         return [{"id": g.get("id"), "name": g.get("name")} for g in groups if isinstance(g, dict)]
 
 
-def read_config(path: Path = CONFIG) -> dict[str, str]:
+def _config_path(path: Path | None) -> Path:
+    return path or Path(os.environ.get("HOUSE_NOTIFY_CONFIG") or CONFIG)
+
+
+def read_config(path: Path | None = None) -> dict[str, str]:
+    path = _config_path(path)
     if not path.is_file():
         return {}
     out = {}
@@ -66,7 +72,7 @@ def read_config(path: Path = CONFIG) -> dict[str, str]:
     return out
 
 
-def from_config(path: Path = CONFIG, which=shutil.which, fallback: Path = FALLBACK_BINARY) -> "Signal | None":
+def from_config(path: Path | None = None, which=shutil.which, fallback: Path = FALLBACK_BINARY) -> "Signal | None":
     cfg = read_config(path)
     if cfg.get("HOUSE_NOTIFY_CHANNEL") != "signal" or not cfg.get("HOUSE_SIGNAL_ACCOUNT"):
         return None
