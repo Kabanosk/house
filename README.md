@@ -115,6 +115,9 @@ pisanie do `.house/checks/`, commit plików `.env*` i plików z kluczami, push n
 `spec.guard.push_allow` (domyślnie `origin`) i force push na główną gałąź. Na start sesji podaje stan konkursu
 (pytania, zadania gotowe do pracy, czerwone sprawdzenia). Codex nie ma hooków, więc te same reguły sprawdza po fakcie
 `house guard diff` (sterownik Codexa i `house merge`). Awaryjnie: `HOUSE_GUARD=off claude` (zapis w PROGRESS.md).
+Hook to pierwsza linia obrony (łapie typowe komendy: przekierowania, `sed -i`, `rm`, `git -C`, wiele linii),
+ale nie każdą sztuczkę (np. `python3 -c "open(...,'w')"`); twardą granicą jest `house merge`, który sprawdza
+diff gałęzi niezależnie od tego, jak plik został zmieniony.
 
 ## Aktualizacja systemu
 

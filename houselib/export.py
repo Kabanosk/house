@@ -7,17 +7,19 @@ from .gitutil import git, identity, set_identity
 
 EXCLUDED_DIRS = {".house", ".claude", ".cursor", ".codex"}
 EXCLUDED_FILES = {"AGENTS.md", "CLAUDE.md"}
+# Prefix patterns must not start inside an identifier: `task_dependencies_…` or `attention_mask_…` contain
+# `sk_` + 20 characters and are code, not keys.
 SECRET_RES = [re.compile(p) for p in (
-    r"sk[-_][A-Za-z0-9_-]{20,}",
-    r"AIza[0-9A-Za-z_-]{35}",
-    r"hf_[A-Za-z0-9]{30,}",
-    r"github_pat_[A-Za-z0-9_]{30,}",
-    r"gh[opsu]_[A-Za-z0-9]{30,}",
-    r"xox[abprs]-[A-Za-z0-9-]{10,}",
+    r"(?<![A-Za-z0-9_])sk[-_][A-Za-z0-9_-]{20,}",
+    r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_-]{35}",
+    r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,}",
+    r"(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{30,}",
+    r"(?<![A-Za-z0-9_])gh[opsu]_[A-Za-z0-9]{30,}",
+    r"(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{10,}",
     r"(?i)(api[_-]?key|secret|token|password)\w*[\"']?\s*[:=]\s*[\"'][^\"'\s<>]{16,}[\"']",
-    r"xai-[A-Za-z0-9]{20,}",
-    r"ghp_[A-Za-z0-9]{30,}",
-    r"AKIA[0-9A-Z]{16}",
+    r"(?<![A-Za-z0-9_])xai-[A-Za-z0-9]{20,}",
+    r"(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{30,}",
+    r"(?<![A-Za-z0-9_])AKIA[0-9A-Z]{16}",
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
 )]
 

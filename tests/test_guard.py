@@ -101,5 +101,67 @@ class GuardTest(unittest.TestCase):
         self.assertTrue(guard.frozen_tampering(self.c))
 
 
+    def test_identifiers_are_not_secrets(self):
+        (self.wt / "m.py").write_text("def task_dependencies_are_satisfied(): pass\n"
+                                      "attention_mask_for_padding_tokens_long = 1\n")
+        self.assertIsNone(guard.check_bash("git add m.py", self.wt, self.c))
+        git(self.wt, "add", "m.py")
+        git(self.wt, "commit", "-qm", "code")
+        self.assertEqual(guard.diff_violations(self.c, "T001", self.wt), [])
+
+    def test_multiline_commands_checked(self):
+        self.assertIsNotNone(guard.check_bash("echo hi\nrm test_a.py", self.wt, self.c))
+        self.assertIsNotNone(guard.check_bash("cd .\ngit push --force origin main", self.c, self.c))
+
+    def test_git_dash_c_checked(self):
+        (self.wt / ".gitignore").write_text("")
+        (self.wt / ".env").write_text("K=1\n")
+        self.assertIsNotNone(guard.check_bash(f"git -C {self.wt} add -A", self.c, self.c))
+        self.assertIsNotNone(guard.check_bash("git -C . push --force origin main", self.c, self.c))
+        self.assertIsNotNone(guard.check_bash("git -c core.x=y push -fu origin main", self.c, self.c))
+
+    def test_restoring_protected_file_allowed(self):
+        for cmd in ("git checkout test_a.py", "git checkout -- test_a.py", "git checkout HEAD -- test_a.py",
+                    "git restore test_a.py", "git checkout -b feature", "git checkout main"):
+            self.assertIsNone(guard.check_bash(cmd, self.wt, self.c), cmd)
+        self.assertIsNotNone(guard.check_bash("git checkout other -- test_a.py", self.wt, self.c))
+        self.assertIsNotNone(guard.check_bash("git restore --source=other test_a.py", self.wt, self.c))
+
+    def test_bare_push_uses_upstream_remote(self):
+        bare = Path(self._tmp.name) / "public.git"
+        git(Path(self._tmp.name), "init", "-q", "--bare", str(bare))
+        git(self.wt, "remote", "add", "public", str(bare))
+        git(self.wt, "push", "-q", "-u", "public", "task/T001-x")
+        self.assertIsNotNone(guard.check_bash("git push", self.wt, self.c))
+        self.assertIsNotNone(guard.check_bash("git push --repo=public", self.wt, self.c))
+
+    def test_one_harmless_segment_does_not_end_the_check(self):
+        self.assertIsNotNone(guard.check_bash("echo > .house/checksum; echo x > test_a.py", self.c, self.c))
+        self.assertIsNone(guard.check_bash("echo > .house/checksum", self.c, self.c))
+
+    def test_removing_a_committed_env_is_allowed(self):
+        (self.wt / ".gitignore").write_text("")
+        (self.wt / ".env").write_text("K=1\n")
+        git(self.wt, "add", "-f", ".env", ".gitignore")
+        git(self.wt, "commit", "-qm", "oops")
+        (self.wt / ".env").unlink()
+        self.assertIsNone(guard.check_bash("git add -A", self.wt, self.c))
+        self.assertIsNone(guard.check_bash("git commit -am 'remove secret'", self.wt, self.c))
+
+    def test_heredoc_body_is_not_a_command(self):
+        cmd = "cat <<'EOF' > notes.md\nrun prog > test_a.py\nEOF"
+        self.assertIsNone(guard.check_bash(cmd, self.wt, self.c))
+
+    def test_large_and_binary_files_are_cheap(self):
+        (self.wt / "data.bin").write_bytes(b"\0" * 2_000_000 + b"sk-abcdefghijklmnopqrstuvwxyz0123")
+        self.assertIsNone(guard.check_bash("git add data.bin", self.wt, self.c))
+
+    def test_rename_in_status(self):
+        git(self.wt, "mv", "test_a.py", "test_b.py")
+        paths = [p for _, p in guard._status(self.wt)]
+        self.assertIn("test_b.py", paths)
+        self.assertTrue(all(not p.startswith("t_a") for p in paths), paths)
+
+
 if __name__ == "__main__":
     unittest.main()

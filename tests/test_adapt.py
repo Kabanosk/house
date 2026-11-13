@@ -211,6 +211,17 @@ class ClaudeSettingsTest(unittest.TestCase):
         self.assertIn("my-lint", commands)
         self.assertEqual(sum("house-hook" in c for c in commands), 1)
 
+    def test_user_hook_in_same_entry_survives(self):
+        from houselib import adapters as a
+        mixed = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "/old/bin/house-hook pre-tool"},
+            {"type": "command", "command": "my-lint"}]}]}, "permissions": "weird"}
+        merged = a.merge_settings(mixed, a.claude_settings(self.root))
+        commands = [h["command"] for e in merged["hooks"]["PreToolUse"] for h in e["hooks"]]
+        self.assertIn("my-lint", commands)
+        self.assertEqual(sum("house-hook" in c for c in commands), 1)
+        self.assertIsInstance(merged["permissions"]["allow"], list)
+
     def test_not_committed_and_excluded(self):
         from tests.helpers import git
         adapters.adapt(self.c, self.root, detect=lambda: NONE)

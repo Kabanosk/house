@@ -219,20 +219,32 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
     }
 
 
-def _is_ours(entry: dict) -> bool:
-    return any("house-hook" in str(h.get("command", "")) for h in entry.get("hooks", []))
+def _is_house_hook(hook) -> bool:
+    return isinstance(hook, dict) and "house-hook" in str(hook.get("command", ""))
 
 
 def merge_settings(existing: dict, ours: dict) -> dict:
-    """Keep every user key, permission and hook; replace house's hook entries; no duplicate allow rules."""
+    """Keep every user key, permission and hook; replace house's own hook commands; no duplicate allow rules."""
     out = dict(existing)
-    hooks = {k: [e for e in v if isinstance(e, dict) and not _is_ours(e)]
-             for k, v in (existing.get("hooks") or {}).items() if isinstance(v, list)}
+    hooks: dict = {}
+    for event, entries in (existing.get("hooks") or {}).items():
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            mine = [h for h in e.get("hooks", []) if not _is_house_hook(h)]
+            if mine:
+                kept.append({**e, "hooks": mine})
+        hooks[event] = kept
     for event, entries in ours["hooks"].items():
         hooks[event] = [*hooks.get(event, []), *entries]
     out["hooks"] = hooks
-    perms = dict(existing.get("permissions") or {})
-    perms["allow"] = list(dict.fromkeys([*(perms.get("allow") or []), *ours["permissions"]["allow"]]))
+    perms = existing.get("permissions")
+    perms = dict(perms) if isinstance(perms, dict) else {}
+    allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+    perms["allow"] = list(dict.fromkeys([*allow, *ours["permissions"]["allow"]]))
     out["permissions"] = perms
     return out
 
