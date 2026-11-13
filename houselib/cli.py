@@ -3,7 +3,18 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import HOUSE_ROOT, adapters, context, doctor, export, manifest, registry, scaffold, setup, yc
+from . import (
+    HOUSE_ROOT,
+    adapters,
+    context,
+    doctor,
+    export,
+    manifest,
+    registry,
+    scaffold,
+    setup,
+    yc,
+)
 
 
 def contest_dir(name: str) -> Path:

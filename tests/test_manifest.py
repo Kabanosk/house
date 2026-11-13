@@ -5,8 +5,8 @@ from pathlib import Path
 
 from houselib import manifest
 
-ALL_OURS = lambda rel: True  # noqa: E731
-NONE_OURS = lambda rel: False  # noqa: E731
+ALL_OURS = lambda rel: True
+NONE_OURS = lambda rel: False
 
 
 class ManifestTest(unittest.TestCase):
