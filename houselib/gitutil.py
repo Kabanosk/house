@@ -41,6 +41,26 @@ def identity(root: Path) -> tuple[str, str]:
     return git(root, "config", "user.name").strip(), git(root, "config", "user.email").strip()
 
 
+def exclude(repo: Path, pattern: str) -> None:
+    """Add a pattern to the repo's `info/exclude` (local ignore, never committed) unless it is already there.
+
+    Works from linked worktrees too (the shared `info/exclude` is used). Outside a git repo nothing happens.
+
+    Args:
+        repo: Any directory inside the repo.
+        pattern: gitignore pattern, e.g. `.house/experiments/`.
+    """
+    r = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=repo, capture_output=True,
+                       text=True, check=False)
+    if r.returncode != 0:
+        return
+    path = (repo / r.stdout.strip()).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text().splitlines() if path.exists() else []
+    if pattern not in lines:
+        path.write_text("\n".join([*lines, pattern]) + "\n")
+
+
 def set_identity(repo: Path, name: str, email: str) -> None:
     """Set the repo-local git identity.
 
