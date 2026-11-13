@@ -13,6 +13,8 @@ from . import (
     guard,
     manifest,
     merge,
+    notify,
+    questions,
     registry,
     scaffold,
     setup,
@@ -125,6 +127,30 @@ def cmd_guard(args) -> int:
         print(f"VIOLATION {v}")
     print("CLEAN" if not found else f"{len(found)} violation(s)")
     return 1 if found else 0
+
+
+def cmd_notify(args) -> int:
+    target = contest_dir(args.name)
+    sent, warnings = notify.send(target, " ".join(args.text))
+    for w in warnings:
+        print(f"! {w}")
+    print(f"sent {len(sent)} message(s)" if sent else "nothing sent (Signal not configured or unreachable)")
+    return 0
+
+
+def cmd_ask(args) -> int:
+    target = contest_dir(args.name)
+    if args.question:
+        text = (target / ".house/QUESTIONS.md").read_text()
+        q = next((q for q in questions.parse(text) if q.id == args.question), None)
+        if q is None:
+            print(f"error: no {args.question} in QUESTIONS.md", file=sys.stderr)
+            return 1
+        print(f"sent {args.question}" if notify.ask(target, q) else "nothing sent")
+        return 0
+    asked = notify.ask_new(target)
+    print("sent " + ", ".join(asked) if asked else "no new open questions")
+    return 0
 
 
 def cmd_new(args) -> int:
@@ -259,6 +285,16 @@ def build_parser() -> argparse.ArgumentParser:
     gd.add_argument("task", help="task id, e.g. T001")
     gd.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
     gd.set_defaults(func=cmd_guard)
+
+    nt = sub.add_parser("notify", help="send a message to the owner (Signal Note to Self) and the contest group")
+    nt.add_argument("name")
+    nt.add_argument("text", nargs="+")
+    nt.set_defaults(func=cmd_notify)
+
+    ak = sub.add_parser("ask", help="send open questions from QUESTIONS.md (new ones, or one by id) to Signal")
+    ak.add_argument("name")
+    ak.add_argument("question", nargs="?", help="Q-### to (re)send")
+    ak.set_defaults(func=cmd_ask)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")
