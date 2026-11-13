@@ -134,3 +134,35 @@ class SignalContentTest(unittest.TestCase):
         text = self.read("adapters/claude-code/skills/house-start/SKILL.md")
         self.assertIn("notify.alias", text)
         self.assertIn("signal_group", text)
+
+
+class ReviewContentTest(unittest.TestCase):
+    """P5: cross-model review in the flow."""
+
+    def read(self, rel: str) -> str:
+        return (HOUSE_ROOT / rel).read_text()
+
+    def test_plan_marks_review_always(self):
+        self.assertIn("review: always", self.read("adapters/claude-code/skills/house-plan/SKILL.md"))
+
+    def test_run_reviews_milestones_and_always_tasks(self):
+        text = self.read("adapters/claude-code/skills/house-run/SKILL.md")
+        self.assertIn("house review", text)
+        self.assertIn("--since last", text)
+
+    def test_spec_has_review_budget(self):
+        import tempfile
+        from pathlib import Path
+
+        from houselib import spec
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "spec.yaml").write_text(self.read("core/templates/house/spec.yaml"))
+            s = spec.load_spec(Path(d))
+        self.assertEqual(spec.get(s, "limits.codex_reviews_per_day"), 4)
+        self.assertEqual(spec.get(s, "review.minutes"), 20)
+
+    def test_second_opinion_vendored(self):
+        d = HOUSE_ROOT / "vendor/skills/second-opinion"
+        self.assertTrue((d / "SKILL.md").is_file())
+        self.assertIn("MIT", (d / "LICENSE").read_text())
+        self.assertIn("d73fea9", (d / "ATTRIBUTION.md").read_text())

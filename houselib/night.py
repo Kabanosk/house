@@ -630,6 +630,11 @@ def _finish(contest: Path, tid: str, n: int, branch: str, wt: Path, log: Path, t
         return Attempt(tid, n, "no-commits", "worker finished without committing anything", rel_log)
     _set(task, status="review")
     _commit_paths(contest, [task.path], f"chore(house): {tid} ready for review (night)")
+    if str(task.meta.get("review")) == "always":
+        from . import review
+        res = review.review_task(contest, tid)
+        if not res.ok:
+            return Attempt(tid, n, "merge-refused", f"review failed: {res.why}", rel_log)
     try:
         out = merge.merge_task(contest, tid, wt)
     except Exception as e:  # noqa: BLE001

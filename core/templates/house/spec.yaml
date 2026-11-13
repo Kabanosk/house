@@ -46,6 +46,7 @@ mode: copilot       # copilot (pytaj o trudne decyzje) | autopilot (decyduj sam,
 limits:
   max_parallel_agents: 3
   ideas_per_round: 5
+  codex_reviews_per_day: 4  # house review: Codex reviews per day (Codex limits are smaller); then Claude
   stagnation_n: 3   # iteracje bez poprawy → wymuszona zmiana kierunku
 
 submissions:
@@ -76,3 +77,6 @@ guard:              # ochrona (hooki + house guard diff)
 night:              # house night (tryb nocny)
   task_minutes: 45  # limit jednej sesji workera
   model: sonnet     # model workera Claude w nocy
+
+review:             # house review (recenzja krzyżowa Codex ↔ Claude)
+  minutes: 20       # limit jednej recenzji

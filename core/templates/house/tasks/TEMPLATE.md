@@ -20,7 +20,8 @@ protected:
 ---
 <!-- Copy to tasks/T###-slug.md and set status: todo. Files with status: template are ignored.
 Status: todo → doing → review (worker stops here) → merged (house merge passed) → done (manual criteria too);
-blocked when stuck or reverted. Criteria are frozen by `house check <contest> T### --freeze` at the end of
+blocked when stuck or reverted. Optional `review: always` (scorer, submission pipeline, contracts): house merge
+then needs an independent review of the task's head (`house review <contest> T###`). Criteria are frozen by `house check <contest> T### --freeze` at the end of
 planning; changing them later needs `--refreeze --reason` (logged as D-###). -->
 ## Objective
 One paragraph: what done looks like for this task.
