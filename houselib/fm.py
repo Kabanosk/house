@@ -11,8 +11,13 @@ def parse_scalar(s: str):
     if s.startswith("[") and s.endswith("]"):
         inner = s[1:-1].strip()
         return [str(parse_scalar(x)) for x in inner.split(",")] if inner else []
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
-        return s[1:-1]
+    if len(s) >= 2 and s[0] == s[-1] == '"':
+        try:
+            return json.loads(s)  # YAML double quotes: \" and \\ escapes
+        except ValueError:
+            return s[1:-1]
+    if len(s) >= 2 and s[0] == s[-1] == "'":
+        return s[1:-1].replace("''", "'")  # YAML single quotes: '' is a quote
     if s == "":
         return ""
     if s in ("null", "~"):

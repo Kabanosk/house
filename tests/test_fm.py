@@ -89,6 +89,10 @@ class SetFieldsTest(unittest.TestCase):
 
 
 class ParseScalarTest(unittest.TestCase):
+    def test_double_quoted_escapes(self):
+        self.assertEqual(parse_scalar('"python3 -c \'print(\\"ok\\")\'"'), "python3 -c 'print(\"ok\")'")
+        self.assertEqual(parse_scalar("'it''s'"), "it's")
+
     def test_booleans_and_quotes(self):
         self.assertIs(parse_scalar("true"), True)
         self.assertIs(parse_scalar("false"), False)
