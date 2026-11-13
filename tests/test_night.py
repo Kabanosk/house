@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from collections import namedtuple
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from houselib import adapters, checks, night, scaffold
@@ -25,7 +25,7 @@ def task_text(tid: str, deps: str = "[]", run: str = "python3 -c 'import hello'"
 def fake_run(logged_in=True, expires_in_h=72, codex_ok=True):
     def run(argv, **kw):
         if argv[:3] == ["claude", "auth", "status"]:
-            exp = (datetime.now(timezone.utc) + timedelta(hours=expires_in_h)).isoformat().replace("+00:00", "Z")
+            exp = (datetime.now(UTC) + timedelta(hours=expires_in_h)).isoformat().replace("+00:00", "Z")
             return subprocess.CompletedProcess(argv, 0, json.dumps({"loggedIn": logged_in, "loginExpiresAt": exp}), "")
         if argv[:3] == ["codex", "login", "status"]:
             return subprocess.CompletedProcess(argv, 0 if codex_ok else 1, "Logged in" if codex_ok else "", "")

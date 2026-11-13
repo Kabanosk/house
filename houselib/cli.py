@@ -14,6 +14,7 @@ from . import (
     inbox,
     manifest,
     merge,
+    night,
     notify,
     questions,
     registry,
@@ -184,6 +185,27 @@ def cmd_deadlines(args) -> int:
     return 0
 
 
+def cmd_night(args) -> int:
+    target = contest_dir(args.name)
+    problems, warnings = night.preflight(target, args.hours)
+    for w in warnings:
+        print(f"! {w}")
+    for p in problems:
+        print(f"✗ {p}")
+    if problems:
+        print("night not started")
+        return 1
+    if args.dry_run:
+        ready = night.pick_ready(target / ".house", set(), 99)
+        print("preflight OK; ready now: " + (", ".join(ready) if ready else "none"))
+        return 0
+    rep = night.run_night(target, hours=args.hours, max_tasks=args.max_tasks)
+    merged = sum(a.outcome == "merged" for a in rep.attempts)
+    print(f"night over ({rep.stopped_because}): {merged} merged, {len(rep.attempts) - merged} failed attempts")
+    print(f"report: {rep.report_path}")
+    return 0
+
+
 def cmd_new(args) -> int:
     try:
         path = scaffold.new_contest(args.name, args.repo)
@@ -334,6 +356,13 @@ def build_parser() -> argparse.ArgumentParser:
     dl = sub.add_parser("deadlines", help="remind about / apply defaults of critical questions past their deadline")
     dl.add_argument("name", nargs="?")
     dl.set_defaults(func=cmd_deadlines)
+
+    nn = sub.add_parser("night", help="work through ready tasks unattended (fresh worker session per task)")
+    nn.add_argument("name")
+    nn.add_argument("--hours", type=float, default=8)
+    nn.add_argument("--max-tasks", type=int)
+    nn.add_argument("--dry-run", action="store_true", help="preflight and list ready tasks only")
+    nn.set_defaults(func=cmd_night)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")

@@ -52,6 +52,14 @@ At the start of every session: read `spec.yaml`, `DECISIONS.md`, open questions 
   Never `git merge` a task branch by hand. `depends_on` is satisfied by `merged` or `done`.
 - Agents communicate through files, not long chats. Pass paths, not pasted logs. Raw data stays in files.
 
+## Night runs (`house night <contest>`)
+- Preflight first (clean checkout, main green, disk, Claude login valid until the end, settings with hooks).
+- Then, until time, `.house/STOP`, `--max-tasks` or nothing is ready: ready tasks (at most
+  `limits.max_parallel_agents`) each get a **fresh** headless worker session in their worktree; when it ends,
+  `house merge` decides. 3 failed attempts → task `blocked`; 5 failed in a row → the night ends.
+- Signal answers and deadlines are processed every round. Morning: `reports/night-*.md`, PROGRESS, Signal summary.
+- Workers never wait: a human decision becomes a Q-### (sent to Signal) and the task is `blocked`.
+
 ## 5. Evaluation
 - Judge evaluates against `scoring` with evidence (commands, screenshots, numbers), never vibes.
 - Manual criteria: the judge records each with `house check <contest> T### --manual AC-n --evidence <report>`.

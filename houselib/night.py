@@ -11,7 +11,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import HOUSE_ROOT, checks, merge
@@ -84,7 +84,7 @@ def preflight(contest: Path, hours: float, now: datetime | None = None, run=subp
         problems.append(f"disk: only {free_gb:.1f} GB free")
     elif free_gb < WARN_FREE_GB:
         warnings.append(f"disk: {free_gb:.1f} GB free")
-    end = (now or datetime.now(timezone.utc)) + timedelta(hours=hours)
+    end = (now or datetime.now(UTC)) + timedelta(hours=hours)
     try:
         auth = json.loads(run(["claude", "auth", "status"], capture_output=True, text=True, check=False).stdout)
     except (OSError, ValueError):
@@ -210,7 +210,10 @@ def _signal_round(contest: Path) -> None:
         from .signal import from_config
         s = from_config()
         if s is not None:
-            inbox.process([contest], s)
+            everyone = inbox.all_running() or [contest]
+            if contest.resolve() not in {c.resolve() for c in everyone}:
+                everyone.append(contest)
+            inbox.process(everyone, s, scope=[contest])
             inbox.deadlines(contest, s)
     except Exception:  # noqa: BLE001 — Signal trouble never stops the night
         pass
