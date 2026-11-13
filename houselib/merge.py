@@ -132,7 +132,7 @@ def _red_before(contest: Path, house: Path, task_ids: list[str]) -> set[str]:
 def _review_gate(contest: Path, task_id: str, branch: str, accept_review: str | None) -> str | None:
     """Refusal message for a `review: always` task without a usable review of its current head, else None.
 
-    A review with BLOCKER findings passes only with `accept_review` (a reason, logged as D-###).
+    A review with BLOCKER or MAJOR findings passes only with `accept_review` (a reason, logged as D-###).
     """
     rep = review.report_for(contest, task_id)
     head = _git(contest, "rev-parse", branch).stdout.strip()
@@ -143,16 +143,18 @@ def _review_gate(contest: Path, task_id: str, branch: str, accept_review: str | 
                 f"{head[:8]}; run house review again")
     if not rep.get("status", "").startswith("ok"):
         return f"refused: the last review of {task_id} failed ({rep.get('status')}); run house review again"
-    blockers = int(rep.get("blockers", "0") or 0)
+    # review: always marks the scorer, the submission pipeline and contracts: a MAJOR there is a wrong score
+    blockers = int(rep.get("blockers", "0") or 0) + int(rep.get("majors", "0") or 0)
     if blockers and not accept_review:
-        return (f"refused: the review of {task_id} found {blockers} BLOCKER(s); fix them, or merge with "
-                "--accept-review \"<why the finding is wrong>\"")
+        return (f"refused: the review of {task_id} found {rep.get('blockers', '0')} BLOCKER and "
+                f"{rep.get('majors', '0')} MAJOR finding(s) (review: always task); fix them, or merge with "
+                "--accept-review \"<why the findings are wrong>\"")
     if blockers:
         decisions = contest / ".house/DECISIONS.md"
         text = decisions.read_text() if decisions.exists() else "# Dziennik decyzji\n"
         did = checks._next_decision_id(text)
         decisions.write_text(text.rstrip("\n") + f"\n\n## {did} Akceptacja recenzji {task_id} mimo BLOCKER\n\n"
-                             f"- **Decyzja:** scalić {task_id} mimo {blockers} BLOCKER w recenzji\n"
+                             f"- **Decyzja:** scalić {task_id} mimo {blockers} uwag BLOCKER/MAJOR w recenzji\n"
                              f"- **Dlaczego:** {accept_review}\n- **Kto:** coordinator\n"
                              f"- **Data:** {datetime.now():%Y-%m-%d %H:%M}\n")
     return None

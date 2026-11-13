@@ -162,7 +162,7 @@ Codex ma mniejsze limity, więc obowiązuje `limits.codex_reviews_per_day` (domy
 sesja Claude'a, a raport zaznacza słabszą niezależność. Brief jest „ślepy”: cel, kryteria i dokładny diff, bez
 raportu autora. Recenzja, która nie wróciła (zawieszenie, pusta odpowiedź, brak `VERDICT:`), jest porażką, a nie
 „brakiem uwag”. Zadania `review: always` (sprawdzarka, potok zgłoszeń, kontrakty) przejdą `house merge` dopiero z
-recenzją aktualnego commita i bez BLOCKER, albo z `--accept-review "powód"` (wpis D-###).
+recenzją aktualnego commita i bez BLOCKER ani MAJOR, albo z `--accept-review "powód"` (wpis D-###).
 
 ## Aktualizacja systemu
 

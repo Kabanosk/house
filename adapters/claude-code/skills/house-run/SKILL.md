@@ -19,7 +19,7 @@ Run **stage 4: Execution** of `$HOUSE_DIR/playbooks/lifecycle.md`.
    Workers commit with `git -C <worktree> ...` (never `cd <worktree> && git ...`).
 4. Loop until nothing is ready. Blocked tasks → questions per `protocols/questions.md`; keep going on the rest.
    Tasks with `review: always`: run `$HOUSE_ROOT/bin/house review <contest> T###` before `house merge` (Codex
-   reviews Claude's work and vice versa). BLOCKER you are sure is wrong → `house merge … --accept-review "why"`.
+   reviews Claude's work and vice versa). BLOCKER/MAJOR you are sure is wrong → `house merge … --accept-review "why"`.
 5. At every milestone: `$HOUSE_ROOT/bin/house review <contest> --since last` (one review of everything merged
    since the previous one; fix real findings as new tasks, log disagreements as D-###).
    After each merge wave, if `spec.kind` is build and a milestone is near, dispatch the `judge` agent

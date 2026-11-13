@@ -157,6 +157,13 @@ class ReviewGateTest(ReviewTest):
         self.assertTrue(out.ok, out.message)
         self.assertIn("false positive", (self.house / "DECISIONS.md").read_text())
 
+    def test_major_also_blocks_review_always_tasks(self):
+        self.always()
+        review.review_task(self.c, "T001", launcher=FakeLauncher(text=GOOD))
+        out = merge.merge_task(self.c, "T001")
+        self.assertFalse(out.ok)
+        self.assertIn("MAJOR", out.message)
+
     def test_clean_review_passes(self):
         self.always()
         review.review_task(self.c, "T001", launcher=FakeLauncher(text="Nothing significant.\nVERDICT: good\n"))
