@@ -222,8 +222,10 @@ nie ma `AskUserQuestion`; nocny przebieg nie ma jak zawołać człowieka.
     nazwę na ID grupy przez `signal-cli listGroups`, niejednoznaczna lub nieznana nazwa → ostrzeżenie i tylko
     „Notatka do siebie”).
   - **Skrót konkursu** (Wojtek, 2026-11-13; jedna grupa może obsługiwać kilka konkursów):
-    `spec.yaml` → `notify.alias` (np. `fr`, `fi`, `collab`; małe litery/cyfry, unikalny wśród konkursów
-    w `contests.yaml`, sprawdza `house doctor`). Wiadomości w grupie idą z numeru Wojtka (urządzenie połączone,
+    `spec.yaml` → `notify.alias` (np. `fr`, `fi`, `collab`; małe litery/cyfry). Unikalny tylko wśród
+    **trwających** konkursów: trwający = `timeline.end` w przyszłości albo puste. Zakończone mogą mieć ten sam
+    skrót (np. kolejna TechArena znów `fr`); `house doctor` sprawdza kolizje tylko wśród trwających, a
+    odpowiedzi dla zakończonego konkursu `house inbox` pomija. Wiadomości w grupie idą z numeru Wojtka (urządzenie połączone,
     bez osobnego numeru) z prefiksem `🤖 [fr]`, żeby było jasne, że pisze system i którego konkursu dotyczy.
   - **Jak odpowiadać, od najwygodniejszego:**
     1. **Odpowiedź z cytatem** (przeciągnięcie wiadomości w prawo w Signalu) i sama treść, np. `B`. `house`
