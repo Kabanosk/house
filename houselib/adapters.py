@@ -198,6 +198,74 @@ def _commit_owned(contest: Path, paths: list[str]) -> None:
         git(contest, "commit", "-q", "-m", "chore(house): adapt", "--", *todo)
 
 
+ALLOW_COMMANDS = ["git status:*", "git diff:*", "git log:*", "git show:*", "git add:*", "git commit:*",
+                  "git worktree:*", "git -C:*", "git branch:*", "python3 -m unittest:*", "pytest:*", "uv run:*",
+                  "npm test:*", "npm run:*", "npx tsc:*", "ruff check:*"]
+
+
+def claude_settings(root: Path = HOUSE_ROOT) -> dict:
+    """House's part of .claude/settings.local.json: guard hooks + an allowlist for headless sessions."""
+    hook = f"{root.resolve()}/bin/house-hook"
+    return {
+        "hooks": {
+            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+                            "hooks": [{"type": "command", "command": f"{hook} pre-tool"}]}],
+            "SessionStart": [{"hooks": [{"type": "command", "command": f"{hook} session-start"}]}],
+        },
+        "permissions": {"allow": [f"Bash({root.resolve()}/bin/house:*)", f"Bash({root.resolve()}/bin/codex-task:*)",
+                                  *(f"Bash({c})" for c in ALLOW_COMMANDS)]},
+    }
+
+
+def _is_ours(entry: dict) -> bool:
+    return any("house-hook" in str(h.get("command", "")) for h in entry.get("hooks", []))
+
+
+def merge_settings(existing: dict, ours: dict) -> dict:
+    """Keep every user key, permission and hook; replace house's hook entries; no duplicate allow rules."""
+    out = dict(existing)
+    hooks = {k: [e for e in v if isinstance(e, dict) and not _is_ours(e)]
+             for k, v in (existing.get("hooks") or {}).items() if isinstance(v, list)}
+    for event, entries in ours["hooks"].items():
+        hooks[event] = [*hooks.get(event, []), *entries]
+    out["hooks"] = hooks
+    perms = dict(existing.get("permissions") or {})
+    perms["allow"] = list(dict.fromkeys([*(perms.get("allow") or []), *ours["permissions"]["allow"]]))
+    out["permissions"] = perms
+    return out
+
+
+def write_local_settings(contest: Path, root: Path = HOUSE_ROOT) -> Path:
+    """Hooks live only in .claude/settings.local.json (never committed; listed in .git/info/exclude): the hook
+    path is this machine's, and teammates' Claude Code must not run our rules."""
+    path = contest / ".claude/settings.local.json"
+    try:
+        existing = json.loads(path.read_text()) if path.exists() else {}
+    except ValueError:
+        backup = _backup_name(path)
+        path.rename(backup)
+        existing = {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merge_settings(existing, claude_settings(root)), indent=2) + "\n")
+    r = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=contest, capture_output=True,
+                       text=True, check=False)
+    if r.returncode == 0:
+        exclude = (contest / r.stdout.strip()).resolve()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        lines = exclude.read_text().splitlines() if exclude.exists() else []
+        if ".claude/settings.local.json" not in lines:
+            exclude.write_text("\n".join([*lines, ".claude/settings.local.json"]) + "\n")
+    return path
+
+
+def _backup_name(path: Path) -> Path:
+    n, backup = 0, path.with_name(path.name + ".orig")
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"{path.name}.orig-{n}")
+    return backup
+
+
 @dataclass
 class AdaptResult:
     written: list[Path] = field(default_factory=list)
@@ -221,4 +289,5 @@ def adapt(contest: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Adapt
     owned = [*res.written, *res.removed, *vendor_removed, *res.backups,
              manifest.MANIFEST, ".house/tools.json", ".house/playbooks", ".house/protocols"]
     _commit_owned(contest, owned)
+    write_local_settings(contest, root)
     return AdaptResult([contest / rel for rel in res.written], warnings)

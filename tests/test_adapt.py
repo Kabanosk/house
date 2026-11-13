@@ -168,6 +168,59 @@ class ManifestAdaptTest(unittest.TestCase):
         self.assertIsNotNone(manifest.load(self.c))
 
 
+class ClaudeSettingsTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = make_root(Path(self._tmp.name))
+        self.c = scaffold.new_contest("c1", None, root=self.root, detect=lambda: FAKE_TOOLS)
+        self.path = self.c / ".claude/settings.local.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def load(self):
+        import json
+        return json.loads(self.path.read_text())
+
+    def test_fresh_contest_gets_hooks_and_allowlist(self):
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        s = self.load()
+        pre = s["hooks"]["PreToolUse"][0]
+        self.assertIn("Bash", pre["matcher"])
+        self.assertTrue(pre["hooks"][0]["command"].endswith("bin/house-hook pre-tool"))
+        self.assertIn(str(self.root.resolve()), pre["hooks"][0]["command"])
+        self.assertTrue(s["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("house-hook session-start"))
+        self.assertIn(f"Bash({self.root.resolve()}/bin/house:*)", s["permissions"]["allow"])
+
+    def test_user_settings_survive_without_duplicates(self):
+        import json
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({
+            "model": "opus",
+            "permissions": {"allow": ["Bash(make:*)"], "deny": ["Bash(rm -rf:*)"]},
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "my-lint"}]}]},
+        }))
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        s = self.load()
+        self.assertEqual(s["model"], "opus")
+        self.assertEqual(s["permissions"]["deny"], ["Bash(rm -rf:*)"])
+        self.assertIn("Bash(make:*)", s["permissions"]["allow"])
+        self.assertEqual(len(s["permissions"]["allow"]), len(set(s["permissions"]["allow"])))
+        commands = [h["command"] for e in s["hooks"]["PreToolUse"] for h in e["hooks"]]
+        self.assertIn("my-lint", commands)
+        self.assertEqual(sum("house-hook" in c for c in commands), 1)
+
+    def test_not_committed_and_excluded(self):
+        from tests.helpers import git
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        self.assertNotIn("settings.local.json", git(self.c, "ls-files"))
+        exclude = (self.c / ".git/info/exclude").read_text()
+        self.assertEqual(exclude.count(".claude/settings.local.json"), 1)
+        self.assertNotIn("settings.local.json", git(self.c, "status", "--porcelain"))
+
+
 class CodexTaskTest(unittest.TestCase):
     def test_dry_run_prints_command(self):
         with tempfile.TemporaryDirectory() as d:
