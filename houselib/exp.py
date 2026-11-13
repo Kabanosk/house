@@ -552,3 +552,88 @@ def run_new(contest: Path, parent: str, command: list[str] | str, budget: int | 
     _requirements(contest)
     eid, _ = new(contest, parent, idea=idea, note=note)
     return run(contest, eid, command, budget)
+
+
+def _stagnation_limit(spec: dict) -> int:
+    """Return `limits.stagnation_n` (default 3)."""
+    try:
+        return int(specmod.get(spec, "limits.stagnation_n") or 3)
+    except (TypeError, ValueError):
+        return 3
+
+
+def status(contest: Path, last: int = 10) -> str:
+    """Describe the experiment tree for an agent or the owner (`house exp status`).
+
+    Args:
+        contest: Contest checkout root.
+        last: How many of the latest rows to list.
+
+    Returns:
+        Lines: `best: E-### <score> (<commit7>)` or `best: none`; counts per status; `stagnation: s/N` with
+        ` → protocols/stagnation.md` once s reaches `limits.stagnation_n`; a note when the scorer changed (older
+        rows are not compared) or the direction is unknown; then the latest rows as
+        `E-### ← <parent> <status> <score> <duration>s <idea> <note>`.
+    """
+    rows = load(contest)
+    if not rows:
+        return "experiments: none yet; start with `house exp new <contest> --from best`\n"
+    spec = _spec(contest)
+    sense, current = direction(spec), scorer_hash(contest)
+    b = best(rows, current, sense) if sense else None
+    lines = [f"best: {b['id']} {b['score']} ({b['commit'][:7]})" if b else "best: none"]
+    counts = {k: sum(r["status"] == k for r in rows) for k in ("keep", "revert", "crash", "timeout", "new")}
+    lines.append(f"experiments: {len(rows)} (" + ", ".join(f"{k} {n}" for k, n in counts.items()) + ")")
+    if sense is None:
+        lines.append("direction unknown: set scoring.direction (max or min) in .house/spec.yaml")
+    else:
+        s, n = stagnation(rows, current, sense), _stagnation_limit(spec)
+        lines.append(f"stagnation: {s}/{n}" + (" → protocols/stagnation.md" if s >= n else ""))
+    older = [r for r in rows if r["status"] in SCORED and r["scorer"] != current]
+    if older:
+        lines.append(f"scorer changed: {len(older)} earlier scored row(s), up to {older[-1]['id']}, are not compared")
+    for r in rows[-last:]:
+        parent = r["parent"] if r["parent"].startswith("E-") else r["parent"][:7]
+        extra = " ".join(x for x in (r["idea_id"], r["note"][:60]) if x)
+        lines.append(f"{r['id']} ← {parent} {r['status']} {r['score'] or '-'} {r['duration'] or '-'}s {extra}".rstrip())
+    return "\n".join(lines) + "\n"
+
+
+def summary_line(contest: Path) -> str | None:
+    """One line for the session-start hook: best experiment and stagnation; None without experiments."""
+    rows = load(contest)
+    if not rows:
+        return None
+    spec = _spec(contest)
+    sense, current = direction(spec), scorer_hash(contest)
+    if sense is None:
+        return f"experiments: {len(rows)}; direction unknown (set scoring.direction)"
+    b = best(rows, current, sense)
+    s, n = stagnation(rows, current, sense), _stagnation_limit(spec)
+    head = f"experiments: best {b['id']} = {b['score']}" if b else f"experiments: {len(rows)}, no comparable keep yet"
+    return f"{head} · stagnation {s}/{n}" + (" → protocols/stagnation.md" if s >= n else "")
+
+
+def prune(contest: Path, keep: int = 3) -> list[str]:
+    """Remove worktrees of `keep` experiments outside the top `keep` (by score, current scorer first).
+
+    Refs (`refs/exp/E-###`) and csv rows stay, so any experiment can be recreated with `git worktree add`.
+
+    Args:
+        contest: Contest checkout root.
+        keep: How many of the best keep worktrees to leave.
+
+    Returns:
+        Ids whose worktrees were removed.
+    """
+    rows = load(contest)
+    sense, current = direction(_spec(contest)) or "max", scorer_hash(contest)
+    alive = [r for r in rows if r["status"] == "keep" and _worktree(contest, r["id"]).is_dir()]
+    comparable = [r for r in alive if r["scorer"] == current and _score(r) is not None]
+    ranked = sorted(comparable, key=_score, reverse=(sense == "max"))
+    ranked += [r for r in alive if r not in comparable]
+    removed = []
+    for r in ranked[max(keep, 0):]:
+        _remove_worktree(contest, _worktree(contest, r["id"]))
+        removed.append(r["id"])
+    return removed

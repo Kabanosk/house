@@ -1,12 +1,15 @@
 """`house exp`: budgeted experiments scored by the local scorer, kept or reverted, recorded as a tree."""
+import io
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
-from houselib import exp, gitutil, scaffold
+from houselib import cli, exp, gitutil, hook, scaffold
 from tests.helpers import FAKE_TOOLS, git, make_root
 
 SPEC = ("kind: optimize\nscoring:\n  metric: F1\n  direction: max\n  local_scorer: python3 score.py\n"
@@ -89,7 +92,7 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(lines.count(".house/experiments/"), 1)
 
 
-class RunTest(unittest.TestCase):
+class ContestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         root = make_root(Path(self._tmp.name))
@@ -105,6 +108,8 @@ class RunTest(unittest.TestCase):
     def rows(self):
         return {r["id"]: r for r in exp.load(self.c)}
 
+
+class RunTest(ContestCase):
     def test_first_run_from_head_is_keep_and_pinned(self):
         res = exp.run_new(self.c, "best", "echo 0.5 > out.txt")
         self.assertEqual((res.id, res.status, res.score, res.parent_score), ("E-001", "keep", 0.5, None))
@@ -238,6 +243,97 @@ class RunTest(unittest.TestCase):
         exp.run_new(self.c, "best", "cat data/x.txt > out.txt")
         exp.run_new(self.c, "best", "echo 0.1 > out.txt")  # revert → worktree removed
         self.assertEqual((self.c / "data/x.txt").read_text(), "0.4\n")
+
+
+class StatusTest(ContestCase):
+    def test_status_and_stagnation_arrow(self):
+        self.assertIn("none yet", exp.status(self.c))
+        self.assertIsNone(exp.summary_line(self.c))
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt", idea="I-001")
+        exp.run_new(self.c, "best", "exit 1")
+        for v in ("0.4", "0.3"):
+            exp.run_new(self.c, "best", f"echo {v} > out.txt")
+        text = exp.status(self.c)
+        self.assertIn("best: E-001 0.5", text)
+        self.assertIn("keep 1, revert 2, crash 1", text)
+        self.assertIn("stagnation: 2/3", text)
+        self.assertNotIn("protocols/stagnation.md", text)
+        self.assertIn("E-002 ← E-001 crash", text)
+        exp.run_new(self.c, "best", "echo 0.2 > out.txt")
+        self.assertIn("stagnation: 3/3 → protocols/stagnation.md", exp.status(self.c))
+        line = exp.summary_line(self.c)
+        self.assertIn("best E-001 = 0.5", line)
+        self.assertIn("stagnation 3/3 → protocols/stagnation.md", line)
+
+    def test_status_reports_scorer_change(self):
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt")
+        (self.c / "score.py").write_text("print('score: 1')\n")
+        git(self.c, "commit", "-qam", "scorer fix")
+        text = exp.status(self.c)
+        self.assertIn("best: none", text)
+        self.assertIn("scorer changed", text)
+
+    def test_prune_keeps_top_worktrees(self):
+        for v in ("0.1", "0.2", "0.3", "0.4"):
+            exp.run_new(self.c, "best", f"echo {v} > out.txt")  # each beats the best → four keeps
+        removed = exp.prune(self.c, keep=2)
+        self.assertEqual(sorted(removed), ["E-001", "E-002"])
+        self.assertTrue((self.c / ".worktrees/exp-E-004").is_dir())
+        self.assertTrue((self.c / ".worktrees/exp-E-003").is_dir())
+        self.assertFalse((self.c / ".worktrees/exp-E-001").exists())
+        git(self.c, "rev-parse", "--verify", "refs/exp/E-001")
+        self.assertEqual(exp.prune(self.c, keep=2), [])
+
+    def test_hook_summary_has_experiments_line(self):
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt")
+        self.assertIn("experiments: best E-001 = 0.5", hook.session_start({"cwd": str(self.c)}))
+
+
+class CliTest(ContestCase):
+    def setUp(self):
+        super().setUp()
+        self.patch = mock.patch.object(cli, "HOUSE_ROOT", self.c.parent.parent)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        super().tearDown()
+
+    def run_cli(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                code = cli.main(list(args))
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_round_trip(self):
+        code, out, err = self.run_cli("exp", "run", "c1", "--from", "HEAD", "--budget", "20s", "--",
+                                      "python3", "-c", "open('out.txt', 'w').write('0.5')")
+        self.assertEqual(code, 0, err)
+        self.assertIn("E-001 keep 0.5", out)
+        code, out, _ = self.run_cli("exp", "run", "c1", "--from", "best", "--", "echo 0.1 > out.txt")
+        self.assertEqual(code, 1)
+        self.assertIn("E-002 revert 0.1", out)
+        code, out, _ = self.run_cli("exp", "new", "c1", "--from", "best", "--idea", "I-003", "--note", "try x")
+        self.assertEqual(code, 0)
+        eid, path = out.split()
+        self.assertEqual((eid, Path(path)), ("E-003", self.c / ".worktrees/exp-E-003"))
+        code, out, _ = self.run_cli("exp", "run", "c1", "E-003", "--", "echo 0.9 > out.txt")
+        self.assertEqual(code, 0)
+        code, out, _ = self.run_cli("exp", "status", "c1")
+        self.assertIn("best: E-003 0.9", out)
+        code, out, _ = self.run_cli("exp", "prune", "c1", "--keep", "1")
+        self.assertIn("E-001", out)
+
+    def test_usage_errors(self):
+        self.assertEqual(self.run_cli("exp", "run", "c1", "--", "true")[0], 2)
+        self.assertEqual(self.run_cli("exp", "run", "c1", "E-001", "--from", "best", "--", "true")[0], 2)
+        self.assertEqual(self.run_cli("exp", "run", "c1", "--from", "best")[0], 2)
+        code, _, err = self.run_cli("exp", "run", "c1", "--from", "best", "--budget", "soon", "--", "true")
+        self.assertEqual(code, 2)
+        self.assertIn("budget", err)
 
 
 if __name__ == "__main__":

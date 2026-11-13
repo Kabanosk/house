@@ -1,7 +1,7 @@
 """`house` command line.
 
 Used by: the owner and every agent role through `bin/house <command>`. Commands: doctor, check, merge, guard,
-notify, ask, inbox, deadlines, night, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
+notify, ask, inbox, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
 name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
 
 Rules an agent should know:
@@ -22,6 +22,7 @@ from . import (
     checks,
     context,
     doctor,
+    exp,
     export,
     guard,
     inbox,
@@ -201,6 +202,54 @@ def cmd_review(args) -> int:
     print(f"BLOCKER {f.blockers} · MAJOR {f.majors} · MINOR {f.minors} · NIT {f.nits} · verdict: {f.verdict}")
     print(f"report: {res.report}")
     return 0
+
+
+def cmd_exp(args) -> int:
+    """Implement `house exp new|run|status|prune <name> ...` (experiment loop for optimize contests).
+
+    `new [--from REF] [--idea I] [--note T]` prints `E-### <worktree>`. `run [ID | --from REF] [--budget B]
+    [--idea I] [--note T] -- CMD...` runs a created experiment (ID) or creates and runs one (`--from`); it prints
+    `E-### <status> <score>`, then the parent score, the note and the log path. `status [-n N]` prints the
+    tree summary. `prune [--keep N]` removes worktrees of keeps outside the top N and prints their ids.
+
+    Args:
+        args: Parsed arguments: `action`, `name`, `id`, `from_`, `idea`, `note`, `budget`, `n`, `keep`, and
+            `exp_command` (everything after `--`, split off in `main`).
+
+    Returns:
+        `run`: 0 keep, 1 revert/crash/timeout. Others: 0. Any action: 2 on bad arguments (missing or doubled
+        ID/--from, no command after `--`, invalid budget).
+    """
+    target = contest_dir(args.name)
+    if args.action == "new":
+        eid, wt = exp.new(target, args.from_ or "best", idea=args.idea or "", note=args.note or "")
+        print(f"{eid} {wt}")
+        return 0
+    if args.action == "status":
+        print(exp.status(target, last=args.n), end="")
+        return 0
+    if args.action == "prune":
+        removed = exp.prune(target, keep=args.keep)
+        print("removed: " + (", ".join(removed) if removed else "nothing"))
+        return 0
+    command = getattr(args, "exp_command", None) or []
+    if bool(args.id) == bool(args.from_) or not command:
+        print("error: give an experiment id or --from REF, and the command after `--`", file=sys.stderr)
+        return 2
+    try:
+        budget = exp.parse_budget(args.budget) if args.budget else None
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if args.id:
+        res = exp.run(target, args.id, command, budget)
+    else:
+        res = exp.run_new(target, args.from_, command, budget, idea=args.idea or "", note=args.note or "")
+    print(f"{res.id} {res.status} {'-' if res.score is None else res.score}")
+    print(f"parent score: {'-' if res.parent_score is None else res.parent_score}"
+          + (f" · {res.note}" if res.note else ""))
+    print(f"log: {res.log}")
+    return 0 if res.status == "keep" else 1
 
 
 def cmd_guard(args) -> int:
@@ -573,6 +622,18 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--since", metavar="REF", help="milestone review of main since REF (`last` = previous review)")
     rv.set_defaults(func=cmd_review)
 
+    ex = sub.add_parser("exp", help="optimize: budgeted experiments, scored and kept/reverted (`exp run ... -- CMD`)")
+    ex.add_argument("action", choices=["new", "run", "status", "prune"])
+    ex.add_argument("name")
+    ex.add_argument("id", nargs="?", help="run: experiment id from `exp new` (E-###)")
+    ex.add_argument("--from", dest="from_", metavar="REF", help="parent: best (default for new), E-### or a commit")
+    ex.add_argument("--budget", help="run: time limit of the command, e.g. 90s, 5m, 1h (default: spec exp.budget)")
+    ex.add_argument("--idea", help="idea id from ideas.md")
+    ex.add_argument("--note", help="one-line description of the change")
+    ex.add_argument("-n", type=int, default=10, help="status: how many latest rows to list")
+    ex.add_argument("--keep", type=int, default=3, help="prune: how many best keep worktrees to leave")
+    ex.set_defaults(func=cmd_exp)
+
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")
     n.add_argument("--repo", help="clone this git URL instead of git init")
@@ -616,7 +677,13 @@ def main(argv: list[str]) -> int:
         The exit code of the command. ValueError, RuntimeError and OSError from a command are printed as
         `error: ...` on stderr and give 1; invalid arguments exit with 2 via argparse.
     """
+    command = None
+    if argv[:1] == ["exp"] and "--" in argv:  # everything after `--` is the experiment's command, verbatim
+        cut = argv.index("--")
+        argv, command = argv[:cut], argv[cut + 1:]
     args = build_parser().parse_args(argv)
+    if command is not None:
+        args.exp_command = command
     try:
         return args.func(args)
     except (ValueError, RuntimeError, OSError) as e:
