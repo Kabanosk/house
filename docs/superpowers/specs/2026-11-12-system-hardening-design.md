@@ -221,11 +221,21 @@ nie ma `AskUserQuestion`; nocny przebieg nie ma jak zawołać człowieka.
     `spec.yaml` → `notify: {signal_group: "<nazwa grupy>"}` (wypełniane na `/house-start`; `house` rozwiązuje
     nazwę na ID grupy przez `signal-cli listGroups`, niejednoznaczna lub nieznana nazwa → ostrzeżenie i tylko
     „Notatka do siebie”).
-  - Wiadomości w grupie idą z numeru Wojtka (urządzenie połączone, bez osobnego numeru), z prefiksem
-    `🤖 [house <konkurs>]`, żeby było jasne, że pisze system.
+  - **Skrót konkursu** (Wojtek, 2026-11-13; jedna grupa może obsługiwać kilka konkursów):
+    `spec.yaml` → `notify.alias` (np. `fr`, `fi`, `collab`; małe litery/cyfry, unikalny wśród konkursów
+    w `contests.yaml`, sprawdza `house doctor`). Wiadomości w grupie idą z numeru Wojtka (urządzenie połączone,
+    bez osobnego numeru) z prefiksem `🤖 [fr]`, żeby było jasne, że pisze system i którego konkursu dotyczy.
+  - **Jak odpowiadać, od najwygodniejszego:**
+    1. **Odpowiedź z cytatem** (przeciągnięcie wiadomości w prawo w Signalu) i sama treść, np. `B`. `house`
+       zapamiętuje timestamp każdej wysłanej wiadomości → (konkurs, Q-###) w `~/.local/share/house/sent.jsonl`;
+       odpowiedź ma `quote.id` = ten timestamp, więc nic nie trzeba wpisywać.
+    2. Bez cytatu: `Q-007: B` (albo `Q7 B`), jeśli tylko jeden konkurs w tej grupie ma otwarte Q-007.
+    3. Inaczej ze skrótem: `fr Q-007: B` (albo `fr 7 B`). Niejednoznaczna odpowiedź → `house` dopytuje w grupie.
+  - Kto odpowiedział, `house` wyciąga z samej wiadomości (`envelope.sourceName`, inaczej numer); nikt nie wpisuje
+    swojego imienia.
   - **Odpowiadać może każdy**: Wojtek z „Notatki do siebie” albo z grupy, koledzy z grupy. **Liczy się pierwsza
     odpowiedź** (najwcześniejszy timestamp Signala); kto odpowiedział, trafia do `QUESTIONS.md` i D-###
-    (`Kto: człowiek (<imię lub numer>)`). Po zapisaniu `house` potwierdza w grupie: `✓ Q-007: B (<kto>)`.
+    (`Kto: człowiek (<imię lub numer>)`). Po zapisaniu `house` potwierdza w grupie: `✓ [fr] Q-007: B (<kto>)`.
     Późniejsze odpowiedzi na rozstrzygnięte pytanie: krótka informacja, kto i jak już rozstrzygnął.
   - Prywatność: połączone urządzenie odbiera wszystkie wiadomości konta; `house inbox` zapisuje tylko
     „Notatkę do siebie” i grupy z `notify.signal_group` konkursów, resztę odrzuca bez zapisu.
