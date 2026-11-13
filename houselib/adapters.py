@@ -158,17 +158,22 @@ def remove_legacy_vendor_copies(contest: Path, root: Path) -> tuple[list[str], l
     return removed, kept
 
 
+def _has_marker(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink() and MARKER in path.read_text(errors="replace")
+
+
 def _legacy_owned(contest: Path, root: Path) -> Callable[[str], bool]:
-    """Ownership for contests adapted before the manifest existed: our marker in AGENTS.md/CLAUDE.md, our
-    profile and skill names under .claude/."""
+    """Ownership for contests without a manifest. Only if an older adapt demonstrably ran here (our marker in
+    AGENTS.md or CLAUDE.md) are our profile and skill names under .claude/ ours; otherwise everything is foreign
+    (a freshly adopted team repo may have its own `researcher.md`)."""
+    adapted_before = _has_marker(contest / "AGENTS.md") or _has_marker(contest / "CLAUDE.md")
     agents = {f".claude/agents/{pid}.md" for pid in load_profiles(root)}
     skills = {f".claude/skills/{d.name}/SKILL.md" for d in (root / "adapters/claude-code/skills").iterdir()}
 
     def owned(rel: str) -> bool:
         if rel in ("AGENTS.md", "CLAUDE.md"):
-            path = contest / rel
-            return path.is_file() and MARKER in path.read_text(errors="replace")
-        return rel in agents or rel in skills
+            return _has_marker(contest / rel)
+        return adapted_before and (rel in agents or rel in skills)
     return owned
 
 
@@ -201,15 +206,17 @@ def adapt(contest: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Adapt
     install_core(contest, root)  # refresh playbooks/protocols from core; never touches other .house files
     doctor.write(contest, detect())
     generated = {**codex(contest, root), **claude_code(contest, root)}
+    corrupt = manifest.is_corrupt(contest)
     old = manifest.load(contest)
     vendor_removed, vendor_kept = remove_legacy_vendor_copies(contest, root)
     res = manifest.apply(contest, generated, old, _legacy_owned(contest, root))
     manifest.save(contest, {rel: manifest.sha256_text(text) for rel, text in generated.items()})
-    warnings = [f"kept your edit of {rel} as {rel}.orig" for rel in res.backed_up]
+    warnings = [f"{manifest.MANIFEST} was unreadable (merge conflict?); rebuilt it"] if corrupt else []
+    warnings += [f"kept the previous {rel} as {b}" for rel, b in zip(res.backed_up, res.backups, strict=True)]
     warnings += [f"{rel} is no longer generated but was edited by hand; left in place" for rel in res.kept_modified]
     warnings += [f"{rel} differs from vendor/skills (local edit?); left in place, agents read the vendor copy"
                  for rel in vendor_kept]
-    owned = [*res.written, *res.removed, *vendor_removed, *(f"{rel}.orig" for rel in res.backed_up),
+    owned = [*res.written, *res.removed, *vendor_removed, *res.backups,
              manifest.MANIFEST, ".house/tools.json", ".house/playbooks", ".house/protocols"]
     _commit_owned(contest, owned)
     return AdaptResult([contest / rel for rel in res.written], warnings)

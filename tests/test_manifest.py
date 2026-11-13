@@ -107,6 +107,34 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(self.read(".claude/agents/teammate.md"), "mine")
         self.assertNotIn(".claude/agents/teammate.md", res.written + res.backed_up + res.removed + res.kept_modified)
 
+    def test_second_hand_edit_gets_its_own_backup(self):
+        rel = ".claude/agents/ideator.md"
+        self.put(rel, "edit1")
+        manifest.apply(self.c, {rel: "gen2"}, {rel: manifest.sha256_text("gen1")}, NONE_OURS)
+        self.put(rel, "edit2")
+        res = manifest.apply(self.c, {rel: "gen3"}, {rel: manifest.sha256_text("gen2")}, NONE_OURS)
+        self.assertEqual(self.read(rel + ".orig"), "edit1")
+        backups = [p.read_text() for p in (self.c / ".claude/agents").glob("ideator.md.orig*")]
+        self.assertIn("edit2", backups)
+        self.assertEqual(len(res.backups), 1)
+        self.assertEqual(self.read(res.backups[0]), "edit2")
+
+    def test_symlink_is_foreign_and_target_untouched(self):
+        self.put("AGENTS.md", "team rules")
+        (self.c / "CLAUDE.md").symlink_to("AGENTS.md")
+        res = manifest.apply(self.c, {"AGENTS.md": "ours A", "CLAUDE.md": "ours C"}, None, ALL_OURS)
+        self.assertEqual(self.read("AGENTS.md"), "ours A")
+        self.assertEqual(self.read("CLAUDE.md"), "ours C")
+        self.assertFalse((self.c / "CLAUDE.md").is_symlink())
+        self.assertTrue((self.c / "CLAUDE.md.orig").is_symlink())
+        self.assertIn("CLAUDE.md", res.backed_up)
+
+    def test_corrupt_manifest_loads_as_none(self):
+        (self.c / manifest.MANIFEST).write_text("<<<<<<< HEAD\n{}\n")
+        self.assertIsNone(manifest.load(self.c))
+        self.assertTrue(manifest.is_corrupt(self.c))
+        self.assertEqual(manifest.drift(self.c), [])
+
     def test_drift(self):
         self.assertEqual(manifest.drift(self.c), [])
         self.put("a.md", "changed")

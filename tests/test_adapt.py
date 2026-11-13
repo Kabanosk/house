@@ -152,6 +152,21 @@ class ManifestAdaptTest(unittest.TestCase):
         self.adapt()
         self.assertEqual(list(self.c.rglob("*.orig")), [])
 
+    def test_teammate_agent_with_profile_name_kept_in_fresh_adopted_repo(self):
+        mine = self.c / ".claude/agents/researcher.md"
+        mine.parent.mkdir(parents=True)
+        mine.write_text("team researcher\n")
+        res = self.adapt()
+        self.assertEqual((self.c / ".claude/agents/researcher.md.orig").read_text(), "team researcher\n")
+        self.assertTrue(any("researcher.md" in w for w in res.warnings), res.warnings)
+
+    def test_corrupt_manifest_does_not_crash(self):
+        self.adapt()
+        (self.c / manifest.MANIFEST).write_text("<<<<<<< HEAD\n")
+        res = self.adapt()
+        self.assertTrue(any("generated.json" in w for w in res.warnings), res.warnings)
+        self.assertIsNotNone(manifest.load(self.c))
+
 
 class CodexTaskTest(unittest.TestCase):
     def test_dry_run_prints_command(self):
