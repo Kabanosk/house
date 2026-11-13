@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import checks
+from . import checks, guard
 from .fm import parse_frontmatter, set_fields
 
 FINISHED = ("merged", "done")
@@ -44,39 +44,6 @@ def _porcelain_paths(cwd: Path, *extra: str) -> list[str]:
 
 def _dirty_outside_house(contest: Path) -> list[str]:
     return [p for p in _porcelain_paths(contest, "--untracked-files=no") if not p.startswith(".house/")]
-
-
-def _at_head(contest: Path, rel: str) -> str | None:
-    r = _git(contest, "show", f"HEAD:{rel}")
-    return r.stdout if r.returncode == 0 else None
-
-
-def _tampering(contest: Path) -> list[str]:
-    """Changes only `house` may make, found uncommitted (house commits them the moment it makes them)."""
-    house = contest / ".house"
-    found = []
-    for path in sorted((house / "checks").glob("*.json")):
-        rel = str(path.relative_to(contest))
-        head = _at_head(contest, rel)
-        try:
-            now = json.loads(path.read_text())["frozen"]
-            before = json.loads(head)["frozen"] if head else None
-        except (ValueError, KeyError, TypeError):
-            found.append(f"{rel} is unreadable")
-            continue
-        if before != now:
-            found.append(f"frozen criteria in {rel} changed outside `house check --freeze/--refreeze`")
-    for path in sorted((house / "tasks").glob("T*-*.md")):
-        rel = str(path.relative_to(contest))
-        try:
-            now = parse_frontmatter(path.read_text())[0].get("status")
-            head = _at_head(contest, rel)
-            before = parse_frontmatter(head)[0].get("status") if head else None
-        except ValueError:
-            continue
-        if now in FINISHED and before != now:
-            found.append(f"{path.name.split('-', 1)[0]} set to `{now}` by hand (only house merge sets it)")
-    return found
 
 
 def _failures(rep: checks.CheckReport) -> str:
@@ -140,7 +107,7 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None) -> Mer
     dirty = _dirty_outside_house(contest)
     if dirty:
         return MergeOutcome(False, status, "refused: uncommitted changes in the contest checkout: " + ", ".join(dirty))
-    tampered = _tampering(contest)
+    tampered = guard.frozen_tampering(contest)
     if tampered:
         return MergeOutcome(False, status, "refused: " + "; ".join(tampered))
     branch = task.meta.get("branch")
@@ -151,6 +118,9 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None) -> Mer
         return MergeOutcome(False, status, f"no worktree for {task_id} at {wt} (pass --worktree)")
     if _porcelain_paths(wt):
         return MergeOutcome(False, status, f"refused: uncommitted changes in the worktree {wt}; commit them first")
+    violations = guard.diff_violations(contest, task_id, wt)
+    if violations:
+        return MergeOutcome(False, status, "refused by guard: " + "; ".join(violations))
     _commit_house(contest, f"chore(house): state before {task_id}")
 
     main_branch = _git(contest, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()

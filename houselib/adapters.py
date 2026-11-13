@@ -23,7 +23,9 @@ CODEX_DRIVER = """You are a thin driver around Codex CLI (separate usage pool). 
    Use `--read-only` only for pure analysis that must write nothing. Tasks for Codex must fit in 10 minutes;
    if one times out, say so and suggest splitting it.
 3. Exit code 3 = codex not installed; 2 = bad arguments. Report it; the coordinator falls back to another agent.
-4. Afterwards, in the workdir: review `git status`, then commit Codex's changes on the task branch yourself
+4. Afterwards, in the workdir: review `git status` and run `$HOUSE_ROOT/bin/house guard diff <contest> T###
+   --worktree <workdir>`; for every VIOLATION restore the file (`git -C <workdir> checkout -- <file>`, or delete
+   a new secret file) and report it. Then commit Codex's changes on the task branch yourself
    (`git -C <workdir> add -A`, then `git -C <workdir> commit -m "<task id>: <title>"`); Codex does not commit.
 5. Run `$HOUSE_ROOT/bin/house check <contest> T### --worktree <workdir>` (contest name = the AGENTS.md title)
    and read the output. Make sure the expected outputs exist (report in `$HOUSE_DIR/reports/`, rows in
@@ -198,6 +200,86 @@ def _commit_owned(contest: Path, paths: list[str]) -> None:
         git(contest, "commit", "-q", "-m", "chore(house): adapt", "--", *todo)
 
 
+ALLOW_COMMANDS = ["git status:*", "git diff:*", "git log:*", "git show:*", "git add:*", "git commit:*",
+                  "git worktree:*", "git -C:*", "git branch:*", "python3 -m unittest:*", "pytest:*", "uv run:*",
+                  "npm test:*", "npm run:*", "npx tsc:*", "ruff check:*"]
+
+
+def claude_settings(root: Path = HOUSE_ROOT) -> dict:
+    """House's part of .claude/settings.local.json: guard hooks + an allowlist for headless sessions."""
+    hook = f"{root.resolve()}/bin/house-hook"
+    return {
+        "hooks": {
+            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+                            "hooks": [{"type": "command", "command": f"{hook} pre-tool"}]}],
+            "SessionStart": [{"hooks": [{"type": "command", "command": f"{hook} session-start"}]}],
+        },
+        "permissions": {"allow": [f"Bash({root.resolve()}/bin/house:*)", f"Bash({root.resolve()}/bin/codex-task:*)",
+                                  *(f"Bash({c})" for c in ALLOW_COMMANDS)]},
+    }
+
+
+def _is_house_hook(hook) -> bool:
+    return isinstance(hook, dict) and "house-hook" in str(hook.get("command", ""))
+
+
+def merge_settings(existing: dict, ours: dict) -> dict:
+    """Keep every user key, permission and hook; replace house's own hook commands; no duplicate allow rules."""
+    out = dict(existing)
+    hooks: dict = {}
+    for event, entries in (existing.get("hooks") or {}).items():
+        if not isinstance(entries, list):
+            continue
+        kept = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            mine = [h for h in e.get("hooks", []) if not _is_house_hook(h)]
+            if mine:
+                kept.append({**e, "hooks": mine})
+        hooks[event] = kept
+    for event, entries in ours["hooks"].items():
+        hooks[event] = [*hooks.get(event, []), *entries]
+    out["hooks"] = hooks
+    perms = existing.get("permissions")
+    perms = dict(perms) if isinstance(perms, dict) else {}
+    allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+    perms["allow"] = list(dict.fromkeys([*allow, *ours["permissions"]["allow"]]))
+    out["permissions"] = perms
+    return out
+
+
+def write_local_settings(contest: Path, root: Path = HOUSE_ROOT) -> Path:
+    """Hooks live only in .claude/settings.local.json (never committed; listed in .git/info/exclude): the hook
+    path is this machine's, and teammates' Claude Code must not run our rules."""
+    path = contest / ".claude/settings.local.json"
+    try:
+        existing = json.loads(path.read_text()) if path.exists() else {}
+    except ValueError:
+        backup = _backup_name(path)
+        path.rename(backup)
+        existing = {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merge_settings(existing, claude_settings(root)), indent=2) + "\n")
+    r = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=contest, capture_output=True,
+                       text=True, check=False)
+    if r.returncode == 0:
+        exclude = (contest / r.stdout.strip()).resolve()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        lines = exclude.read_text().splitlines() if exclude.exists() else []
+        if ".claude/settings.local.json" not in lines:
+            exclude.write_text("\n".join([*lines, ".claude/settings.local.json"]) + "\n")
+    return path
+
+
+def _backup_name(path: Path) -> Path:
+    n, backup = 0, path.with_name(path.name + ".orig")
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"{path.name}.orig-{n}")
+    return backup
+
+
 @dataclass
 class AdaptResult:
     written: list[Path] = field(default_factory=list)
@@ -221,4 +303,5 @@ def adapt(contest: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Adapt
     owned = [*res.written, *res.removed, *vendor_removed, *res.backups,
              manifest.MANIFEST, ".house/tools.json", ".house/playbooks", ".house/protocols"]
     _commit_owned(contest, owned)
+    write_local_settings(contest, root)
     return AdaptResult([contest / rel for rel in res.written], warnings)

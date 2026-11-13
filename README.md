@@ -100,10 +100,24 @@ poluzuje; zmiana tylko z powodem (`--refreeze --reason`, wpis D-###).
 | `house check <konkurs> T### --freeze` / `--refreeze --reason …` | zamraża / zmienia kryteria |
 | `house check <konkurs> T### --manual AC-n --evidence …` | judge zapisuje kryterium ręczne |
 | `house merge <konkurs> T###` | sprawdza gałąź → scala → sprawdza wszystkie scalone zadania → przy regresji cofa |
+| `house guard diff <konkurs> T### [--worktree P]` | czy gałąź zadania zmieniła chronione pliki, `.house/` albo dodała sekrety |
 
 Statusy: `todo` → `doing` → `review` (tu kończy koder) → `merged` (bramka przeszła) → `done` (także kryteria
 ręczne); `blocked`, gdy utknęło albo scalenie zostało cofnięte. `house merge` odmawia, gdy w katalogu konkursu są
 niezapisane zmiany w kodzie.
+
+### Ochrona (hooki)
+
+`house adapt` dopisuje do `.claude/settings.local.json` (nie trafia do gita, wpis w `.git/info/exclude`, więc
+drużyny nie dotyczy) hooki `bin/house-hook` i listę dozwolonych komend. Przed każdą edycją i komendą hook blokuje:
+zmianę chronionych plików (testy akceptacyjne z `protected`, lokalna sprawdzarka z `spec.scoring.local_scorer`),
+pisanie do `.house/checks/`, commit plików `.env*` i plików z kluczami, push na remote spoza
+`spec.guard.push_allow` (domyślnie `origin`) i force push na główną gałąź. Na start sesji podaje stan konkursu
+(pytania, zadania gotowe do pracy, czerwone sprawdzenia). Codex nie ma hooków, więc te same reguły sprawdza po fakcie
+`house guard diff` (sterownik Codexa i `house merge`). Awaryjnie: `HOUSE_GUARD=off claude` (zapis w PROGRESS.md).
+Hook to pierwsza linia obrony (łapie typowe komendy: przekierowania, `sed -i`, `rm`, `git -C`, wiele linii),
+ale nie każdą sztuczkę (np. `python3 -c "open(...,'w')"`); twardą granicą jest `house merge`, który sprawdza
+diff gałęzi niezależnie od tego, jak plik został zmieniony.
 
 ## Aktualizacja systemu
 
