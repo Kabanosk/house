@@ -11,6 +11,7 @@ from . import (
     doctor,
     export,
     manifest,
+    merge,
     registry,
     scaffold,
     setup,
@@ -100,6 +101,13 @@ def cmd_check(args) -> int:
     _print_report(rep)
     print("GREEN" if rep.green else "RED")
     return 0 if rep.green else 1
+
+
+def cmd_merge(args) -> int:
+    target = contest_dir(args.name)
+    out = merge.merge_task(target, args.task, Path(args.worktree).resolve() if args.worktree else None)
+    print(out.message)
+    return 0 if out.ok else 1
 
 
 def cmd_new(args) -> int:
@@ -221,6 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--reason")
     ck.add_argument("--evidence")
     ck.set_defaults(func=cmd_check)
+
+    mg = sub.add_parser("merge", help="gate: check a task branch, merge it, re-check main, revert on regression")
+    mg.add_argument("name")
+    mg.add_argument("task", help="task id, e.g. T001")
+    mg.add_argument("--worktree", help="the task's worktree (default: .worktrees/<branch without task/>)")
+    mg.set_defaults(func=cmd_merge)
 
     n = sub.add_parser("new", help="scaffold a contest repo in contests/<name>")
     n.add_argument("name")

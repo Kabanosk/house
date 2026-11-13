@@ -5,6 +5,7 @@ criteria, so a worker cannot loosen them by editing the task file. Only `house` 
 """
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass
@@ -177,9 +178,14 @@ def _commit(workdir: Path) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _env() -> dict[str, str]:
+    # no .pyc: a file rewritten within the same second with the same size would otherwise run stale bytecode
+    return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
+
 def _run_one(c: Criterion, workdir: Path, commit: str | None) -> Result:
     try:
-        r = subprocess.run(c.run, shell=True, cwd=workdir, capture_output=True, text=True,
+        r = subprocess.run(c.run, shell=True, cwd=workdir, capture_output=True, text=True, env=_env(),
                            timeout=c.timeout, check=False)
     except subprocess.TimeoutExpired:
         return Result(c.id, False, None, f"timeout after {c.timeout} s", _now(), commit)
