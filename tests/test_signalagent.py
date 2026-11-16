@@ -248,6 +248,12 @@ class JobStoreTest(JobStoreCase):
 
 
 class LaunchTest(JobStoreCase):
+    def test_local_runtime_without_claude_fails_the_job(self):
+        from unittest import mock
+        with mock.patch("shutil.which", return_value=None):
+            self.assertIsNone(agent.launch(self.job, run=lambda *a, **k: None))
+        self.assertEqual(self.store.get(self.job.id).status, "failed")
+
     def setUp(self):
         super().setUp()
         from houselib import signalstore
@@ -998,3 +1004,47 @@ class SandboxPlaceholderTest(TickTest):
         self.tick()
         files = git(self.repo, "show", "--name-only", "--format=", f"signal/{job.id}").split()
         self.assertEqual(sorted(files), ["nowy.py", "pnpm-lock.yaml"])
+
+
+class DockerRuntimeTest(TickTest):
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        from houselib import agentdocker
+        agentdocker.save_token("sk-ant-oat01-TOKEN")
+        self.dpatches = [mock.patch("houselib.agentdocker.runtime", return_value="docker"),
+                         mock.patch("houselib.agentdocker.ensure_networks"),
+                         mock.patch("houselib.agentdocker.ensure_proxy")]
+        for p in self.dpatches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.dpatches):
+            p.stop()
+        super().tearDown()
+
+    def test_without_sandbox_job_runs_without_bash(self):
+        self.skipTest("the container runtime does not depend on nested user namespaces")
+
+    def test_job_runs_in_container_with_bash(self):
+        import json
+        self.add(fx.self_note(1000, "@claude uruchom testy"))
+        self.tick()
+        (job,) = self.store.all()
+        self.assertEqual((job.runtime, job.no_bash), ("docker", False))
+        cmd = self.sd.launches()[0]
+        tail = cmd[cmd.index("--") + 1:]
+        self.assertEqual(tail[:3], ["docker", "run", "--rm"])
+        self.assertIn(f"ExecStopPost=docker rm -f house-agent-{job.id}", cmd)
+        self.assertNotIn("TOKEN", " ".join(cmd))
+        claude = tail[tail.index("claude"):]
+        self.assertEqual(claude[claude.index("--settings") + 1], "/job/settings.json")
+        s = json.loads(agent.job_files(job)["settings"].read_text())
+        self.assertIn("Bash", s["permissions"]["allow"])
+        self.assertFalse(s["sandbox"]["enabled"])
+        self.assertEqual(s["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "/house/bin/house-hook pre-tool")
+        self.assertTrue((agent.job_files(job)["dir"] / "container.env").exists())
+        self.finish_unit(job)
+        self.tick()
+        self.assertFalse((agent.job_files(job)["dir"] / "container.env").exists())

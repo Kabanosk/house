@@ -222,6 +222,7 @@ class Job:
     no_bash: bool = False
     gitdir: str | None = None
     gitfile: str | None = None
+    runtime: str = "local"
 
 
 class JobStore:
@@ -489,22 +490,51 @@ def job_settings(job: Job, wt: Path) -> dict:
     }
 
 
-def job_command(job: Job, wt: Path, claude: str) -> list[str]:
-    """`systemd-run --user` command for the job: one transient unit, 2 h limit, whole cgroup killed on stop."""
+def docker_settings(job: Job, wt: Path) -> dict:
+    """Settings inside the job container: the container is the boundary, so Bash is allowed and Claude Code's own
+    sandbox is off; file rules stay scoped to the worktree and the job hook (fail closed) stays on."""
+    return {
+        "permissions": {"defaultMode": "dontAsk", "allow": [*_tools(job, wt), "Bash"],
+                        "deny": ["WebFetch", "WebSearch", "mcp__*"]},
+        "sandbox": {"enabled": False},
+        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "/house/bin/house-hook pre-tool"}]}]},
+    }
+
+
+def _claude_argv(job: Job, wt: Path, claude: str, settings: str, tools: list[str]) -> list[str]:
+    return [claude, "-p", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--setting-sources", "local", "--settings", settings, "--strict-mcp-config",
+            "--allowedTools", *tools, "--disallowedTools", "WebFetch", "WebSearch", "mcp__*",
+            *(["--max-budget-usd", str(BUDGET_USD)] if BUDGET_USD else []),
+            "--output-format", "stream-json", "--verbose"]
+
+
+def _unit_prefix(job: Job, wt: Path) -> list[str]:
     files = job_files(job)
-    env = [f"{k}={v}" for k, v in job_env(job, wt, claude).items()]
     return ["systemd-run", "--user", "--unit", f"house-agent-{job.id}", "--collect", "--quiet",
             "-p", f"RuntimeMaxSec={RUNTIME_MAX_S}", "-p", "KillMode=control-group", "-p", f"WorkingDirectory={wt}",
             "-p", f"StandardInput=file:{files['prompt']}", "-p", f"StandardOutput=append:{files['log']}",
             "-p", f"StandardError=append:{files['err']}", "-p", f"MemoryMax={JOB_MEMORY_MAX}",
-            "-p", f"TasksMax={JOB_TASKS_MAX}",
-            "--", "/usr/bin/env", "-i", *env,
-            claude, "-p", "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            "--setting-sources", "local", "--settings", str(files["settings"]), "--strict-mcp-config",
-            "--allowedTools", *_tools(job, wt),
-            "--disallowedTools", "WebFetch", "WebSearch", "mcp__*",
-            *(["--max-budget-usd", str(BUDGET_USD)] if BUDGET_USD else []),
-            "--output-format", "stream-json", "--verbose"]
+            "-p", f"TasksMax={JOB_TASKS_MAX}"]
+
+
+def docker_job_command(job: Job, wt: Path) -> list[str]:
+    """`systemd-run` around `docker run` for the job (the unit's 2 h limit and `/stop` remove the container)."""
+    from . import agentdocker
+    files = job_files(job)
+    claude = _claude_argv(job, wt, "claude", "/job/settings.json", [*_tools(job, wt), "Bash"])
+    inner = agentdocker.container_command(job.id, wt, Path(job.repo), files["prompt"], files["settings"],
+                                          files["dir"] / "container.env", claude)
+    return [*_unit_prefix(job, wt), "-p", f"ExecStopPost=docker rm -f house-agent-{job.id}", "--", *inner]
+
+
+def job_command(job: Job, wt: Path, claude: str) -> list[str]:
+    """`systemd-run --user` command for a local job: one transient unit, 2 h limit, whole cgroup killed on stop."""
+    files = job_files(job)
+    env = [f"{k}={v}" for k, v in job_env(job, wt, claude).items()]
+    return [*_unit_prefix(job, wt), "--", "/usr/bin/env", "-i", *env,
+            *_claude_argv(job, wt, claude, str(files["settings"]), _tools(job, wt))]
 
 
 def _prompt(job: Job, wt: Path) -> str:
@@ -522,24 +552,33 @@ def _prompt(job: Job, wt: Path) -> str:
 def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | None:
     """Prepare the workspace and start the job's unit; returns the unit name, or None (job marked failed)."""
     store = JobStore()
-    claude = claude or shutil.which("claude")
-    if not claude:
-        store.update(job.id, status="failed", error="brak `claude` na tej maszynie")
-        return None
+    claude = claude or shutil.which("claude") or ""
     try:
         wt = prepare(job)
         job = store.get(job.id)
     except Exception as e:  # noqa: BLE001 — a broken workspace fails this job only
         store.update(job.id, status="failed", error=f"worktree: {e}"[:300])
         return None
-    if not sandbox_usable(run):
-        job = store.update(job.id, no_bash=True)
+    from . import agentdocker
     files = job_files(job)
+    if agentdocker.runtime(run) == "docker":
+        agentdocker.ensure_networks(run)
+        agentdocker.ensure_proxy(run)
+        job = store.update(job.id, runtime="docker", no_bash=False)
+        agentdocker.write_env_file(files["dir"], job.id, wt)
+        settings, command = docker_settings(job, wt), docker_job_command(job, wt)
+    else:
+        if not claude:
+            store.update(job.id, status="failed", error="brak `claude` na tej maszynie")
+            return None
+        if not sandbox_usable(run):
+            job = store.update(job.id, no_bash=True)
+        settings, command = job_settings(job, wt), job_command(job, wt, claude)
     files["prompt"].write_text(_prompt(job, wt))
-    files["settings"].write_text(json.dumps(job_settings(job, wt), indent=2))
+    files["settings"].write_text(json.dumps(settings, indent=2))
     for p in (files["prompt"], files["settings"]):
-        p.chmod(0o600)
-    r = run(job_command(job, wt, claude), capture_output=True, text=True, check=False)
+        p.chmod(0o644 if job.runtime == "docker" else 0o600)  # the container user reads them through ro mounts
+    r = run(command, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         store.update(job.id, status="failed", error=(r.stderr or "systemd-run").strip()[:300])
         return None
@@ -786,6 +825,7 @@ def _progress(job: Job, line: str) -> None:
 
 def finish(job: Job, sig, store: "JobStore") -> None:
     """Close a job whose unit has ended: commit, record the outcome and cost, reply to the chat."""
+    (job_files(job)["dir"] / "container.env").unlink(missing_ok=True)  # holds the token
     wt = Path(job.worktree or worktree_of(job))
     result = _result(job)
     ok = bool(result) and result.get("subtype") == "success" and not result.get("is_error")
@@ -1084,6 +1124,11 @@ def doctor_lines(run=subprocess.run, which=shutil.which) -> list[str]:
         return ["- S7: wyłączony"]
     running = len(store.running())
     lines = [f"✓ S7: włączony · w toku: {running} · porażki z rzędu: {store.state().get('failures', 0)}"]
+    from . import agentdocker
+    docker = agentdocker.doctor_lines(run)
+    lines += docker
+    if agentdocker.runtime(run) == "docker":
+        return lines  # jobs run in containers; the local sandbox checks below do not matter
     if not which("bwrap"):
         lines.append("✗ S7: brak bwrap (sandbox Claude Code); `sudo apt install bubblewrap`")
     elif sandbox_usable(run):

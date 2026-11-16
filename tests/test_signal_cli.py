@@ -664,3 +664,47 @@ class AgentOnTest(CliCase):
                 mock.patch("houselib.signalcli._tty", return_value=True):
             for argv in (("agent", "on"), ("agent", "members", "techarena"), ("allow", "x"), ("deny", "x")):
                 self.assertEqual(self.run_cli(*argv)[0], 2, argv)
+
+
+class AgentDockerCliTest(CliCase):
+    def test_token_needs_tty_and_is_not_echoed(self):
+        from houselib import agentdocker
+        with mock.patch("houselib.signalcli._tty", return_value=False):
+            self.assertEqual(self.run_cli("agent", "token")[0], 2)
+        with mock.patch("houselib.signalcli._tty", return_value=True), \
+                mock.patch("getpass.getpass", return_value="sk-ant-oat01-XYZ"):
+            code, out, err = self.run_cli("agent", "token")
+        self.assertEqual(code, 0)
+        self.assertNotIn("XYZ", out + err)
+        self.assertEqual(agentdocker.read_token(), "sk-ant-oat01-XYZ")
+
+    def test_image_builds_and_starts_proxy(self):
+        import subprocess
+        with mock.patch("houselib.agentdocker.build_image",
+                        return_value=subprocess.CompletedProcess([], 0, "", "")) as build, \
+                mock.patch("houselib.agentdocker.ensure_networks") as nets, \
+                mock.patch("houselib.agentdocker.ensure_proxy") as proxy:
+            code, _, _ = self.run_cli("agent", "image")
+        self.assertEqual(code, 0)
+        build.assert_called_once()
+        nets.assert_called_once()
+        proxy.assert_called_once()
+
+    def test_image_build_failure_exit_1(self):
+        import subprocess
+        with mock.patch("houselib.agentdocker.build_image",
+                        return_value=subprocess.CompletedProcess([], 1, "", "no space")):
+            code, _, err = self.run_cli("agent", "image")
+        self.assertEqual(code, 1)
+        self.assertIn("no space", err)
+
+
+class TokenArgumentTest(CliCase):
+    def test_token_given_as_argument_is_refused(self):
+        with mock.patch("houselib.signalcli._tty", return_value=True), \
+                mock.patch("getpass.getpass", return_value="should-not-be-read") as gp:
+            code, out, err = self.run_cli("agent", "token", "sk-ant-oat01-LEAKED")
+        self.assertEqual(code, 2)
+        gp.assert_not_called()
+        self.assertNotIn("LEAKED", out + err)
+        self.assertIn("historii", err)

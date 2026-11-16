@@ -464,9 +464,9 @@ ENV_REASON = ("HOUSE_* path overrides (HOUSE_SIGNAL_CONFIG, HOUSE_NOTIFY_CONFIG,
 DATA_REASON = "house data (~/.local/share/house: the Signal store, caches, cursors) is written only by house commands"
 HOUSE_DATA_DIR = ".local/share/house"
 HOUSE_ENV_RE = re.compile(r"\bHOUSE_(SIGNAL_CONFIG|NOTIFY_CONFIG|DATA_DIR|SIGNAL_ATTACHMENTS)=")
-ALLOW_RE = re.compile(r"house\S*\s+signal\s+(allow|deny|agent\s+(on|members))\b")
+ALLOW_RE = re.compile(r"house\S*\s+signal\s+(allow|deny|agent\s+(on|members|token))\b")
 HUMAN_WORDS = {"allow", "deny"}
-HUMAN_AGENT_WORDS = {"on", "members"}
+HUMAN_AGENT_WORDS = {"on", "members", "token"}
 INNER_SIGNAL_CLI_RE = re.compile(r"(^|[;&|(`]|\$\()\s*(\S*/)?signal-cli(\s|$)")
 WRAPPERS = {"timeout", "env", "nice", "nohup", "sudo", "stdbuf", "exec", "command", "unbuffer", "script", "xargs",
             "time", "setsid"}
