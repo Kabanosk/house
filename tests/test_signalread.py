@@ -15,6 +15,14 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(signalread.snippet("x" * 40, 10), "x" * 10 + "…")
         self.assertEqual(signalread.snippet(None, 10), "")
 
+    def test_fmt_time(self):
+        from datetime import datetime
+        now = datetime(2026, 11, 16, 12, 40).astimezone()
+        self.assertEqual(signalread.fmt_time(datetime(2026, 11, 16, 9, 5).astimezone(), now), "09:05")
+        self.assertEqual(signalread.fmt_time(datetime(2026, 11, 15, 23, 2).astimezone(), now), "wczoraj 23:02")
+        self.assertEqual(signalread.fmt_time(datetime(2026, 11, 13, 8, 0).astimezone(), now), "2026-11-13 08:00")
+        self.assertEqual(signalread.fmt_time(None, now), "nigdy")
+
     def test_fmt_size(self):
         self.assertEqual(signalread.fmt_size(500), "500 B")
         self.assertEqual(signalread.fmt_size(4096), "4 KB")

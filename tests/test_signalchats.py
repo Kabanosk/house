@@ -75,3 +75,60 @@ class AllowedTest(ChatsCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TomlTest(ChatsCase):
+    def test_toml_roundtrip_keyed_by_id(self):
+        groups = {"techarena": {"id": "JsNv=", "name": 'tech "arena" ż', "added": "2026-11-16T12:40:00+01:00"},
+                  "collab-2": {"id": "Xy/+=", "name": "Collabothon", "added": "2026-11-17T09:00:00+01:00",
+                               "retention_days": 90, "contests": ["a", "b"]}}
+        signalchats.save_config(groups)
+        path = signalchats.config_path()
+        self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+        self.assertTrue(path.read_text().startswith("# Grupy Signala"))
+        self.assertEqual(signalchats.load_config(), groups)
+
+    def test_broken_toml_is_reported_not_fatal(self):
+        path = signalchats.config_path()
+        path.parent.mkdir(parents=True)
+        path.write_text("[groups.x\nid=")
+        self.assertEqual(signalchats.load_config(), {})
+        self.assertTrue(signalchats.config_problems())
+
+    def test_entry_without_id_skipped(self):
+        path = signalchats.config_path()
+        path.parent.mkdir(parents=True)
+        path.write_text('[groups.a]\nname = "x"\n[groups.b]\nid = "gB"\n')
+        self.assertEqual(list(signalchats.load_config()), ["b"])
+        self.assertTrue(signalchats.config_problems())
+
+    def test_allowed_includes_toml_groups(self):
+        signalchats.save_config({"techarena": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+        chat = signalchats.allowed(None, [])["gT"]
+        self.assertEqual((chat.alias, chat.name, chat.source), ("techarena", "techarena_claude", "signal.toml"))
+        self.assertEqual(signalchats.resolve("TechArena").id, "gT")
+
+    def test_contest_alias_wins_only_with_same_id(self):
+        fr = self.contest("fr-2026", "fr", "Team")
+        self.cache(Team="gFR")
+        signalchats.save_config({"fr": {"id": "gOTHER", "name": "x", "added": "x"},
+                                 "team": {"id": "gFR", "name": "Team", "added": "x"}})
+        chats = signalchats.allowed(None, [fr])
+        self.assertNotIn("gOTHER", chats)
+        self.assertEqual(chats["gFR"].alias, "fr")
+        with mock.patch("houselib.inbox.all_running", return_value=[fr]):
+            self.assertEqual(signalchats.resolve("team").id, "gFR")
+            self.assertTrue(any("fr" in p for p in signalchats.collisions()))
+
+    def test_validate_alias(self):
+        chats = {"self": signalchats.Chat("self", "self", "n", "zawsze"),
+                 "gFR": signalchats.Chat("gFR", "fr", "Team", "konkurs fr")}
+        self.assertIsNone(signalchats.validate_alias("techarena", "gT", chats))
+        for bad in ("Tech", "-x", "a b", "self", "all", "fr", ""):
+            self.assertIsNotNone(signalchats.validate_alias(bad, "gT", chats), bad)
+        self.assertIsNone(signalchats.validate_alias("fr", "gFR", chats))
+
+    def test_default_alias_slug(self):
+        self.assertEqual(signalchats.slug("techarena_claude"), "techarena-claude")
+        self.assertRegex(signalchats.slug("Zespół Łódź 2026!"), r"^[a-z0-9][a-z0-9-]*$")
+        self.assertEqual(signalchats.slug("!!!"), "grupa")

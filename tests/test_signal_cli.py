@@ -203,3 +203,159 @@ class SendTest(CliCase):
             code, _, err = self.run_cli("send", "self", "x")
         self.assertEqual(code, 1)
         self.assertIn("Signal nie jest skonfigurowany", err)
+
+
+class GroupSig:
+    account = "+48111"
+
+    def __init__(self, groups):
+        self.groups = groups
+
+    def list_groups(self):
+        return self.groups
+
+
+class AllowDenyTest(CliCase):
+    GROUPS = ({"id": "JsNv4TnmFZy5=", "name": "techarena_claude"}, {"id": "gA1=", "name": "Dup"},
+              {"id": "gA2=", "name": "Dup"}, {"id": "gPriv=", "name": "Rodzina"})
+
+    def setUp(self):
+        super().setUp()
+        self.patch = mock.patch("houselib.signal.from_config", return_value=GroupSig(list(self.GROUPS)))
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        super().tearDown()
+
+    def tty(self, answer="t"):
+        return mock.patch.multiple("houselib.signalcli", _tty=lambda: True, _ask=lambda prompt: answer)
+
+    def config(self):
+        from houselib import signalchats
+        return signalchats.load_config()
+
+    def test_allow_without_tty_refused(self):
+        with mock.patch("houselib.signalcli._tty", return_value=False):
+            code, _, err = self.run_cli("allow", "techarena_claude", "--alias", "techarena")
+        self.assertEqual(code, 2)
+        self.assertIn("decyzja człowieka", err)
+        self.assertIn("poproś Wojtka", err)
+        from houselib import signalchats
+        self.assertFalse(signalchats.config_path().exists())
+
+    def test_allow_with_tty(self):
+        with self.tty("t"):
+            code, out, _ = self.run_cli("allow", "techarena_claude", "--alias", "techarena")
+        self.assertEqual(code, 0)
+        self.assertIn("✓ techarena → techarena_claude (JsNv4Tnm…)", out)
+        entry = self.config()["techarena"]
+        self.assertEqual((entry["id"], entry["name"]), ("JsNv4TnmFZy5=", "techarena_claude"))
+        self.assertTrue(entry["added"])
+
+    def test_allow_declined(self):
+        with self.tty("n"):
+            code, _, _ = self.run_cli("allow", "techarena_claude")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.config(), {})
+
+    def test_allow_default_alias(self):
+        with self.tty():
+            self.run_cli("allow", "techarena_claude")
+        self.assertIn("techarena-claude", self.config())
+
+    def test_allow_ambiguous_name_lists_ids(self):
+        with self.tty():
+            code, _, err = self.run_cli("allow", "Dup")
+        self.assertEqual(code, 2)
+        self.assertIn("gA1=", err)
+        self.assertIn("gA2=", err)
+        self.assertIn("--id", err)
+
+    def test_allow_by_id(self):
+        with self.tty():
+            code, _, _ = self.run_cli("allow", "Dup", "--id", "gA2=", "--alias", "dup")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.config()["dup"]["id"], "gA2=")
+
+    def test_allow_unknown_group(self):
+        with self.tty():
+            code, _, err = self.run_cli("allow", "Nieznana")
+        self.assertEqual(code, 2)
+        self.assertIn("Nieznana", err)
+
+    def test_allow_bad_alias(self):
+        with self.tty():
+            self.assertEqual(self.run_cli("allow", "techarena_claude", "--alias", "self")[0], 2)
+
+    def test_deny_removes_entry_keeps_history(self):
+        with self.tty():
+            self.run_cli("allow", "techarena_claude", "--alias", "techarena")
+        signalstore.append({"v": 1, "key": "k", "kind": "message", "dir": "in", "chat": "JsNv4TnmFZy5=", "ts": 1})
+        with self.tty():
+            code, _, _ = self.run_cli("deny", "techarena")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.config(), {})
+        self.assertEqual(len(list(signalstore.iter_events())), 1)
+
+    def test_deny_without_tty_refused(self):
+        with self.tty():
+            self.run_cli("allow", "techarena_claude", "--alias", "techarena")
+        with mock.patch("houselib.signalcli._tty", return_value=False):
+            self.assertEqual(self.run_cli("deny", "techarena")[0], 2)
+        self.assertIn("techarena", self.config())
+
+    def test_deny_contest_group_refused(self):
+        from houselib import signalchats
+        contest = signalchats.Chat("gFR", "fr", "Team", "konkurs fr-2026")
+        with self.tty(), mock.patch("houselib.signalchats.allowed",
+                                    return_value={"self": signalchats.Chat("self", "self", "n", "zawsze"),
+                                                  "gFR": contest}):
+            code, _, err = self.run_cli("deny", "fr")
+        self.assertEqual(code, 2)
+        self.assertIn("notify.signal_group", err)
+
+
+class GroupsTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+        from datetime import datetime
+        for i, chat in enumerate(["gT", "gT", "self"]):
+            t = datetime(2026, 11, 16, 12, 18 + i).astimezone().isoformat()
+            signalstore.append({"v": 1, "key": f"{chat}:a:{i}", "kind": "message", "dir": "in", "chat": chat,
+                                "ts": i, "time": t, "text": "x", "sender": {"name": "A"}})
+        self.patch = mock.patch("houselib.signal.from_config", return_value=GroupSig(
+            [{"id": "gT", "name": "techarena_claude"}, {"id": "gP1", "name": "Rodzina"},
+             {"id": "gP2", "name": "Szkoła"}]))
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        super().tearDown()
+
+    def test_groups_table(self):
+        code, out, _ = self.run_cli("groups")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0].split(), ["alias", "grupa", "źródło", "wiadomości", "ostatnia"])
+        row = next(x for x in lines if x.startswith("techarena"))
+        self.assertIn("signal.toml", row)
+        self.assertEqual(row.split()[3], "2")
+        self.assertTrue(any(x.startswith("self") and "zawsze" in x for x in lines))
+        self.assertNotIn("Rodzina", out)
+
+    def test_groups_all_without_tty_hides_names(self):
+        with mock.patch("houselib.signalcli._tty", return_value=False):
+            code, out, _ = self.run_cli("groups", "--all")
+        self.assertEqual(code, 0)
+        self.assertIn("+ 2 innych grup konta (nazwy tylko w terminalu)", out)
+        self.assertNotIn("Rodzina", out)
+        self.assertNotIn("gP1", out)
+
+    def test_groups_all_with_tty_lists_names(self):
+        with mock.patch("houselib.signalcli._tty", return_value=True):
+            _, out, _ = self.run_cli("groups", "--all")
+        self.assertIn("Rodzina", out)
+        self.assertIn("[dozwolona]", out)

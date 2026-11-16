@@ -129,9 +129,142 @@ def cmd_send(args) -> int:
     notes = []
     if target is not None:
         when = datetime.fromisoformat(target["time"]).astimezone().strftime("%H:%M") if target.get("time") else "?"
-        notes.append(f"cytat: {signalread.display_name(target)} {when} „{signalread.snippet(target.get('text'), 28)}”")
+        quoted = signalread.snippet(target.get("text"), 28)
+        notes.append(f"cytat: {signalread.display_name(target)} {when} „{quoted}”")
     notes += [f"📎 {p.name}, {signalread.fmt_size(p.stat().st_size)}" for p in files]
     print(f"✓ {chat.alias} {ts}" + (f" ({'; '.join(notes)})" if notes else ""))
+    return 0
+
+
+def _tty() -> bool:
+    """True when a human runs the command in a terminal (agents' Bash has no TTY on stdin)."""
+    return sys.stdin.isatty()
+
+
+def _ask(prompt: str) -> str:
+    return input(prompt)
+
+
+def _human_only(command: str) -> int | None:
+    """Exit code 2 with the refusal when there is no terminal; None when a human is at the keyboard."""
+    if _tty():
+        return None
+    print(f"error: dodanie lub usunięcie grupy to decyzja człowieka: poproś Wojtka o `house signal {command}` "
+          "w terminalu", file=sys.stderr)
+    return 2
+
+
+def _yes(prompt: str) -> bool:
+    try:
+        return _ask(prompt).strip().lower() in ("t", "tak", "y", "yes")
+    except EOFError:
+        return False
+
+
+def cmd_groups(args) -> int:
+    """`house signal groups [--all]`: allowed chats with message counts; `--all` also the account's other groups.
+
+    Without a terminal `--all` prints only how many other groups there are, never their names. Exit 0.
+    """
+    now = datetime.now().astimezone()
+    sig = _client()
+    chats = signalchats.allowed(sig)
+    counts: dict[str, int] = {}
+    last: dict[str, datetime] = {}
+    for e in signalstore.latest(signalstore.iter_events(raw=False)):
+        if e.get("kind") in ("message", "other"):
+            chat = str(e.get("chat"))
+            counts[chat] = counts.get(chat, 0) + 1
+            t = signalread.parse_iso(e.get("time"))
+            if t and (chat not in last or t > last[chat]):
+                last[chat] = t
+    print(f"{'alias':<12}{'grupa':<22}{'źródło':<24}{'wiadomości':>10}  ostatnia")
+    for chat in chats.values():
+        print(f"{chat.alias:<12}{chat.name[:21]:<22}{chat.source[:23]:<24}{counts.get(chat.id, 0):>10}  "
+              f"{signalread.fmt_time(last.get(chat.id), now) if chat.id in last else '—'}")
+    if args.all:
+        if sig is None:
+            print("Signal nie jest skonfigurowany: nie widzę innych grup konta")
+            return 0
+        others = [g for g in sig.list_groups() if g.get("id") not in chats]
+        if not _tty():
+            print(f"+ {len(others)} innych grup konta (nazwy tylko w terminalu)")
+            return 0
+        print("\ngrupy konta:")
+        for g in sig.list_groups():
+            mark = "[dozwolona]" if g.get("id") in chats else "[ ]"
+            print(f"  {mark:<12}{g.get('name') or '?'}  ({str(g.get('id'))[:8]}…)")
+    return 0
+
+
+def cmd_allow(args) -> int:
+    """`house signal allow NAME [--alias A] [--id ID]`: let house keep and agents read a group (human only).
+
+    Exit 0 added (or already allowed), 1 declined or Signal not configured, 2 no terminal, unknown or ambiguous
+    group, bad alias.
+    """
+    refused = _human_only(f"allow {args.name!r}")
+    if refused:
+        return refused
+    sig = _client()
+    if sig is None:
+        print("error: Signal nie jest skonfigurowany (~/.config/house/notify.env)", file=sys.stderr)
+        return 1
+    groups = [g for g in sig.list_groups() if g.get("id")]
+    if args.id:
+        found = [g for g in groups if g["id"] == args.id]
+    else:
+        found = [g for g in groups if g.get("name") == args.name] or \
+                [g for g in groups if str(g.get("name") or "").lower() == args.name.lower()]
+    if not found:
+        return _usage(f"nie ma grupy {args.name!r} na koncie (lista: house signal groups --all)")
+    if len(found) > 1:
+        ids = "\n".join(f"  {g['id']}  {g.get('name')}" for g in found)
+        return _usage(f"kilka grup o nazwie {args.name!r}:\n{ids}\nwybierz jedną: --id ID")
+    group = found[0]
+    name = str(group.get("name") or args.name)
+    config = signalchats.load_config()
+    for alias, entry in config.items():
+        if entry["id"] == group["id"]:
+            print(f"już dozwolona jako `{alias}`")
+            return 0
+    alias = args.alias or signalchats.slug(name)
+    why = signalchats.validate_alias(alias, group["id"], signalchats.allowed(sig))
+    if why:
+        return _usage(why)
+    short = f"{group['id'][:8]}…"
+    if not _yes(f"Dodać „{name}” ({short}) jako `{alias}`? Agenci będą czytać tę rozmowę i mogą do niej "
+                "pisać. [t/N] "):
+        print("nic nie zmieniono")
+        return 1
+    config[alias] = {"id": group["id"], "name": name,
+                     "added": datetime.now().astimezone().isoformat(timespec="seconds")}
+    signalchats.save_config(config)
+    print(f"✓ {alias} → {name} ({short}). Od teraz zapisywane i czytelne dla agentów.")
+    return 0
+
+
+def cmd_deny(args) -> int:
+    """`house signal deny ALIAS`: stop keeping a `signal.toml` group (human only); its history stays.
+
+    Exit 0 removed, 1 declined, 2 no terminal, unknown alias or a contest's group.
+    """
+    refused = _human_only(f"deny {args.alias}")
+    if refused:
+        return refused
+    config = signalchats.load_config()
+    if args.alias not in config:
+        chat = next((c for c in signalchats.allowed(None).values() if c.alias == args.alias), None)
+        if chat is not None and chat.source.startswith("konkurs"):
+            return _usage(f"`{args.alias}` to grupa konkursu ({chat.source}): zmień notify.signal_group w specu "
+                          "albo zakończ konkurs")
+        return _usage(f"nie ma `{args.alias}` w signal.toml (lista: house signal groups)")
+    if not _yes(f"Przestać zapisywać `{args.alias}` ({config[args.alias].get('name')})? Historia zostaje. [t/N] "):
+        print("nic nie zmieniono")
+        return 1
+    del config[args.alias]
+    signalchats.save_config(config)
+    print(f"✓ `{args.alias}` usunięta z dozwolonych; zapisana historia zostaje w magazynie")
     return 0
 
 
@@ -151,3 +284,14 @@ def register(sub) -> None:
     sd.add_argument("--from", dest="from_", metavar="NAME", help="author of --reply-to when the ts is ambiguous")
     sd.add_argument("--file", action="append", metavar="PATH", help="attach a file (repeatable)")
     sd.set_defaults(func=cmd_send)
+    gr = ss.add_parser("groups", help="allowed chats (alias, source, counts); --all: other groups of the account")
+    gr.add_argument("--all", action="store_true")
+    gr.set_defaults(func=cmd_groups)
+    al = ss.add_parser("allow", help="human only (terminal): let house keep and agents read a group")
+    al.add_argument("name", help="group title as in Signal")
+    al.add_argument("--alias", help="short name (default: from the title)")
+    al.add_argument("--id", help="group id, when several groups share the title")
+    al.set_defaults(func=cmd_allow)
+    dn = ss.add_parser("deny", help="human only (terminal): stop keeping a signal.toml group (history stays)")
+    dn.add_argument("alias")
+    dn.set_defaults(func=cmd_deny)

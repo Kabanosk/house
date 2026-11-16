@@ -4,6 +4,7 @@ Used by `house signal read|unread|show|status`, the session hook and `house inbo
 store (`signalstore.iter_events`), never signal-cli. Output is plain text for agents and humans (Polish labels).
 """
 import re
+from datetime import datetime, timedelta
 
 HOUSE_PREFIX = re.compile(r"^🤖 \[[^\]]*\]\s*")
 
@@ -44,3 +45,23 @@ def display_name(ev: dict) -> str:
     if ev.get("dir") == "out":
         return "🤖 house"
     return str((ev.get("sender") or {}).get("name") or "?")
+
+
+def fmt_time(dt: datetime | None, now: datetime) -> str:
+    """Local time for display: `HH:MM` today, `wczoraj HH:MM`, else `YYYY-MM-DD HH:MM`; `nigdy` for None."""
+    if dt is None:
+        return "nigdy"
+    dt, now = dt.astimezone(), now.astimezone()
+    if dt.date() == now.date():
+        return f"{dt:%H:%M}"
+    if dt.date() == (now - timedelta(days=1)).date():
+        return f"wczoraj {dt:%H:%M}"
+    return f"{dt:%Y-%m-%d %H:%M}"
+
+
+def parse_iso(text) -> datetime | None:
+    """Parse an ISO time from the store; None when missing or invalid."""
+    try:
+        return datetime.fromisoformat(str(text)) if text else None
+    except ValueError:
+        return None
