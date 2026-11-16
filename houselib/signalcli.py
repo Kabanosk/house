@@ -558,6 +558,9 @@ def cmd_agent(args) -> int:
         print(f"✓ {chat.alias}: {len(ids)} osób może zlecać (@claude)")
         return 0
     if action == "token":
+        if args.target:
+            return _usage("nie podawaj tokenu w komendzie (zostaje w historii powłoki i w logach): uruchom samo "
+                          "`house signal agent token` i wklej go przy pytaniu; ten token unieważnij i wygeneruj nowy")
         import getpass
 
         from . import agentdocker

@@ -697,3 +697,14 @@ class AgentDockerCliTest(CliCase):
             code, _, err = self.run_cli("agent", "image")
         self.assertEqual(code, 1)
         self.assertIn("no space", err)
+
+
+class TokenArgumentTest(CliCase):
+    def test_token_given_as_argument_is_refused(self):
+        with mock.patch("houselib.signalcli._tty", return_value=True), \
+                mock.patch("getpass.getpass", return_value="should-not-be-read") as gp:
+            code, out, err = self.run_cli("agent", "token", "sk-ant-oat01-LEAKED")
+        self.assertEqual(code, 2)
+        gp.assert_not_called()
+        self.assertNotIn("LEAKED", out + err)
+        self.assertIn("historii", err)
