@@ -15,7 +15,9 @@ goal: null          # co budujemy / co optymalizujemy — człowiek, coordinator
 scoring:            # build: rubryka; optimize: metryka + sprawdzarka — z regulaminu
   rubric: null      # build: lista kryteriów {name, what, levels 1-5, weight}
   metric: null      # optimize: nazwa metryki i kierunek (max/min)
-  local_scorer: null   # optimize: komenda lokalnej sprawdzarki
+  direction: null   # optimize: max | min (house exp; bez tego bierze max/min ze słów w metric)
+  local_scorer: null   # optimize: komenda lokalnej sprawdzarki; drukuje `score: <liczba>`
+  scorer_files: []     # optimize: dodatkowe pliki sprawdzarki (globy), gdy nie wynikają z komendy (np. [eval/*.sh])
   leaderboard: null    # optimize: czy jest, gdzie, jak często się odświeża
 
 timeline:           # z regulaminu
@@ -77,6 +79,11 @@ guard:              # ochrona (hooki + house guard diff)
 night:              # house night (tryb nocny)
   task_minutes: 45  # limit jednej sesji workera
   model: sonnet     # model workera Claude w nocy
+
+exp:                # house exp (pętla eksperymentów, optimize)
+  budget: 5m        # limit czasu komendy eksperymentu (90s, 5m, 1h)
+  scorer_minutes: 10  # limit lokalnej sprawdzarki
+  shared: []        # ścieżki spoza gita (dane), linkowane do każdego worktree eksperymentu, np. [data]
 
 review:             # house review (recenzja krzyżowa Codex ↔ Claude)
   minutes: 20       # limit jednej recenzji

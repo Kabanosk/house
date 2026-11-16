@@ -350,13 +350,15 @@ def _kill_group(pgid: int) -> None:
         pass
 
 
-def _start(cmd: list[str] | str, workdir: Path, out) -> subprocess.Popen:
+def _start(cmd: list[str] | str, workdir: Path, out, extra_env: dict | None = None) -> subprocess.Popen:
     """Own process group, output to a file (not a pipe): background children can neither hang us nor survive."""
-    return subprocess.Popen(cmd, shell=isinstance(cmd, str), cwd=workdir, env=_env(), stdout=out,
+    return subprocess.Popen(cmd, shell=isinstance(cmd, str), cwd=workdir, env={**_env(), **(extra_env or {})},
+                            stdout=out,
                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
 
 
-def _run_cmd(cmd: list[str] | str, workdir: Path, timeout: int, keep_group: bool = False):
+def _run_cmd(cmd: list[str] | str, workdir: Path, timeout: int, keep_group: bool = False,
+             extra_env: dict | None = None):
     """Run a command in its own process group and capture its output.
 
     Args:
@@ -364,18 +366,23 @@ def _run_cmd(cmd: list[str] | str, workdir: Path, timeout: int, keep_group: bool
         workdir: Working directory.
         timeout: Seconds before the group is killed.
         keep_group: Leave background children running after the command exits (used for init.sh).
+        extra_env: Variables added to the environment (used by `house exp`: HOUSE_EXP, HOUSE_CONTEST).
 
     Returns:
         `(exit code or None on timeout, output, process group id)`.
     """
     with tempfile.TemporaryFile(mode="w+") as out:
-        proc = _start(cmd, workdir, out)
+        proc = _start(cmd, workdir, out, extra_env)
         try:
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_group(proc.pid)
             proc.wait()
             code = None
+        except BaseException:  # Ctrl+C / SIGTERM handler: never leave the command running
+            _kill_group(proc.pid)
+            proc.wait()
+            raise
         if not keep_group:
             _kill_group(proc.pid)
         out.seek(0)

@@ -19,7 +19,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from . import guard
+from . import exp, guard
 from . import spec as specmod
 from .fm import parse_frontmatter
 
@@ -128,7 +128,8 @@ def session_start(event: dict) -> str:
 
     Lines: contest name, kind and mode; the goal (cut to 120 characters); open questions from
     `.house/QUESTIONS.md` (first 6 ids); task counts per status and which `todo` tasks are ready (all
-    `depends_on` merged or done); red checks (first 8); hours since the last briefing; a reminder to start with
+    `depends_on` merged or done); red checks (first 8); the experiments line (`exp.summary_line`: best and
+    stagnation, optimize contests); hours since the last briefing; a reminder to start with
     `protocols/briefing.md` when the human is returning. Missing or malformed files are skipped.
 
     Args:
@@ -172,6 +173,12 @@ def session_start(event: dict) -> str:
             red.append(f"{path.stem} ({', '.join(bad)})")
     if red:
         lines.append("red checks: " + "; ".join(red[:8]))
+    try:
+        exp_line = exp.summary_line(contest)
+    except Exception:  # noqa: BLE001 — the summary must never break a session
+        exp_line = None
+    if exp_line:
+        lines.append(exp_line)
     try:
         last = json.loads((house / "state.json").read_text()).get("last_briefing")
     except (OSError, ValueError):

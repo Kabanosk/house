@@ -7,7 +7,7 @@ from houselib import HOUSE_ROOT
 CORE = HOUSE_ROOT / "core"
 TEMPLATE_FILES = [
     "spec.yaml", "DECISIONS.md", "QUESTIONS.md", "PROGRESS.md", "ideas.md",
-    "submissions.csv", "state.json", "reports/TEMPLATE.md", "tasks/TEMPLATE.md",
+    "submissions.csv", "experiments.csv", "state.json", "reports/TEMPLATE.md", "tasks/TEMPLATE.md",
 ]
 PROTOCOLS = ["questions", "briefing", "decisions", "submissions", "stagnation", "export"]
 PLAYBOOKS = ["lifecycle", "build", "optimize"]
@@ -55,6 +55,29 @@ class CoreContentTest(unittest.TestCase):
         text = (CORE / "playbooks/optimize.md").read_text()
         for knob in ["explore_share", "stagnation_n", "endgame_share"]:
             self.assertIn(knob, text)
+
+
+class ExperimentsContentTest(unittest.TestCase):
+    def test_experiments_template_header(self):
+        from houselib import exp
+        header = (CORE / "templates/house/experiments.csv").read_text().splitlines()[0]
+        self.assertEqual(header, ",".join(exp.COLUMNS))
+
+    def test_spec_template_has_exp_knobs(self):
+        from houselib import spec as specmod
+        s = specmod.load_spec(CORE / "templates/house")
+        text = (CORE / "templates/house/spec.yaml").read_text()
+        self.assertRegex(text, r"(?m)^scoring:.*(?:\n  .*)*?\n  direction: null")
+        self.assertEqual(specmod.get(s, "exp.budget"), "5m")
+        self.assertEqual(specmod.get(s, "exp.scorer_minutes"), 10)
+        self.assertEqual(specmod.get(s, "exp.shared"), [])
+
+    def test_playbook_and_protocols_use_house_exp(self):
+        text = (CORE / "playbooks/optimize.md").read_text()
+        for cmd in ("house exp new", "house exp run", "house exp status", "--from E-"):
+            self.assertIn(cmd, text)
+        self.assertIn("house exp status", (CORE / "protocols/stagnation.md").read_text())
+        self.assertIn("E-###", (CORE / "protocols/submissions.md").read_text())
 
 
 if __name__ == "__main__":

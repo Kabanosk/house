@@ -7,6 +7,28 @@ Goal: maximize the contest metric on a hidden judge, using a limited number of s
   (`spec.scoring.local_scorer`). Validate it against the examples / first submission.
 - Keep every candidate reproducible: branch + commit + config + seed. Name artifacts by score.
 
+## 1a. Experiments (`house exp`)
+Every local attempt goes through the experiment loop, so the record is kept by code, not by memory:
+1. `$HOUSE_ROOT/bin/house exp new <contest> --from best --idea I-### --note "<one change>"` prints
+   `E-### <worktree>`. Work only in that worktree.
+2. Make ONE change (an idea from `ideas.md`, a fix, a parameter). Large outputs (weights, predictions) must be
+   gitignored; data outside git goes to `exp.shared` in the spec.
+3. `$HOUSE_ROOT/bin/house exp run <contest> E-### --budget 5m -- <train/predict command>`: the command runs with
+   the budget, then `scoring.local_scorer`; strictly better than the parent → `keep`, otherwise `revert`
+   (worktree removed, commit kept as `refs/exp/E-###`). Exit 0 = keep.
+4. A `crash` or `timeout` is debugged as a child of it: `house exp new <contest> --from E-###`. Improve the best
+   with `--from best`. When the change is only the command line (a sweep), one step:
+   `house exp run <contest> --from best -- <command>`.
+5. `house exp status <contest>` shows the best, the tree and the stagnation counter. Never change the scorer in an
+   experiment (that is a `crash`, "tampered"); a scorer fix goes to the contest checkout, after which earlier
+   scores are not compared. The scorer is: tracked files named in `scoring.local_scorer`, the local modules they
+   import, and `scoring.scorer_files` (set it for shell scorers or scorers run from a subdirectory; a run
+   without any protected scorer file says so in its note).
+5a. `house exp run` blocks for budget + scoring. Give the tool call a timeout above that, or run it in the
+   background; an interrupted run kills the command and is recorded as `crash` "interrupted". Read the tree with
+   `house exp status`, never from the stale `.house/experiments.csv` inside an experiment worktree.
+6. `house exp prune <contest> --keep 3` frees disk (worktrees of weaker keeps; refs stay).
+
 ## 2. Local ↔ leaderboard agreement
 - Every submission logs both scores in `.house/submissions.csv` (see `protocols/submissions.md`).
 - After 3+ submissions, report agreement as a number (rank correlation of local vs leaderboard, and mean
@@ -23,7 +45,8 @@ Goal: maximize the contest metric on a hidden judge, using a limited number of s
 - Leaderboard probing (`probe` kind) is allowed unless `spec.rules` forbids it.
 
 ## 4. Stagnation
-- `limits.stagnation_n` iterations without improving the best → follow `protocols/stagnation.md`:
+- `limits.stagnation_n` scored experiments without improving the best (`house exp status` prints the arrow
+  `→ protocols/stagnation.md`) → follow `protocols/stagnation.md`:
   ideator on a different model, radically different directions, checked against `ideas.md`.
 
 ## 5. Endgame

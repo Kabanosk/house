@@ -44,8 +44,12 @@ class GuardTest(unittest.TestCase):
 
     def test_local_scorer_is_protected(self):
         (self.c / "score.py").write_text("print(1)\n")
-        (self.c / ".house/spec.yaml").write_text("scoring:\n  local_scorer: python3 score.py --split val\n")
+        (self.c / "preds.txt").write_text("1\n")
+        (self.c / ".house/spec.yaml").write_text("scoring:\n  local_scorer: python3 score.py preds.txt --split val\n")
+        git(self.c, "add", "score.py")
+        git(self.c, "commit", "-qm", "scorer")
         self.assertIn("score.py", guard.protected_paths(self.c))
+        self.assertNotIn("preds.txt", guard.protected_paths(self.c))  # untracked output, not the scorer
 
     def test_check_edit(self):
         self.assertIn("T001", guard.check_edit("test_a.py", self.c))

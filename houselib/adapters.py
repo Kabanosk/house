@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import HOUSE_ROOT, doctor, manifest
+from . import HOUSE_ROOT, doctor, gitutil, manifest
 from .fm import parse_frontmatter
 from .gitutil import git
 from .scaffold import install_core
@@ -366,14 +366,7 @@ def write_local_settings(contest: Path, root: Path = HOUSE_ROOT) -> Path:
         existing = {}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(merge_settings(existing, claude_settings(root)), indent=2) + "\n")
-    r = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=contest, capture_output=True,
-                       text=True, check=False)
-    if r.returncode == 0:
-        exclude = (contest / r.stdout.strip()).resolve()
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        lines = exclude.read_text().splitlines() if exclude.exists() else []
-        if ".claude/settings.local.json" not in lines:
-            exclude.write_text("\n".join([*lines, ".claude/settings.local.json"]) + "\n")
+    gitutil.exclude(contest, ".claude/settings.local.json")
     return path
 
 

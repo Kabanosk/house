@@ -209,6 +209,29 @@ class MergeTest(unittest.TestCase):
         self.assertFalse(out.ok)
         self.assertEqual((self.c / "calc.py").read_text(), CALC_OK)
 
+    def test_rollback_keeps_commits_made_on_top_during_rechecks(self):
+        from unittest import mock
+        self.calc_task()
+        self.assertTrue(merge.merge_task(self.c, "T001").ok)
+        self.add_task("T002", "speed", '  - id: AC-1\n    run: "python3 -c \'import calc\'"\n',
+                      {"calc.py": CALC_BAD})
+        real = checks.run_checks
+        done = []
+
+        def on_main(house, tid, workdir, record=True):
+            if Path(workdir) == self.c and not done:  # a parallel `house exp run` commits its csv meanwhile
+                (self.house / "experiments.csv").write_text("id\nE-001\n")
+                git(self.c, "add", ".house/experiments.csv")
+                git(self.c, "commit", "-q", "-m", "chore(exp): E-001 keep", "--", ".house/experiments.csv")
+                done.append(1)
+            return real(house, tid, workdir, record)
+        with mock.patch.object(merge.checks, "run_checks", side_effect=on_main):
+            out = merge.merge_task(self.c, "T002")
+        self.assertTrue(out.reverted, out.message)
+        self.assertEqual((self.c / "calc.py").read_text(), CALC_OK)
+        self.assertIn("chore(exp): E-001 keep", git(self.c, "log", "--format=%s"))
+        self.assertEqual((self.house / "experiments.csv").read_text(), "id\nE-001\n")
+
     def test_branch_editing_protected_test_refused(self):
         (self.c / "test_calc.py").write_text(TEST_CALC)
         git(self.c, "add", "test_calc.py")
