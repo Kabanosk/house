@@ -527,10 +527,12 @@ def unread(name: str, *, chat: str | None = None, peek: bool = False,
 
 def unread_counts(name: str, now: datetime | None = None) -> dict[str, int]:
     """Alias → number of unread messages for the reader, without moving any cursor (hook, inbox)."""
+    from . import signalchats
+    aliases = {c.id: c.alias for c in signalchats.allowed(None).values()}
     msgs, _, _, _ = _new(name, now or datetime.now().astimezone(), None)
     out: dict[str, int] = {}
     for m in msgs:
-        alias = str(m.ev.get("chat_alias") or m.chat)
+        alias = aliases.get(m.chat) or str(m.ev.get("chat_alias") or m.chat)
         out[alias] = out.get(alias, 0) + 1
     return out
 

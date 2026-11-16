@@ -195,3 +195,14 @@ class JobModeHookTest(unittest.TestCase):
         r = subprocess.run([str(HOUSE_ROOT / "bin/house-hook"), "pre-tool"], input="not json", text=True,
                            capture_output=True, env=env, check=False)
         self.assertEqual(r.returncode, 0)
+
+
+class SummaryAliasTest(SignalHookTest):
+    def test_summary_uses_current_alias_for_migrated_events(self):
+        signalstore.append({"v": 1, "key": f"{fx.GID}:migrated:{now_ts(1)}", "kind": "message", "dir": "in",
+                            "chat": fx.GID, "chat_alias": None, "ts": now_ts(1), "seq": 999,
+                            "time": datetime.now().astimezone().isoformat(), "text": "stara",
+                            "sender": {"name": "Patryk", "number": None, "uuid": None}, "meta": {"migrated": True}})
+        out = "\n".join(hook.signal_summary("house"))
+        self.assertNotIn(fx.GID, out)
+        self.assertIn("techarena", out)

@@ -126,10 +126,14 @@ def signal_summary(reader: str, now: datetime | None = None) -> list[str]:
     msgs, _ = signalread.unread(reader, peek=True, now=now)
     if not msgs:
         return [f"signal: brak nowych · ostatni odbiór {last}"]
+    from . import signalchats
+    aliases = {c.id: c.alias for c in signalchats.allowed(None).values()}
+
+    def alias_of(m) -> str:
+        return aliases.get(m.chat) or str(m.ev.get("chat_alias") or f"{m.chat[:8]}…")
     counts: dict[str, int] = {}
     for m in msgs:
-        alias = str(m.ev.get("chat_alias") or m.chat)
-        counts[alias] = counts.get(alias, 0) + 1
+        counts[alias_of(m)] = counts.get(alias_of(m), 0) + 1
     per_chat = ", ".join(f"{a} {n}" for a, n in sorted(counts.items(), key=lambda kv: -kv[1]))
     lines = [_fit(f"signal: {signalread.nowe(len(msgs))} ({per_chat}) · `house signal unread` · "
                   f"ostatni odbiór {last}")]
@@ -139,7 +143,7 @@ def signal_summary(reader: str, now: datetime | None = None) -> list[str]:
         if m.ev.get("quote"):
             quoted = " ↩ " + view.quote_ref(m, with_time=False).split(" ↩ ", 1)[1].split(" „", 1)[0].replace("🤖 ", "")
         text = " ".join(m.text.split()) or view._files_inline(m)
-        lines.append(_fit(f"signal:   {m.ev.get('chat_alias') or m.chat} [{signalread.fmt_time(m.time, now)}] "
+        lines.append(_fit(f"signal:   {alias_of(m)} [{signalread.fmt_time(m.time, now)}] "
                           f"{signalread.display_name(m.ev)}{quoted}: {text}"))
     return lines
 
