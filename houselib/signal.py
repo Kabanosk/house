@@ -11,18 +11,64 @@ Used by `house notify`, `house ask`, `house inbox`, `house deadlines` and the se
 * The account is a linked device of the owner's own number, so messages to "Note to Self" notify the owner.
 * Never run `signal-cli` by hand or from tests against the real account; pass a fake `run` to `Signal`, or set
   HOUSE_NOTIFY_CONFIG to a nonexistent path so no client is created.
-* `receive` consumes messages on the signal-cli side: whatever it returns must be persisted before use
-  (see `inbox.pull`).
+* `receive` consumes messages on the signal-cli side. Only `signalstore.pull` may call it: it writes every object
+  to the store before the next line is read. Never call `Signal.receive` anywhere else and never run
+  `signal-cli … receive|send` by hand or from an agent: both bypass the store (received messages are lost,
+  sent ones are missing from the history).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 CONFIG = Path.home() / ".config/house/notify.env"
 FALLBACK_BINARY = Path.home() / ".local/bin/signal-cli"
 TIMEOUT_S = 60
+ATTACHMENTS = Path.home() / ".local/share/signal-cli/attachments"
+ERROR_MAX = 200
+
+
+@dataclass
+class ReceiveResult:
+    """Outcome of one `Signal.receive` run.
+
+    Attributes:
+        objects: JSON objects handed to the callback.
+        bad_lines: Non-empty stdout lines that were not a JSON object (their content is never kept anywhere).
+        error: None on success, else "signal-cli not found", "timeout", "read: <reason>" or the first stderr line
+            that is not INFO (cut to 200 characters) when signal-cli exits non-zero.
+        returncode: Exit code of signal-cli, None if it never started.
+        stopped: True when `should_stop` asked to end early (the process was terminated, its output drained).
+    """
+
+    objects: int = 0
+    bad_lines: int = 0
+    error: str | None = None
+    returncode: int | None = None
+    stopped: bool = False
+
+
+PHONE_RE = re.compile(r"\+?\d[\d ]{6,}\d")
+UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+
+
+def _error_line(stderr: str) -> str | None:
+    """The line that explains a failure: the first ERROR line, else the first non-INFO line, else the first line.
+
+    Phone numbers and UUIDs are replaced (`+…`, `<uuid>`): a warning may name a sender from a private chat, and
+    nothing from a private chat may be stored, even in an error. Cut to ERROR_MAX characters; None when empty.
+    """
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    useful = [ln for ln in lines if "ERROR" in ln] or [ln for ln in lines if not ln.startswith("INFO")] or lines
+    if not useful:
+        return None
+    return UUID_RE.sub("<uuid>", PHONE_RE.sub("+…", useful[0]))[:ERROR_MAX]
 
 
 class Signal:
@@ -34,7 +80,8 @@ class Signal:
         timeout: Default per-call timeout in seconds (hooks lower it so a session start stays quick).
     """
 
-    def __init__(self, account: str, binary: str, run=subprocess.run, timeout: int = TIMEOUT_S):
+    def __init__(self, account: str, binary: str, run=subprocess.run, timeout: int = TIMEOUT_S,
+                 popen=subprocess.Popen, attachments_dir: Path | None = None):
         """Store the account and the way to run `signal-cli`; nothing is executed here.
 
         Args:
@@ -43,62 +90,140 @@ class Signal:
             run: Callable with the signature of `subprocess.run`; replace it in tests with a fake. Defaults to
                 `subprocess.run`.
             timeout: Default timeout in seconds for one `signal-cli` call. Defaults to TIMEOUT_S (60).
+            popen: Callable with the signature of `subprocess.Popen`, used by `receive`; replaceable in tests.
+            attachments_dir: Where signal-cli stores downloaded attachments. Defaults to
+                $HOUSE_SIGNAL_ATTACHMENTS, else ~/.local/share/signal-cli/attachments.
         """
         self.account, self.binary, self._run, self.timeout = account, binary, run, timeout
+        self._popen = popen
+        self.attachments_dir = Path(attachments_dir or os.environ.get("HOUSE_SIGNAL_ATTACHMENTS") or ATTACHMENTS)
 
     def _call(self, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess | None:
         """Run `signal-cli -a <account> <args>`; None if it cannot start, rc -1 with partial stdout on timeout."""
         argv = [self.binary, "-a", self.account, *args]
         try:
-            return self._run(argv, capture_output=True, text=True, timeout=timeout or self.timeout, check=False)
+            return self._run(argv, capture_output=True, text=True, timeout=timeout or self.timeout, check=False,
+                             stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired as e:  # keep what was already printed: those messages are acknowledged
             out = e.output.decode() if isinstance(e.output, bytes) else (e.output or "")
             return subprocess.CompletedProcess(argv, -1, out, "")
         except OSError:
             return None
 
-    def send(self, text: str, group_id: str | None = None) -> int | None:
-        """Send a text message to Note to Self (with a notification) or to a group.
+    def send(self, text: str, group_id: str | None = None, *, attachments=(), quote: tuple[int, str] | None = None,
+             meta: dict | None = None) -> int | None:
+        """Send a message to Note to Self (with a notification) or to a group, and log it in the store.
+
+        Every call, delivered or not, becomes an `out` event in the message store (`signalstore.record_out`), so a
+        later quote-reply can be matched and the conversation history is complete. Logging never breaks a send.
 
         Args:
-            text: Message body, sent verbatim.
+            text: Message body, sent verbatim (house's callers add the `🤖 [..]` prefix).
             group_id: Signal group id (base64, as returned by `list_groups`). When None or empty the message goes
                 to the owner's Note to Self instead. Defaults to None.
+            attachments: Paths of files to attach (`--attachment`, one per file). Defaults to none.
+            quote: (timestamp, author uuid or number) of the message this one quotes. Defaults to None.
+            meta: Stored with the event: `origin` (notify, ask, inbox-reply, deadline, night, cli; "python" when
+                missing), `contest`, `question`. Defaults to None.
 
         Returns:
             Signal's message timestamp (milliseconds since the epoch), which is also the id a quote-reply refers
             to. None when `signal-cli` is missing, exits non-zero, times out or prints no timestamp.
         """
         target = ["-g", group_id] if group_id else ["--note-to-self", "--notify-self"]
-        r = self._call("send", *target, "-m", text)
-        if r is None or r.returncode != 0:
-            return None
-        last = (r.stdout.strip().splitlines() or [""])[-1].strip()
-        return int(last) if last.isdigit() else None
+        extra = [x for path in attachments for x in ("--attachment", str(path))]
+        if quote:
+            extra += ["--quote-timestamp", str(quote[0]), "--quote-author", str(quote[1])]
+        r = self._call("send", *target, "-m", text, *extra)
+        ts = None
+        if r is not None and r.returncode == 0:
+            last = (r.stdout.strip().splitlines() or [""])[-1].strip()
+            ts = int(last) if last.isdigit() else None
+        try:
+            from . import signalstore
+            signalstore.record_out(self.account, group_id or "self", text, ts, attachments=attachments, quote=quote,
+                                   meta={"origin": "python", **(meta or {})})
+        except Exception:  # noqa: BLE001, S110 — the log must never turn a delivered message into a failure
+            pass
+        return ts
 
-    def receive(self, timeout: int = 1) -> list[dict]:
-        """Fetch pending messages from the account; this consumes them on the signal-cli side.
+    def receive(self, handle: Callable[[dict], None], timeout: int = 1, max_messages: int | None = None,
+                should_stop: Callable[[], bool] = lambda: False) -> ReceiveResult:
+        """Stream pending messages to `handle`, one JSON object at a time; this consumes them in signal-cli.
+
+        signal-cli acknowledges a message to the server when it prints it, so `handle` must persist each object
+        before returning: the next line is read only afterwards. Only `signalstore.pull` calls this.
 
         Args:
-            timeout: Seconds `signal-cli` waits for new messages before returning. Defaults to 1. The process
-                itself may run `timeout` + `self.timeout` seconds; on expiry the output printed so far is kept.
+            handle: Called with each parsed JSON object (an envelope wrapper), in output order. An exception from
+                it kills signal-cli and propagates.
+            timeout: Seconds signal-cli waits for new messages (`--timeout`). Defaults to 1. The whole process is
+                killed after `timeout + self.timeout` seconds; what it printed until then is still handled.
+            max_messages: Passed as `--max-messages` when set; the rest stays on the server. Defaults to None.
+            should_stop: Checked after each object; when it returns True signal-cli is terminated and the output
+                it already printed is drained and handled (nothing printed is dropped).
 
         Returns:
-            One parsed JSON object (an envelope wrapper) per output line; unparsable and non-object lines are
-            skipped. An empty list when `signal-cli` cannot be started or prints nothing.
+            A `ReceiveResult` with counts and the error, if any. Never raises for signal-cli problems.
         """
-        r = self._call("-o", "json", "receive", "--timeout", str(timeout), timeout=timeout + self.timeout)
-        if r is None:
-            return []
-        out = []
-        for line in r.stdout.splitlines():
+        argv = [self.binary, "-a", self.account, "-o", "json", "receive", "--timeout", str(timeout)]
+        if max_messages:
+            argv += ["--max-messages", str(max_messages)]
+        argv.append("--ignore-stories")
+        res = ReceiveResult()
+        with tempfile.TemporaryFile() as err:
             try:
-                obj = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(obj, dict):
-                out.append(obj)
-        return out
+                proc = self._popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err)
+            except OSError:
+                res.error = "signal-cli not found"
+                return res
+            timed_out = threading.Event()
+
+            def kill():
+                timed_out.set()
+                proc.kill()
+
+            timer = threading.Timer(timeout + self.timeout, kill)
+            timer.daemon = True
+            timer.start()
+            try:
+                lines = iter(proc.stdout)
+                while True:
+                    try:
+                        raw = next(lines)
+                    except StopIteration:
+                        break
+                    except OSError as e:
+                        res.error = f"read: {e}"
+                        break
+                    line = raw.decode("utf-8", errors="replace").strip() if isinstance(raw, bytes) else raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        obj = None
+                    if not isinstance(obj, dict):
+                        res.bad_lines += 1
+                        continue
+                    res.objects += 1
+                    handle(obj)
+                    if not res.stopped and should_stop():
+                        res.stopped = True
+                        proc.terminate()
+                res.returncode = proc.wait()
+            except BaseException:
+                proc.kill()
+                proc.wait()
+                raise
+            finally:
+                timer.cancel()
+            if timed_out.is_set():
+                res.error = "timeout"
+            elif res.error is None and res.returncode not in (0, None) and not res.stopped:
+                err.seek(0)
+                res.error = _error_line(err.read().decode("utf-8", errors="replace")) or f"exit {res.returncode}"
+        return res
 
     def list_groups(self) -> list[dict]:
         """List the Signal groups the account belongs to.

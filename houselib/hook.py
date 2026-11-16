@@ -7,7 +7,8 @@ Callers and contract:
   * `bin/house-hook` reads the JSON event Claude Code sends on stdin and calls `pre_tool` (PreToolUse, matcher
     for Edit/Write/MultiEdit/NotebookEdit/Bash) or `session_start` (SessionStart); `house adapt` registers both in
     the contest's `settings.local.json`.
-  * Outside a house contest both hooks do nothing (exit 0, no output).
+  * Outside a house contest both hooks do nothing (exit 0, no output), except `session_start` in the house repo
+    itself, which prints the Signal summary (registered there by `house setup --signal-hook`).
   * Exit code 2 from `pre_tool` blocks the tool call; the message goes to stderr and the model reads it. Any
     other outcome allows the call. `HOUSE_GUARD=off` in the environment disables blocking (the first use per
     session is logged to `.house/PROGRESS.md`).
@@ -29,7 +30,8 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 def pre_tool(event: dict, env: dict) -> tuple[int, str]:
     """Decide whether a tool call may run (PreToolUse hook), applying the guard rules.
 
-    Edit-type tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
+    Signal rules (`guard.check_signal`) apply wherever the hook is installed, also in the house repo. Edit-type
+    tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
     `Bash` with `guard.check_bash` on its `command`. Other tools are always allowed.
 
     Args:
@@ -44,6 +46,10 @@ def pre_tool(event: dict, env: dict) -> tuple[int, str]:
         coordinator or `house check --refreeze --reason`).
     """
     cwd = Path(event.get("cwd") or os.getcwd())
+    if env.get("HOUSE_GUARD") != "off":
+        reason = guard.check_signal(str(event.get("tool_name") or ""), event.get("tool_input") or {}, cwd)
+        if reason:
+            return 2, f"house guard: {reason}."
     contest = guard.contest_root(cwd)
     if contest is None:
         return 0, ""
@@ -80,22 +86,77 @@ def post_tool(event: dict) -> str:
     return f"house: sent {', '.join(sent)} to Signal" if sent else ""
 
 
-def _signal_lines(contest: Path) -> list[str]:
-    """Pull answers and apply deadlines at session start (fail open: a slow or missing Signal changes nothing)."""
+def house_root(cwd: Path) -> Path | None:
+    """The main checkout of the house repo when `cwd` is inside it or one of its worktrees, else None."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd,
+                           capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    main = Path(r.stdout.strip()).parent
+    return main if (main / "bin/house-hook").is_file() and (main / "core").is_dir() else None
+
+
+SIGNAL_WIDTH = 100
+
+
+def _fit(line: str) -> str:
+    return line if len(line) <= SIGNAL_WIDTH else line[:SIGNAL_WIDTH - 1] + "…"
+
+
+def signal_summary(reader: str, now: datetime | None = None) -> list[str]:
+    """1–4 lines about unread Signal messages for `reader`, each at most 100 characters; the cursor is not moved.
+
+    Line 1: how many are new per chat and the command to read them (or "brak nowych"), with the last receive
+    time. Then at most the 3 newest, one line each.
+    """
+    from . import signalread, signalstore
+    now = now or datetime.now().astimezone()
+    last = signalread.fmt_time(signalread.parse_iso(signalstore.read_state().get("last_pull_ok")), now)
+    msgs, _ = signalread.unread(reader, peek=True, now=now)
+    if not msgs:
+        return [f"signal: brak nowych · ostatni odbiór {last}"]
+    counts: dict[str, int] = {}
+    for m in msgs:
+        alias = str(m.ev.get("chat_alias") or m.chat)
+        counts[alias] = counts.get(alias, 0) + 1
+    per_chat = ", ".join(f"{a} {n}" for a, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+    lines = [_fit(f"signal: {signalread.nowe(len(msgs))} ({per_chat}) · `house signal unread` · "
+                  f"ostatni odbiór {last}")]
+    view = signalread.View(signalstore.iter_events(raw=False), now)
+    for m in sorted(msgs, key=lambda m: m.ts or 0, reverse=True)[:3]:
+        quoted = ""
+        if m.ev.get("quote"):
+            quoted = " ↩ " + view.quote_ref(m, with_time=False).split(" ↩ ", 1)[1].split(" „", 1)[0].replace("🤖 ", "")
+        text = " ".join(m.text.split()) or view._files_inline(m)
+        lines.append(_fit(f"signal:   {m.ev.get('chat_alias') or m.chat} [{signalread.fmt_time(m.time, now)}] "
+                          f"{signalread.display_name(m.ev)}{quoted}: {text}"))
+    return lines
+
+
+def _signal_lines(contest: Path | None, cwd: Path) -> list[str]:
+    """Receive, apply answers (and deadlines in a contest), then summarise unread messages; fail open."""
     try:
         from . import inbox
         from .signal import from_config
+        from .signalread import reader_name
         sig = from_config()
         if sig is None:
             return []
         sig.timeout = 10  # a session start must stay quick even if signal-cli waits on its lock
-        everyone = inbox.all_running() or [contest]
-        if contest.resolve() not in {c.resolve() for c in everyone}:
+        everyone = inbox.all_running()
+        if contest is not None and contest.resolve() not in {c.resolve() for c in everyone}:
             everyone.append(contest)
-        lines = [*inbox.process(everyone, sig, scope=[contest]), *inbox.deadlines(contest, sig)]
-        return [f"signal: {line}" for line in lines]
+        log = inbox.process(everyone, sig, scope=[contest] if contest is not None else [], timeout=1,
+                            max_messages=200)
+        if contest is not None:
+            log += inbox.deadlines(contest, sig)
+        return [_fit(f"signal: {line}") for line in log[:2]] + signal_summary(reader_name(cwd))
     except Exception as e:  # noqa: BLE001
-        return [f"signal: skipped ({type(e).__name__})"]
+        return [f"signal: pominięto ({type(e).__name__})"]
 
 
 def _note_guard_off(contest: Path, session: str) -> None:
@@ -130,19 +191,25 @@ def session_start(event: dict) -> str:
     `.house/QUESTIONS.md` (first 6 ids); task counts per status and which `todo` tasks are ready (all
     `depends_on` merged or done); red checks (first 8); the experiments line (`exp.summary_line`: best and
     stagnation, optimize contests); hours since the last briefing; a reminder to start with
-    `protocols/briefing.md` when the human is returning. Missing or malformed files are skipped.
+    `protocols/briefing.md` when the human is returning; Signal lines (answers applied, unread messages, see
+    `signal_summary`). In the house repo itself (not a contest) only the Signal lines are printed. Missing or
+    malformed files are skipped.
 
     Args:
         event: Decoded hook event from Claude Code. Key used: `cwd` (default: process cwd).
 
     Returns:
-        Text of at most 25 lines ending in a newline, to be printed to stdout as is; "" when `cwd` is not inside
-        a house contest.
+        Text of at most 25 lines ending in a newline, to be printed to stdout as is; "" when `cwd` is neither in a
+        house contest nor in the house repo (or, in the house repo, when Signal is not configured).
     """
-    contest = guard.contest_root(Path(event.get("cwd") or os.getcwd()))
+    cwd = Path(event.get("cwd") or os.getcwd())
+    contest = guard.contest_root(cwd)
     if contest is None:
-        return ""
-    signal_lines = _signal_lines(contest)  # first, so the summary below already shows recorded answers
+        if house_root(cwd) is None:
+            return ""
+        signal_lines = _signal_lines(None, cwd)
+        return "\n".join(signal_lines) + "\n" if signal_lines else ""
+    signal_lines = _signal_lines(contest, cwd)  # first, so the summary below already shows recorded answers
     house = contest / ".house"
     spec = specmod.load_spec(house)
     lines = [f"house: contest {contest.name} · kind {spec.get('kind')} · mode {spec.get('mode')}"]
@@ -191,6 +258,6 @@ def session_start(event: dict) -> str:
             pass
     else:
         lines.append("last briefing: never")
-    lines += signal_lines[:5]
+    lines += signal_lines[:6]
     lines.append("If the human is just returning, start with protocols/briefing.md; answers: QUESTIONS.md.")
     return "\n".join(lines[:25]) + "\n"

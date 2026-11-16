@@ -293,7 +293,7 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
     hook = f"{root.resolve()}/bin/house-hook"
     return {
         "hooks": {
-            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep|Glob",
                             "hooks": [{"type": "command", "command": f"{hook} pre-tool"}]}],
             "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|Bash",
                              "hooks": [{"type": "command", "command": f"{hook} post-tool"}]}],
@@ -302,6 +302,39 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
         "permissions": {"allow": [f"Bash({root.resolve()}/bin/house:*)", f"Bash({root.resolve()}/bin/codex-task:*)",
                                   *(f"Bash({c})" for c in ALLOW_COMMANDS)]},
     }
+
+
+def house_settings(root: Path = HOUSE_ROOT) -> dict:
+    """House's hooks for the house repo itself: SessionStart (Signal summary) and PreToolUse (Signal guard rules).
+
+    No PostToolUse and no allowlist: the house repo has no contest files, and its permissions stay the user's.
+    """
+    full = claude_settings(root)
+    return {"hooks": {k: full["hooks"][k] for k in ("PreToolUse", "SessionStart")}, "permissions": {"allow": []}}
+
+
+def write_house_settings(root: Path = HOUSE_ROOT) -> Path:
+    """Write the house repo's `.claude/settings.local.json` with `house_settings`, keeping the user's entries.
+
+    Opt-in (`house setup --signal-hook`): only sessions in the house repo get the hook, never other projects on
+    the machine. The file is excluded from git.
+
+    Returns:
+        The path of the settings file.
+    """
+    path = root / ".claude/settings.local.json"
+    try:
+        existing = json.loads(path.read_text()) if path.exists() else {}
+    except ValueError:
+        path.rename(_backup_name(path))
+        existing = {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    merged = merge_settings(existing, house_settings(root))
+    if not merged["permissions"]["allow"] and "permissions" not in existing:
+        merged.pop("permissions")
+    path.write_text(json.dumps(merged, indent=2) + "\n")
+    gitutil.exclude(root, ".claude/settings.local.json")
+    return path
 
 
 def _is_house_hook(hook) -> bool:

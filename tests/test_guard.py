@@ -169,3 +169,75 @@ class GuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SignalRulesTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "home"
+        self.cwd = Path(self._tmp.name) / "repo"
+        self.cwd.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def check(self, tool, **args):
+        return guard.check_signal(tool, args, self.cwd, home=self.home)
+
+    def test_bare_signal_cli_blocked(self):
+        for cmd in ("signal-cli -a +1 receive", "~/.local/bin/signal-cli -a +1 send -m x",
+                    "foo && signal-cli -a +1 -o json receive --timeout 1", "timeout 5 signal-cli -a +1 receive",
+                    "cd /tmp\nsignal-cli -a +48 send --note-to-self -m hej"):
+            reason = self.check("Bash", command=cmd)
+            self.assertIsNotNone(reason, cmd)
+            self.assertIn("house signal", reason)
+
+    def test_any_signal_cli_run_blocked(self):
+        for cmd in ("signal-cli -a +1 -o json listGroups", "signal-cli -a +1 listContacts", "signal-cli --version"):
+            self.assertIsNotNone(self.check("Bash", command=cmd), cmd)
+
+    def test_allow_deny_from_agent_blocked(self):
+        for cmd in ("bin/house signal allow techarena_claude --alias t", "house signal deny techarena",
+                    'echo t | script -qc "house signal allow techarena --alias x" /dev/null',
+                    "unbuffer ~/house/bin/house signal allow x"):
+            reason = self.check("Bash", command=cmd)
+            self.assertIsNotNone(reason, cmd)
+            self.assertIn("human", reason)
+
+    def test_house_env_overrides_blocked(self):
+        for cmd in ("HOUSE_SIGNAL_CONFIG=/tmp/a.toml house signal pull", "export HOUSE_DATA_DIR=/tmp/x",
+                    "env HOUSE_NOTIFY_CONFIG=/tmp/n house inbox", "HOUSE_SIGNAL_ATTACHMENTS=/ house signal pull"):
+            self.assertIsNotNone(self.check("Bash", command=cmd), cmd)
+
+    def test_writes_to_house_data_blocked(self):
+        data = self.home / ".local/share/house"
+        self.assertIsNotNone(self.check("Bash", command="echo x >> ~/.local/share/house/groups.json"))
+        self.assertIsNotNone(self.check("Write", file_path=str(data / "signal/messages.jsonl"), content="x"))
+        self.assertIsNotNone(self.check("Edit", file_path=str(data / "groups.json")))
+        self.assertIsNone(self.check("Read", file_path=str(data / "signal/messages.jsonl")))
+
+    def test_read_signal_cli_dir_blocked(self):
+        d = self.home / ".local/share/signal-cli/attachments/x.jpg"
+        self.assertIsNotNone(self.check("Read", file_path=str(d)))
+        self.assertIsNotNone(self.check("Grep", pattern="x", path=str(d.parent)))
+        self.assertIsNotNone(self.check("Glob", pattern="*", path=str(self.home / ".local/share/signal-cli")))
+        self.assertIsNotNone(self.check("Bash", command="cat ~/.local/share/signal-cli/attachments/x"))
+        self.assertIsNotNone(self.check("Bash", command="ls $HOME/.local/share/signal-cli/data"))
+        self.assertIsNotNone(self.check("Edit", file_path=str(d)))
+
+    def test_store_copies_allowed(self):
+        self.assertIsNone(self.check("Read", file_path=str(self.home / ".local/share/house/signal/files/t/a.jpg")))
+
+    def test_write_config_blocked(self):
+        cfg = self.home / ".config/house/signal.toml"
+        self.assertIsNotNone(self.check("Write", file_path=str(cfg), content="x"))
+        self.assertIsNotNone(self.check("Edit", file_path=str(cfg)))
+        self.assertIsNotNone(self.check("Bash", command="echo x > ~/.config/house/signal.toml"))
+        self.assertIsNotNone(self.check("Bash", command="tee -a $HOME/.config/house/notify.env < x"))
+        self.assertIsNone(self.check("Read", file_path=str(cfg)))
+        self.assertIsNone(self.check("Bash", command="cat ~/.config/house/signal.toml"))
+
+    def test_house_signal_commands_allowed(self):
+        for cmd in ("bin/house signal read techarena", "house signal send techarena 'hej' --reply-to 5",
+                    "house signal pull", "grep -r signal-cli houselib/"):
+            self.assertIsNone(self.check("Bash", command=cmd), cmd)

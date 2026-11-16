@@ -1,8 +1,8 @@
 """`house` command line.
 
 Used by: the owner and every agent role through `bin/house <command>`. Commands: doctor, check, merge, guard,
-notify, ask, inbox, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
-name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
+notify, ask, inbox, signal, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is
+the contest name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
 
 Rules an agent should know:
 - Task status flow: todo → doing → review → merged → done, or blocked. Coders set `review`; only `house merge`
@@ -34,6 +34,7 @@ from . import (
     registry,
     scaffold,
     setup,
+    signalcli,
     yc,
 )
 
@@ -338,7 +339,9 @@ def cmd_inbox(args) -> int:
     scope = [contest_dir(args.name)] if args.name else None
     if scope and scope[0].resolve() not in {c.resolve() for c in everyone}:
         everyone.append(scope[0])
-    for line in inbox.process(everyone, from_config(), scope=scope) or ["no new answers"]:
+    from .signalread import reader_name
+    for line in inbox.process(everyone, from_config(), scope=scope, reader=reader_name(Path.cwd())) or \
+            ["no new answers"]:
         print(line)
     return 0
 
@@ -380,7 +383,7 @@ def cmd_night(args) -> int:
         print(f"✗ {p}")
     if problems:
         print("night not started")
-        notify.send(target, "🌙 noc nie wystartowała: " + "; ".join(problems)[:600])
+        notify.send(target, "🌙 noc nie wystartowała: " + "; ".join(problems)[:600], origin="night")
         return 1
     if args.dry_run:
         ready = night.pick_ready(target / ".house", set(), 99)
@@ -502,11 +505,16 @@ def cmd_setup(args) -> int:
     """Implement `house setup`: install user-level skills, fetch the Remotion skill, check tools, print next steps.
 
     Args:
-        args: Parsed arguments (none used).
+        args: Parsed arguments: `signal_hook` (only write the house repo's Signal session hook, then stop).
 
     Returns:
         0 always; missing tools and offline skips are reported as hints.
     """
+    if getattr(args, "signal_hook", False):
+        path = adapters.write_house_settings(HOUSE_ROOT)
+        print(f"✓ hook Signala w repo house: {path} (podsumowanie nowych wiadomości na starcie sesji, "
+              "blokada gołego signal-cli)")
+        return 0
     for name in setup.install_user_skills():
         print(f"✓ skill {name} → ~/.claude/skills/{name}")
     remotion = setup.fetch_remotion_skill()
@@ -527,6 +535,9 @@ def cmd_setup(args) -> int:
         print("\nnext steps:")
         for line in todo:
             print(f"  - {line}")
+    from .signal import read_config
+    if read_config():
+        print("Signal: `house setup --signal-hook` pokaże nowe wiadomości na starcie sesji w repo house")
     print("\nthen: bin/house sync && bin/house adapt <contest>")
     return 0
 
@@ -605,6 +616,8 @@ def build_parser() -> argparse.ArgumentParser:
     ib.add_argument("name", nargs="?", help="one contest (default: every running contest)")
     ib.set_defaults(func=cmd_inbox)
 
+    signalcli.register(sub)
+
     dl = sub.add_parser("deadlines", help="remind about / apply defaults of critical questions past their deadline")
     dl.add_argument("name", nargs="?")
     dl.set_defaults(func=cmd_deadlines)
@@ -653,6 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_sync)
 
     st = sub.add_parser("setup", help="prepare this machine: user skills, tool check, next steps")
+    st.add_argument("--signal-hook", action="store_true",
+                    help="only: add the Signal session hook to this repo's .claude/settings.local.json")
     st.set_defaults(func=cmd_setup)
 
     ad = sub.add_parser("adopt", help="attach an existing contest repo in place (symlink in contests/, adds .house/)")

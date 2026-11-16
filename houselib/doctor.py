@@ -7,7 +7,7 @@ agents can run (codex and local-model tiers fall back to other agents when missi
 import json
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -108,24 +108,57 @@ def alias_collisions(contests: list[Path]) -> dict[str, list[str]]:
     return {a: sorted(names) for a, names in seen.items() if len(names) > 1}
 
 
-def signal_status() -> list[str]:
+def _perm_problems() -> list[str]:
+    """Signal store files and dirs whose mode is not 0600 / 0700, and a `signal.toml` that others can read."""
+    from . import signalchats, signalstore
+    out = []
+    d = signalstore.store_dir()
+    for path in [d, *d.rglob("*"), signalchats.config_path()]:
+        if not path.exists() or path.is_symlink() or path.suffix == ".lock":
+            continue
+        want = 0o700 if path.is_dir() else 0o600
+        mode = path.stat().st_mode & 0o777
+        if mode & ~want:
+            out.append(f"! signal: uprawnienia {path}: {oct(mode)} (powinno być {oct(want)})")
+    return out
+
+
+def signal_status(now: datetime | None = None) -> list[str]:
     """Check the Signal setup for `house doctor`.
 
     Returns:
-        Human-readable lines: not configured, signal-cli missing, or OK plus a warning when `house inbox` has not
-        run for over 7 days.
+        Human-readable lines: not configured / signal-cli missing, else OK plus: last successful receive (warning
+        when never or over 7 days ago: Signal may unlink an idle device), the last receive error (an unlinked
+        device says how to relink), broken store lines, `signal.toml` problems and alias collisions, and store
+        files with permissions other than 0600/0700.
     """
-    import time
-
-    from . import notify
+    from . import signalchats, signalread, signalstore
     from .signal import from_config, read_config
     if not read_config():
         return ["- signal: not configured (~/.config/house/notify.env); notifications are off"]
     sig = from_config()
     if sig is None:
         return ["✗ signal: signal-cli not found (house setup installs it to ~/.local)"]
+    now = now or datetime.now().astimezone()
     lines = [f"✓ signal: {sig.binary}"]
-    marker = notify.data_dir() / "inbox_done.json"
-    if marker.exists() and time.time() - marker.stat().st_mtime > 7 * 86400:
-        lines.append("! signal: no `house inbox` for over 7 days; Signal may unlink an idle device")
+    state = signalstore.read_state()
+    ok = signalread.parse_iso(state.get("last_pull_ok"))
+    if ok is None:
+        lines.append("! signal: jeszcze nie było udanego odbioru (`house signal pull`)")
+    elif now - ok > timedelta(days=7):
+        lines.append(f"! signal: ostatni udany odbiór {ok:%Y-%m-%d}; Signal może odłączyć bezczynne urządzenie "
+                     "(`house signal pull`, timer: `house setup --signal-timer`)")
+    else:
+        lines.append(f"✓ signal: ostatni odbiór {signalread.fmt_time(ok, now)}")
+    err = state.get("last_pull_error")
+    if err and any(x in str(err).lower() for x in ("not registered", "unlinked", "not linked", "no such account")):
+        lines.append(f"✗ signal: urządzenie odłączone, `house setup` → ponowne linkowanie ({err})")
+    elif err:
+        lines.append(f"! signal: ostatni odbiór z błędem: {err}")
+    bad = signalstore.bad_lines()
+    if bad:
+        lines.append("! signal: uszkodzone linie magazynu: " + ", ".join(map(str, bad[:10]))
+                     + " (czytelnicy je pomijają)")
+    lines += [f"! signal: {p}" for p in signalchats.collisions()]
+    lines += _perm_problems()
     return lines

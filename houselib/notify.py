@@ -1,7 +1,7 @@
 """Notifications: one Signal message to the owner's Note to Self and to the contest's team group.
 
-Every sent message is remembered (`sent.jsonl`: timestamp → contest, question) so a quote-reply can be matched
-to its question. No Signal configured → nothing happens, nothing fails.
+Every sent message is logged in the message store by `Signal.send` (an `out` event whose `meta` names contest and
+question) so a quote-reply can be matched to its question. No Signal configured → nothing happens, nothing fails.
 
 Used by `house notify "<text>"` (free text), `house ask [Q-###]` (questions from .house/QUESTIONS.md), the
 PostToolUse hook (sends new open questions right after QUESTIONS.md is edited) and `inbox` (replies to answers).
@@ -12,7 +12,7 @@ Agents normally just add an `open` entry to QUESTIONS.md and let the hook send i
 * Recipients: the owner's Note to Self always, plus the Signal group named by spec `notify.signal_group`
   (when set and found). A missing or ambiguous group only produces a warning.
 * Files in the data dir (~/.local/share/house, or $HOUSE_DATA_DIR; created on demand, JSON lines chmod 600):
-  `sent.jsonl` (ts, contest, question, chat), `groups.json` (cache: group name → id).
+  `groups.json` (cache: group name → id); the message store lives in `signal/` (see `signalstore`).
 * Per contest, `.house/state.json` records `sent_questions` (question id → ISO time of sending) so a question
   is sent once and `questions.due` can compute half-time reminders.
 * Nothing here raises when Signal is off or unreachable; check the returned lists instead.
@@ -51,7 +51,7 @@ def contest_name(contest: Path) -> str:
         contest: Path to the contest repository (the directory that holds `.house`).
 
     Returns:
-        Registry name, the key stored in `sent.jsonl` and used to route quote-replies.
+        Registry name, stored as `meta.contest` of sent messages and used to route quote-replies.
     """
     return registry.name_for(contest)
 
@@ -71,14 +71,6 @@ def alias(contest: Path) -> str:
 def prefix(contest: Path) -> str:
     """Return the message prefix `🤖 [<alias>]` that marks a message as coming from house for this contest."""
     return f"🤖 [{alias(contest)}]"
-
-
-def _append(name: str, record: dict) -> None:
-    """Append `record` as one JSON line to `name` in the data dir and restrict the file to the owner (0600)."""
-    path = data_dir() / name
-    with path.open("a") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    path.chmod(0o600)
 
 
 def resolve_group(sig, name: str) -> tuple[str | None, str | None]:
@@ -110,11 +102,11 @@ def resolve_group(sig, name: str) -> tuple[str | None, str | None]:
 
 
 def send(contest: Path, text: str, question: str | None = None, sig=None,
-         group: bool = True) -> tuple[list[int], list[str]]:
+         group: bool = True, origin: str = "notify") -> tuple[list[int], list[str]]:
     """Send `text` for a contest to the owner's Note to Self and, if configured, to the contest's group.
 
-    The body is `prefix(contest) + " " + text`. Each delivered message is logged in `sent.jsonl` so a later
-    quote-reply can be routed back to `question`.
+    The body is `prefix(contest) + " " + text`. `Signal.send` logs each message in the store with `meta`
+    (origin, contest, question) so a later quote-reply can be routed back to `question`.
 
     Args:
         contest: Path to the contest repository; selects alias and group from its spec.
@@ -122,6 +114,7 @@ def send(contest: Path, text: str, question: str | None = None, sig=None,
         question: Question id (e.g. "Q-007") this message asks, stored for reply routing. Defaults to None.
         sig: A `Signal` client. Defaults to None, meaning `from_config()` (the machine's Signal config).
         group: False to skip the team group and write to Note to Self only. Defaults to True.
+        origin: Who sends, stored in the message store (`notify`, `ask`, `deadline`, `night`). Defaults to "notify".
 
     Returns:
         (timestamps, warnings): Signal timestamps of delivered messages (empty if nothing was sent) and
@@ -143,12 +136,12 @@ def send(contest: Path, text: str, question: str | None = None, sig=None,
             warnings.append(warning)
     sent = []
     for chat, gid in targets:
-        ts = sig.send(body, group_id=gid)
+        ts = sig.send(body, group_id=gid,
+                      meta={"origin": origin, "contest": contest_name(contest), "question": question})
         if ts is None:
             warnings.append(f"sending to {chat} failed")
             continue
         sent.append(ts)
-        _append("sent.jsonl", {"ts": ts, "contest": contest_name(contest), "question": question, "chat": chat})
     return sent, warnings
 
 
@@ -183,7 +176,7 @@ def ask(contest: Path, q: questions.Question, sig=None) -> list[int]:
     Returns:
         Signal timestamps of the delivered messages; empty when nothing was sent (state is left untouched).
     """
-    sent, _ = send(contest, question_message(q), question=q.id, sig=sig)
+    sent, _ = send(contest, question_message(q), question=q.id, sig=sig, origin="ask")
     if sent:
         state_path = contest / ".house/state.json"
         try:

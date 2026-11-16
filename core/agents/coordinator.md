@@ -31,6 +31,8 @@ Your job:
 - Decide small things yourself and log anything that changes direction in `DECISIONS.md`. Hard decisions go to
   `QUESTIONS.md` per `protocols/questions.md` and `spec.mode`. Never stop working while waiting for an answer.
 - Watch for stagnation (`protocols/stagnation.md`) and for local↔leaderboard disagreement (`playbooks/optimize.md`).
+- Team chat: `house signal read|unread|show`; reply with `house signal send <chat> "…" [--reply-to TS]`. Never call
+  `signal-cli` or `Signal.receive` (rules: `protocols/questions.md`).
 
 Languages: human-facing files (`PROGRESS.md`, `QUESTIONS.md`, `DECISIONS.md`, briefing) in Polish; reports and
 public artifacts in English (or `spec.languages.public`). Append one Polish line to `PROGRESS.md` per finished task.

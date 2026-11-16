@@ -453,6 +453,111 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
     return None
 
 
+SIGNAL_CLI_DIR = ".local/share/signal-cli"
+HOUSE_CONFIG_DIR = ".config/house"
+SIGNAL_CLI_REASON = ("running `signal-cli` directly bypasses the Signal store (received messages would be lost, sent "
+                     "ones missing from the history, private chats exposed); use `house signal send|pull|read|groups`")
+HUMAN_REASON = ("adding or removing a Signal group is the human's decision: ask Wojtek to run "
+                "`house signal allow|deny …` in his own terminal")
+ENV_REASON = ("HOUSE_* path overrides (HOUSE_SIGNAL_CONFIG, HOUSE_NOTIFY_CONFIG, HOUSE_DATA_DIR, "
+              "HOUSE_SIGNAL_ATTACHMENTS) are for tests only")
+DATA_REASON = "house data (~/.local/share/house: the Signal store, caches, cursors) is written only by house commands"
+HOUSE_DATA_DIR = ".local/share/house"
+HOUSE_ENV_RE = re.compile(r"\bHOUSE_(SIGNAL_CONFIG|NOTIFY_CONFIG|DATA_DIR|SIGNAL_ATTACHMENTS)=")
+ALLOW_RE = re.compile(r"house\S*\s+signal\s+(allow|deny)\b")
+INNER_SIGNAL_CLI_RE = re.compile(r"(^|[;&|(`]|\$\()\s*(\S*/)?signal-cli(\s|$)")
+WRAPPERS = {"timeout", "env", "nice", "nohup", "sudo", "stdbuf", "exec", "command", "unbuffer", "script", "xargs",
+            "time", "setsid"}
+SIGNAL_FILES_REASON = ("signal-cli's files mix private chats with groups; agents read only the copies from allowed "
+                       "chats in ~/.local/share/house/signal/files/ (`house signal read` shows their paths)")
+CONFIG_REASON = ("house configuration (~/.config/house) is changed only by the human; groups: `house signal "
+                 "allow/deny` in a terminal")
+READ_TOOLS = {"Read", "Grep", "Glob"}
+
+
+def _expand(path: str, base: Path, home: Path) -> Path:
+    """Resolve a tool or shell path: `~`, `$HOME` and `${HOME}` become `home`; relative paths join `base`."""
+    for prefix in ("~", "$HOME", "${HOME}"):
+        if path == prefix or path.startswith(prefix + "/"):
+            path = str(home) + path[len(prefix):]
+            break
+    p = Path(path)
+    return (p if p.is_absolute() else base / p).resolve()
+
+
+def _under(path: Path, root: Path) -> bool:
+    return path == root or path.is_relative_to(root)
+
+
+def check_signal(tool: str, args: dict, cwd: Path, home: Path | None = None) -> str | None:
+    """Signal rules for agents, applied wherever the hook runs (contests and the house repo).
+
+    Refuses: running `signal-cli` at all (use `house signal …`, which logs, stores and filters private chats);
+    `house signal allow|deny` (only the human widens the allowed set, in their own terminal); `HOUSE_*` path
+    overrides (test-only); any tool touching signal-cli's data dir (`~/.local/share/signal-cli`, where files from
+    private chats land); writes to `~/.config/house/` and `~/.local/share/house/` (Edit-type tools, or shell
+    writes as `check_bash` understands them). Best effort, like `check_bash`.
+
+    Args:
+        tool: Claude Code tool name (Bash, Read, Grep, Glob, Edit, Write, MultiEdit, NotebookEdit).
+        args: The tool input (`command`, `file_path`, `notebook_path` or `path`).
+        cwd: Directory relative paths are resolved against.
+        home: Home directory. Defaults to `Path.home()`.
+
+    Returns:
+        A reason to refuse, or None.
+    """
+    home = (home or Path.home()).resolve()
+    cli_dir, config_dir, data_dir = home / SIGNAL_CLI_DIR, home / HOUSE_CONFIG_DIR, home / HOUSE_DATA_DIR
+    if tool == "Bash":
+        command = str(args.get("command") or "")
+        if SIGNAL_CLI_DIR in command:
+            return SIGNAL_FILES_REASON
+        if ALLOW_RE.search(command):
+            return HUMAN_REASON
+        if HOUSE_ENV_RE.search(command):
+            return ENV_REASON
+        for seg in _segments(command):
+            if _runs_signal_cli(seg):
+                return SIGNAL_CLI_REASON
+            for target, base in _written_paths(seg, cwd):
+                full = _expand(target, base, home)
+                if _under(full, config_dir):
+                    return CONFIG_REASON
+                if _under(full, data_dir):
+                    return DATA_REASON
+        return None
+    path = args.get("file_path") or args.get("notebook_path") or args.get("path")
+    if not path:
+        return None
+    full = _expand(str(path), cwd, home)
+    if _under(full, cli_dir):
+        return SIGNAL_FILES_REASON
+    if tool not in READ_TOOLS and _under(full, config_dir):
+        return CONFIG_REASON
+    if tool not in READ_TOOLS and _under(full, data_dir):
+        return DATA_REASON
+    return None
+
+
+def _runs_signal_cli(seg: list[str]) -> bool:
+    """Tell whether a simple command runs signal-cli: as the command (after `VAR=x` and wrappers such as
+    `timeout 5`, `env`, `script -qc`), or inside a quoted command string (`bash -c "signal-cli …"`)."""
+    i = 0
+    while i < len(seg):
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]):
+            i += 1
+        elif Path(seg[i]).name in WRAPPERS:
+            i += 1
+            while i < len(seg) and (seg[i].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", seg[i])):
+                i += 1
+        else:
+            break
+    if i < len(seg) and Path(seg[i]).name == "signal-cli":
+        return True
+    return any(" " in t and INNER_SIGNAL_CLI_RE.search(t) for t in seg)
+
+
 def _sha(path: Path) -> str | None:
     """Return the SHA-256 hex digest of the file at `path`, or None when it is not a file."""
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
