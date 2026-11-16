@@ -6,6 +6,7 @@ The allowed set is the union of: Note to Self (always, alias `self`); the groups
 Only a human widens the set (`house signal allow`, which needs a terminal).
 """
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,3 +77,32 @@ def alias_of(chat_id: str) -> str | None:
     """Alias of an allowed chat, from configuration and cache only (never runs signal-cli); None if not allowed."""
     chat = allowed(None).get(chat_id)
     return chat.alias if chat else None
+
+
+PHONE_RE = re.compile(r"^\+?\d[\d\s-]{5,}$")
+
+
+def resolve(name: str, sig=None) -> Chat:
+    """Find an allowed chat by alias (case-insensitive) or "self".
+
+    Args:
+        name: Alias as shown by `house signal groups`, or "self".
+        sig: A `Signal` client to resolve contest groups not cached yet; None uses the cache only.
+
+    Returns:
+        The `Chat`.
+
+    Raises:
+        ValueError: (Polish message) for `all`, a phone number (private chats are not supported) or an unknown
+            alias.
+    """
+    if name.lower() == "all":
+        raise ValueError("`all` to nie jedna rozmowa: podaj alias albo self")
+    if PHONE_RE.match(name.strip()):
+        raise ValueError("wiadomości prywatne (DM) nie są obsługiwane: podaj alias grupy albo self")
+    chats = allowed(sig)
+    for chat in chats.values():
+        if chat.alias.lower() == name.lower():
+            return chat
+    names = ", ".join(sorted(c.alias for c in chats.values()))
+    raise ValueError(f"nieznana rozmowa `{name}`; dozwolone: {names} (lista: house signal groups)")
