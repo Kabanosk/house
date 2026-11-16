@@ -68,7 +68,7 @@ class FakeSignal:
         return self.groups
 
 
-class InboxTest(unittest.TestCase):
+class InboxCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         tmp = Path(self._tmp.name)
@@ -103,6 +103,7 @@ class InboxTest(unittest.TestCase):
         log = inbox.process(contests or [self.fr, self.fi], sig)
         return sig, log
 
+class InboxTest(InboxCase):
     def test_quote_reply_in_note_to_self(self):
         self.sent_question(self.fr, "Q-001", 100)
         sig, _ = self.run_inbox([self_reply(200, "B", quote=100)])
@@ -308,3 +309,77 @@ class InboxTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReactionAnswerTest(InboxCase):
+    QD = ("# Q\n\n## Q-001 [open] Finalne zgłoszenie?\n- **Opcje:** A) x B) y\n- **Domyślnie:** B\n"
+          "- **Odpowiedź:** —\n\n## Q-002 [open] Puszczamy sweep na noc?\n- **Domyślnie:** tak\n- **Odpowiedź:** —\n"
+          "\n## Q-003 [open] Batch size?\n- **Odpowiedź:** —\n")
+
+    def setUp(self):
+        super().setUp()
+        (self.fr / ".house/QUESTIONS.md").write_text(self.QD)
+        self.sent_question(self.fr, "Q-001", 101)
+        self.sent_question(self.fr, "Q-002", 102)
+        self.sent_question(self.fr, "Q-003", 103)
+
+    def react(self, ts, emoji, target, remove=False, gid="self", name="Wojciech Fiołka", uuid="u-own"):
+        from tests import signal_fixtures as fx
+        if gid == "self":
+            return fx.reaction(ts, emoji, target, OWN, gid="self", remove=remove)
+        return fx.reaction(ts, emoji, target, OWN, gid=gid, remove=remove, name=name, uuid=uuid)
+
+    def test_reaction_variants(self):
+        ra = inbox.reaction_answer
+        self.assertEqual([ra(e) for e in ("👍", "👍🏽", "👎🏿", "❤️", "❤", "❤️‍🔥", "❤️‍🩹", "💔", "🩷", "🧡", "😂", "")],
+                         ["yes", "yes", "no", "default", "default", "default", "default", "default", "default",
+                          "default", None, None])
+
+    def test_thumb_yes_no(self):
+        sig, _ = self.run_inbox([self.react(300, "👍🏻", 102), self.react(301, "👎", 103)])
+        self.assertIn("- **Odpowiedź:** tak (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+        self.assertIn("- **Odpowiedź:** nie (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+        self.assertIn((None, "🤖 [fr] ✓ Q-002: tak (Wojciech Fiołka)"), sig.sent)
+
+    def test_thumb_on_options_question_replies(self):
+        sig, _ = self.run_inbox([self.react(300, "👍", 101)])
+        self.assertIn("[open] Finalne", self.qtext(self.fr))
+        self.assertEqual(sig.sent, [(None, "🤖 [fr] Q-001: odpowiedz literą albo ❤ = domyślna")])
+
+    def test_heart_takes_default(self):
+        self.run_inbox([self.react(300, "❤️", 101)])
+        self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+
+    def test_heart_without_default_replies(self):
+        sig, _ = self.run_inbox([self.react(300, "💙", 103)])
+        self.assertIn("[open] Batch", self.qtext(self.fr))
+        self.assertEqual(sig.sent, [(None, "🤖 [fr] Q-003: brak domyślnej, odpowiedz tekstem")])
+
+    def test_removed_before_handling_cancels(self):
+        sig, _ = self.run_inbox([self.react(300, "👍", 102), self.react(301, "👍", 102, remove=True)])
+        self.assertIn("[open] Puszczamy", self.qtext(self.fr))
+        self.assertEqual(sig.sent, [])
+
+    def test_changed_reaction_counts_last(self):
+        self.run_inbox([self.react(300, "👎", 102), self.react(301, "❤️", 102)])
+        self.assertIn("- **Odpowiedź:** tak (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+
+    def test_removed_after_handling_noop(self):
+        self.run_inbox([self.react(300, "👍", 102)])
+        sig, _ = self.run_inbox([self.react(301, "👍", 102, remove=True)])
+        self.assertIn("- **Odpowiedź:** tak", self.qtext(self.fr))
+        self.assertEqual(sig.sent, [])
+
+    def test_reaction_in_group(self):
+        self.sent_question(self.fr, "Q-002", 202, chat="gT")
+        sig, _ = self.run_inbox([self.react(300, "👍", 202, gid="gT", name="Ola", uuid="u-ola")])
+        self.assertIn("- **Odpowiedź:** tak (Ola, Signal)", self.qtext(self.fr))
+        self.assertIn(("gT", "🤖 [fr] ✓ Q-002: tak (Ola)"), sig.sent)
+
+    def test_first_answer_wins_across_text_and_reaction(self):
+        sig, _ = self.run_inbox([self_reply(400, "nie", quote=102), self.react(300, "👍", 102)])
+        self.assertIn("- **Odpowiedź:** tak", self.qtext(self.fr))
+
+    def test_reaction_to_other_message_ignored(self):
+        sig, _ = self.run_inbox([self.react(300, "👍", 999)])
+        self.assertEqual(sig.sent, [])

@@ -34,6 +34,19 @@ from . import spec as specmod
 ANSWER_RE = re.compile(r"^\s*(?:(?P<alias>[A-Za-z0-9][A-Za-z0-9-]*)\s+)?Q-?0*(?P<num>\d{1,4})\s*:\s*"
                        r"(?P<answer>.+?)\s*$", re.IGNORECASE | re.DOTALL)
 SKIPPED_LOCKED = "another `house inbox` is running; skipped"
+HEARTS = set("❤❣💔💓💕💖💗💘💙💚💛💜💝💞💟🖤🤍🤎🧡🩵🩶🩷")
+SKIN_TONES = range(0x1F3FB, 0x1F400)
+
+
+def reaction_answer(emoji: str) -> str | None:
+    """Meaning of a reaction under a question: "yes" (👍), "no" (👎), "default" (any heart), else None.
+
+    Variation selectors (U+FE0F), zero-width joiners and skin tones are ignored, so 👍🏽 is 👍 and ❤️‍🔥 is a heart.
+    """
+    base = "".join(ch for ch in emoji or "" if ch not in "\ufe0f\u200d" and ord(ch) not in SKIN_TONES)
+    if any(ch in HEARTS for ch in base):
+        return "default"
+    return {"👍": "yes", "👎": "no"}.get(base)
 
 
 @dataclass
@@ -47,6 +60,7 @@ class Message:
         text: Message body.
         quote_ts: Timestamp of the message this one quotes (a quote-reply), else None.
         key: The store key `chat:author:ts` (marks it as handled).
+        reaction: The emoji when this is a reaction to a question (`quote_ts` is then the question message).
     """
 
     ts: int
@@ -55,6 +69,7 @@ class Message:
     text: str
     quote_ts: int | None = None
     key: str = ""
+    reaction: str | None = None
 
 
 def _end_of(value) -> datetime | None:
@@ -144,6 +159,21 @@ def route(m: Message, contests: list[Path], by_group: dict[str, list[Path]], sen
     return None
 
 
+def _reaction_text(contest: Path, qid: str, emoji: str) -> tuple[str | None, str | None]:
+    """Answer text for a reaction under question `qid`: (text, None), (None, reply explaining why not) or
+    (None, None) for a reaction that means nothing (e.g. 😂) or a question that is gone."""
+    meaning = reaction_answer(emoji)
+    path = contest / ".house/QUESTIONS.md"
+    q = next((q for q in questions.parse(path.read_text()) if q.id == qid), None) if path.exists() else None
+    if meaning is None or q is None:
+        return None, None
+    if meaning == "default":
+        return (q.default, None) if q.default else (None, "brak domyślnej, odpowiedz tekstem")
+    if q.options:
+        return None, "odpowiedz literą albo ❤ = domyślna"
+    return ("tak" if meaning == "yes" else "nie"), None
+
+
 def _reply(sig, contest: Path | None, chat: str, text: str) -> None:
     """Send `text` back into `chat` ("self" or a group id), prefixed for the contest or `🤖 [house]` if None."""
     prefix = notify.prefix(contest) if contest else "🤖 [house]"
@@ -176,6 +206,13 @@ def _handle(m: Message, sig, contests, scope, by_group, sent) -> tuple[bool, str
     contest, qid, text = routed
     if contest not in scope:
         return False, None, None
+    if m.reaction is not None:
+        text, why = _reaction_text(contest, qid, m.reaction)
+        if why:
+            _reply(sig, contest, m.chat, f"{qid}: {why}")
+            return True, f"{notify.contest_name(contest)} {qid}: reakcja {m.reaction} bez odpowiedzi ({why})", None
+        if text is None:
+            return True, None, None
     did = questions.answer(contest / ".house", qid, text, m.sender, "Signal")
     if did:
         _reply(sig, contest, m.chat, f"✓ {qid}: {questions.clean_answer(text)} ({m.sender})")
@@ -206,6 +243,30 @@ def _pending(events: list[dict], chats: set[str], done: dict) -> tuple[list[Mess
         elif e.get("kind") == "edit" and (e.get("target") or {}).get("ts") is not None:
             edits.append(e)
     return msgs, edits
+
+
+def _reactions(events: list[dict], chats: set[str], done: dict) -> tuple[list[Message], list[str]]:
+    """Unhandled reactions as answer candidates, and keys of reactions that are settled without an answer.
+
+    Per sender and target only the latest unhandled reaction counts; when it is a removal, the sender's pending
+    reactions to that target are cancelled.
+    """
+    from .signalstore import latest
+    last: dict[tuple, list[dict]] = {}
+    for e in sorted(latest(events), key=lambda e: e.get("ts") or 0):
+        if (e.get("kind") == "reaction" and e.get("chat") in chats and e.get("dir") in ("in", "own")
+                and e.get("key") not in done and (e.get("target") or {}).get("ts") is not None):
+            last.setdefault((_author_prefix(str(e["key"])), e["target"]["ts"]), []).append(e)
+    out, settled = [], []
+    for (_, target), items in last.items():
+        final = items[-1]
+        settled += [str(e["key"]) for e in items[:-1]]
+        if (final.get("reaction") or {}).get("remove"):
+            settled.append(str(final["key"]))
+            continue
+        out.append(Message(int(final["ts"]), str(final["chat"]), str((final.get("sender") or {}).get("name") or "?"),
+                           "", int(target), str(final["key"]), str((final.get("reaction") or {}).get("emoji") or "")))
+    return out, settled
 
 
 def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeout: int = 1,
@@ -253,8 +314,12 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeo
                                "question": (e.get("meta") or {}).get("question")}
                 for e in events if e.get("dir") == "out" and e.get("ts") and (e.get("meta") or {}).get("question")}
         in_scope = [c for c in contests if Path(c).resolve() in scope_set]
-        msgs, edits = _pending(events, {signalchats.SELF, *by_group}, done)
+        answering = {signalchats.SELF, *by_group}
+        msgs, edits = _pending(events, answering, done)
         by_key = {m.key: m for m in msgs}
+        reactions, settled = _reactions(events, answering, done)
+        for key in settled:
+            done[key] = None
         for e in edits:
             original = f"{_author_prefix(str(e['key']))}:{e['target']['ts']}"
             if original in by_key:
@@ -262,7 +327,7 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeo
             elif done.get(original):
                 log.append(f"{str(done[original]).split()[-1]}: odpowiedź edytowana po zapisaniu, decyzja bez zmian")
             done[str(e["key"])] = None
-        for m in msgs:
+        for m in sorted([*msgs, *reactions], key=lambda m: m.ts):
             try:
                 finished, line, answered = _handle(m, sig, contests, in_scope, by_group, sent)
             except Exception as e:  # noqa: BLE001 — one bad message must never block the inbox

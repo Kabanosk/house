@@ -1,8 +1,8 @@
 """`house` command line.
 
 Used by: the owner and every agent role through `bin/house <command>`. Commands: doctor, check, merge, guard,
-notify, ask, inbox, signal, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
-name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
+notify, ask, inbox, signal, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is
+the contest name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
 
 Rules an agent should know:
 - Task status flow: todo → doing → review → merged → done, or blocked. Coders set `review`; only `house merge`
