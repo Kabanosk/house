@@ -16,6 +16,7 @@ Rules an agent should know:
   `scoring.direction` (`max`/`min`), else from the words max/min in `scoring.metric`.
 - An experiment that changes the scorer or a frozen acceptance test is a `crash` ("tampered"). Scores are
   always computed with the contest checkout's current scorer; rows scored by an older scorer are not compared.
+- A row reproduces with its `commit` plus its `command` (a sweep changes only the command).
 - Statuses: `new` (created), `keep`, `revert`, `crash`, `timeout`. Ties are `revert`. Every scored commit stays
   reachable as `refs/exp/E-###`; `keep` worktrees stay (their outputs may be submitted), the others are removed.
 - Data outside git: list it in `exp.shared` in the spec and it is symlinked into every experiment worktree.
@@ -27,6 +28,7 @@ import fcntl
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -36,7 +38,8 @@ from pathlib import Path
 from . import checks, gitutil, guard
 from . import spec as specmod
 
-COLUMNS = ["id", "parent", "commit", "idea_id", "budget", "duration", "score", "status", "scorer", "time", "note"]
+COLUMNS = ["id", "parent", "commit", "idea_id", "budget", "duration", "score", "status", "scorer", "time", "note",
+           "command"]
 SCORED = ("keep", "revert")
 _BUDGET_PART = re.compile(r"(\d+)([smh])")
 _NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
@@ -463,7 +466,8 @@ def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None
     env = {"HOUSE_EXP": exp_id, "HOUSE_CONTEST": str(contest)}
     cmd = _command_text(command)
     log = _state_dir(contest) / f"{exp_id}.log"
-    log_parts = [f"$ {cmd if isinstance(cmd, str) else ' '.join(cmd)}", f"budget: {budget} s"]
+    shown = cmd if isinstance(cmd, str) else shlex.join(cmd)
+    log_parts = [f"$ {shown}", f"budget: {budget} s"]
     score = parent_score = None
     duration = 0.0
     changed = set(_git(contest, "diff", "--name-only", parent_commit, commit).stdout.split())
@@ -496,7 +500,7 @@ def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None
         for row in rows:
             if row["id"] == exp_id:
                 row.update(commit=commit, budget=str(budget), duration=f"{duration:.1f}", status=status,
-                           score="" if score is None else repr(score), scorer=current, note=note)
+                           score="" if score is None else repr(score), scorer=current, note=note, command=shown)
         _write(contest, rows)
         checks._git_commit(contest / ".house", [_csv_path(contest)],
                            f"chore(exp): {exp_id} {status}" + ("" if score is None else f" {score}"))

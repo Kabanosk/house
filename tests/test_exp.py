@@ -1,5 +1,6 @@
 """`house exp`: budgeted experiments scored by the local scorer, kept or reverted, recorded as a tree."""
 import io
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -19,7 +20,8 @@ SCORER = "print(f\"score: {float(open('out.txt').read())}\")\n"
 
 def row(i, status, score="", scorer="s1", parent=""):
     return {"id": f"E-{i:03d}", "parent": parent, "commit": f"c{i}", "idea_id": "", "budget": "300",
-            "duration": "1", "score": score, "status": status, "scorer": scorer, "time": "", "note": ""}
+            "duration": "1", "score": score, "status": status, "scorer": scorer, "time": "", "note": "",
+            "command": ""}
 
 
 class ParsingTest(unittest.TestCase):
@@ -120,6 +122,12 @@ class RunTest(ContestCase):
         self.assertIn("E-001", git(self.c, "log", "-1", "--format=%s", "--", ".house/experiments.csv"))
         self.assertEqual(git(self.c, "status", "--porcelain", "--", ".house").strip(), "")
         self.assertTrue(res.log.is_file())
+        self.assertEqual(r["command"], "echo 0.5 > out.txt")
+
+    def test_sweep_rows_record_their_command(self):
+        cmd = ["python3", "-c", "open('out.txt', 'w').write('0.5')"]
+        exp.run_new(self.c, "best", cmd)
+        self.assertEqual(shlex.split(self.rows()["E-001"]["command"]), cmd)
 
     def test_better_child_keep_worse_revert(self):
         exp.run_new(self.c, "best", "echo 0.5 > out.txt")
