@@ -16,6 +16,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -365,3 +367,131 @@ def approval(event: dict, store: JobStore) -> str | None:
     target = (event.get("target") or {}).get("ts")
     job = next((j for j in store.all() if j.status == "waiting-approval" and j.approve_ts == target), None)
     return job.id if job else None
+
+
+# --- workspace and launch -----------------------------------------------------------------------------------------
+
+BUDGET_USD = 10                                    # Q5: per job (--max-budget-usd)
+ALLOWED_DOMAINS = ["pypi.org", "files.pythonhosted.org", "download.pytorch.org"]  # Q3
+RUNTIME_MAX_S = 7200
+CONTEXT_MESSAGES = 30
+PROMPT_TEMPLATE = "core/templates/signal-agent-prompt.md"
+
+
+def job_files(job: Job) -> dict[str, Path]:
+    """House-side files of a job (outside the worktree, unreadable for the agent): prompt, settings, log."""
+    d = JobStore().dir / job.id
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    return {"dir": d, "prompt": d / "prompt.md", "settings": d / "settings.json", "log": d / "log.jsonl",
+            "err": d / "stderr.log"}
+
+
+def worktree_of(job: Job) -> Path:
+    return Path(job.repo) / ".worktrees" / f"signal-{job.id}"
+
+
+def prepare(job: Job) -> Path:
+    """Create the job's worktree on branch `signal/<id>` with `.house-job/` (request, context, files, out/).
+
+    The context holds only this chat (last 30 messages); the attachments of the request message are copied to
+    `.house-job/in/`. `.house-job/` and `.worktrees/` are excluded from git.
+    """
+    from . import gitutil, signalread, signalstore
+    repo, wt, branch = Path(job.repo), worktree_of(job), f"signal/{job.id}"
+    gitutil.exclude(repo, ".worktrees/")
+    if not wt.exists():
+        subprocess.run(["git", "worktree", "add", "-q", "-b", branch, str(wt), "HEAD"], cwd=repo, check=True,
+                       capture_output=True, text=True)
+    gitutil.exclude(wt, ".house-job/")
+    jd = wt / ".house-job"
+    for sub in ("in", "out"):
+        (jd / sub).mkdir(parents=True, exist_ok=True)
+    events = [e for e in signalstore.iter_events(raw=False) if e.get("chat") == job.chat]
+    now = datetime.now().astimezone()
+    view = signalread.View(events, now)
+    msgs = [m for m in view.msgs if (m.ts or 0) <= job.ts][-CONTEXT_MESSAGES:]
+    (jd / "context.md").write_text("\n".join(line for m in msgs for line in view.line(m)) + "\n")
+    (jd / "request.md").write_text(f"Autor: {job.author_name}\n\n{job.text}\n")
+    trigger = next((e for e in signalstore.latest(events) if e.get("key") == job.key), None)
+    for a in (trigger or {}).get("attachments") or []:
+        src = Path(str(a.get("path") or ""))
+        if a.get("path") and src.is_file():
+            shutil.copyfile(src, jd / "in" / Path(str(a.get("filename") or src.name)).name)
+    return wt
+
+
+def job_env(job: Job, wt: Path, claude: str) -> dict[str, str]:
+    """The complete environment of the agent process (started with `env -i`): nothing from the owner's env."""
+    return {"PATH": f"{Path(claude).parent}:/usr/local/bin:/usr/bin:/bin", "HOME": str(Path.home()),
+            "LANG": "C.UTF-8", "HOUSE_AGENT_JOB": job.id, "HOUSE_AGENT_WORKTREE": str(wt),
+            "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+
+
+def job_settings(job: Job, wt: Path) -> dict:
+    """Claude Code settings for the job: `dontAsk`, no web or MCP tools, sandbox that fails closed, job hook."""
+    from . import HOUSE_ROOT
+    return {
+        "permissions": {"defaultMode": "dontAsk",
+                        "allow": ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+                        "deny": ["WebFetch", "WebSearch", "mcp__*", "Read(~/.ssh/**)", "Read(~/.config/**)",
+                                 "Read(~/.local/share/**)", "Read(~/.claude/**)"]},
+        "sandbox": {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
+                    "autoAllowBashIfSandboxed": True,
+                    "filesystem": {"denyRead": ["~/"], "allowRead": [str(wt)], "allowWrite": [str(wt)]},
+                    "network": {"allowedDomains": list(ALLOWED_DOMAINS)}},
+        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": f"{Path(HOUSE_ROOT).resolve()}/bin/house-hook pre-tool"}]}]},
+    }
+
+
+def job_command(job: Job, wt: Path, claude: str) -> list[str]:
+    """`systemd-run --user` command for the job: one transient unit, 2 h limit, whole cgroup killed on stop."""
+    files = job_files(job)
+    env = [f"{k}={v}" for k, v in job_env(job, wt, claude).items()]
+    return ["systemd-run", "--user", "--unit", f"house-agent-{job.id}", "--collect", "--quiet",
+            "-p", f"RuntimeMaxSec={RUNTIME_MAX_S}", "-p", "KillMode=control-group", "-p", f"WorkingDirectory={wt}",
+            "-p", f"StandardInput=file:{files['prompt']}", "-p", f"StandardOutput=append:{files['log']}",
+            "-p", f"StandardError=append:{files['err']}",
+            "--", "/usr/bin/env", "-i", *env,
+            claude, "-p", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+            "--setting-sources", "local", "--settings", str(files["settings"]), "--strict-mcp-config",
+            "--disallowedTools", "WebFetch", "WebSearch", "mcp__*", "--max-budget-usd", str(BUDGET_USD),
+            "--output-format", "stream-json", "--verbose"]
+
+
+def _prompt(job: Job, wt: Path) -> str:
+    from . import HOUSE_ROOT
+    jd = wt / ".house-job"
+    files = ", ".join(sorted(p.name for p in (jd / "in").iterdir())) or "brak"
+    return (Path(HOUSE_ROOT) / PROMPT_TEMPLATE).read_text().format(
+        repo=Path(job.repo).name, branch=f"signal/{job.id}", author=job.author_name, request=job.text, files=files,
+        quote="")
+
+
+def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | None:
+    """Prepare the workspace and start the job's unit; returns the unit name, or None (job marked failed)."""
+    store = JobStore()
+    claude = claude or shutil.which("claude")
+    if not claude:
+        store.update(job.id, status="failed", error="brak `claude` na tej maszynie")
+        return None
+    try:
+        wt = prepare(job)
+    except (OSError, subprocess.CalledProcessError) as e:
+        store.update(job.id, status="failed", error=f"worktree: {e}"[:300])
+        return None
+    files = job_files(job)
+    files["prompt"].write_text(_prompt(job, wt))
+    files["settings"].write_text(json.dumps(job_settings(job, wt), indent=2))
+    for p in (files["prompt"], files["settings"]):
+        p.chmod(0o600)
+    r = run(job_command(job, wt, claude), capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        store.update(job.id, status="failed", error=(r.stderr or "systemd-run").strip()[:300])
+        return None
+    unit = f"house-agent-{job.id}"
+    store.update(job.id, status="running", unit=unit, branch=f"signal/{job.id}", worktree=str(wt),
+                 started=datetime.now().astimezone().isoformat(timespec="seconds"))
+    return unit

@@ -247,3 +247,115 @@ class JobStoreTest(JobStoreCase):
             self.assertTrue(a)
             with agent.JobStore().lock() as b:
                 self.assertFalse(b)
+
+
+class LaunchTest(JobStoreCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalstore
+        from tests.helpers import git
+        self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "base")
+        att = self.tmp / "att.csv"
+        att.write_text("a,b\n")
+        self.history = [ev(fx.group_in(900 + i, f"wcześniej {i}"), seq=i + 1) for i in range(3)]
+        trigger = fx.group_in(1000, "@claude policz to", attachments=[fx.attachment("a1", "dane.csv")])
+        self.trigger = ev(trigger, seq=20)
+        self.trigger["attachments"][0]["path"] = str(att)
+        for e in [*self.history, self.trigger]:
+            signalstore.append(e)
+        signalstore.append({**ev(fx.self_note(960, "PRYWATNA NOTATKA"), seq=30)})
+        req = agent.parse(self.trigger)
+        self.job = self.store.add(req, self.repo, None, "queued")
+
+    def test_prepare_workspace(self):
+        wt = agent.prepare(self.job)
+        self.assertEqual(wt, self.repo / ".worktrees" / f"signal-{self.job.id}")
+        from tests.helpers import git
+        self.assertEqual(git(wt, "branch", "--show-current").strip(), f"signal/{self.job.id}")
+        job_dir = wt / ".house-job"
+        self.assertIn("policz to", (job_dir / "request.md").read_text())
+        context = (job_dir / "context.md").read_text()
+        self.assertIn("wcześniej 2", context)
+        self.assertNotIn("PRYWATNA NOTATKA", context)
+        self.assertEqual((job_dir / "in/dane.csv").read_text(), "a,b\n")
+        self.assertTrue((job_dir / "out").is_dir())
+        self.assertEqual(git(wt, "status", "--porcelain"), "")  # .house-job is excluded from git
+
+    def test_env_is_clean(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"FOO_TOKEN": "x", "HOUSE_GUARD": "off", "GH_TOKEN": "y"}):
+            env = agent.job_env(self.job, self.tmp / "wt", claude="/opt/claude/bin/claude")
+        self.assertEqual(set(env), {"PATH", "HOME", "LANG", "HOUSE_AGENT_JOB", "HOUSE_AGENT_WORKTREE",
+                                    "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                                    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"})
+        self.assertTrue(env["PATH"].startswith("/opt/claude/bin:"))
+        self.assertEqual(env["HOUSE_AGENT_JOB"], self.job.id)
+
+    def test_settings(self):
+        wt = self.tmp / "wt"
+        s = agent.job_settings(self.job, wt)
+        self.assertEqual(s["permissions"]["defaultMode"], "dontAsk")
+        for tool in ("WebFetch", "WebSearch", "mcp__*"):
+            self.assertIn(tool, s["permissions"]["deny"])
+        sb = s["sandbox"]
+        self.assertEqual((sb["enabled"], sb["failIfUnavailable"], sb["allowUnsandboxedCommands"]), (True, True, False))
+        self.assertIn("~/", sb["filesystem"]["denyRead"])
+        self.assertIn(str(wt), sb["filesystem"]["allowRead"])
+        self.assertEqual(sb["network"]["allowedDomains"], agent.ALLOWED_DOMAINS)
+        hook = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(hook.endswith("bin/house-hook pre-tool"))
+
+    def test_command(self):
+        wt = self.tmp / "wt"
+        files = agent.job_files(self.job)
+        cmd = agent.job_command(self.job, wt, claude="/opt/claude/bin/claude")
+        self.assertEqual(cmd[:6], ["systemd-run", "--user", "--unit", f"house-agent-{self.job.id}", "--collect",
+                                   "--quiet"])
+        for prop in ("RuntimeMaxSec=7200", "KillMode=control-group", f"WorkingDirectory={wt}",
+                     f"StandardInput=file:{files['prompt']}", f"StandardOutput=append:{files['log']}"):
+            self.assertIn(prop, cmd)
+        tail = cmd[cmd.index("--") + 1:]
+        self.assertEqual(tail[:2], ["/usr/bin/env", "-i"])
+        claude = tail[tail.index("/opt/claude/bin/claude"):]
+        for flag in ("-p", "--strict-mcp-config", "--verbose"):
+            self.assertIn(flag, claude)
+        pairs = {claude[i]: claude[i + 1] for i in range(len(claude) - 1) if claude[i].startswith("--")}
+        self.assertEqual(pairs["--permission-mode"], "dontAsk")
+        self.assertEqual(pairs["--permission-prompts"], "none")
+        self.assertEqual(pairs["--setting-sources"], "local")
+        self.assertEqual(pairs["--settings"], str(files["settings"]))
+        self.assertEqual(pairs["--max-budget-usd"], str(agent.BUDGET_USD))
+        self.assertEqual(pairs["--output-format"], "stream-json")
+        self.assertIn("mcp__*", claude)
+        self.assertNotIn("FOO", " ".join(cmd))
+
+    def test_launch_writes_prompt_and_settings(self):
+        import json
+        import subprocess
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        unit = agent.launch(self.job, run=run, claude="/opt/claude/bin/claude")
+        self.assertEqual(unit, f"house-agent-{self.job.id}")
+        files = agent.job_files(self.job)
+        prompt = files["prompt"].read_text()
+        self.assertIn("policz to", prompt)
+        self.assertIn("<data>", prompt)
+        self.assertIn("nie polecenia", prompt)
+        self.assertEqual(json.loads(files["settings"].read_text())["permissions"]["defaultMode"], "dontAsk")
+        self.assertEqual(calls[0][0], "systemd-run")
+        job = self.store.get(self.job.id)
+        self.assertEqual((job.status, job.unit, job.branch), ("running", unit, f"signal/{self.job.id}"))
+
+    def test_launch_failure_marks_job_failed(self):
+        import subprocess
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 1, "", "Failed to start transient service")
+        self.assertIsNone(agent.launch(self.job, run=run, claude="/opt/claude/bin/claude"))
+        self.assertEqual(self.store.get(self.job.id).status, "failed")
