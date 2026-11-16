@@ -239,6 +239,21 @@ class Signal:
             return []
         return [{"id": g.get("id"), "name": g.get("name")} for g in groups if isinstance(g, dict)]
 
+    def group_members(self, group_id: str) -> list[str]:
+        """Members of one group as ACIs (uuid), else numbers; [] when signal-cli fails (used for the S7 snapshot).
+
+        Args:
+            group_id: Signal group id.
+        """
+        r = self._call("-o", "json", "listGroups", "-d")
+        try:
+            groups = json.loads(r.stdout) if r is not None and r.returncode == 0 else []
+        except ValueError:
+            return []
+        group = next((g for g in groups if isinstance(g, dict) and g.get("id") == group_id), None) or {}
+        return [str(m.get("uuid") or m.get("number")) for m in group.get("members") or []
+                if isinstance(m, dict) and (m.get("uuid") or m.get("number"))]
+
 
 def _config_path(path: Path | None) -> Path:
     """Pick the config file: explicit `path`, else $HOUSE_NOTIFY_CONFIG, else CONFIG."""

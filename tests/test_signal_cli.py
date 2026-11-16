@@ -631,3 +631,36 @@ class MaintenanceCliReviewTest(MaintenanceCliTest):
         code, _, err = self.run_cli("archive", "self")
         self.assertEqual(code, 2)
         self.assertIn("Notatkę do siebie", err)
+
+
+class AgentOnTest(CliCase):
+    def test_on_resets_cursor_and_snapshots_members(self):
+        from houselib import signalagent, signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x"}})
+        store = signalagent.JobStore()
+        store.set_state(cursor=0)
+        signalstore.append({"v": 1, "key": "self:a:1", "kind": "message", "dir": "own", "chat": "self", "ts": 1})
+
+        class Sig:
+            account = "+48111"
+
+            def group_members(self, gid):
+                return ["u-a"]
+        with mock.patch("houselib.signalcli._tty", return_value=True), \
+                mock.patch("houselib.signal.from_config", return_value=Sig()), \
+                mock.patch("houselib.setup.install_signal_timer") as timer:
+            self.assertEqual(self.run_cli("agent", "on")[0], 0)
+        self.assertEqual(store.state()["cursor"], signalstore.last_seq())
+        self.assertEqual(store.members("gT"), ["u-a"])
+        self.assertTrue(timer.call_args.kwargs.get("agent"))
+
+    def test_off_keeps_tick_in_timer(self):
+        with mock.patch("houselib.setup.install_signal_timer") as timer:
+            self.run_cli("agent", "off")
+        self.assertTrue(timer.call_args.kwargs.get("agent"))
+
+    def test_human_commands_refused_inside_claude_code(self):
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), \
+                mock.patch("houselib.signalcli._tty", return_value=True):
+            for argv in (("agent", "on"), ("agent", "members", "techarena"), ("allow", "x"), ("deny", "x")):
+                self.assertEqual(self.run_cli(*argv)[0], 2, argv)

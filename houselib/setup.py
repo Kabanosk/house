@@ -139,7 +139,7 @@ Description=house: odbiór Signala do magazynu (house signal pull)
 Type=oneshot
 Environment=PATH={path}
 ExecStart={root}/bin/house signal pull --timeout 5 --maintenance
-TimeoutStartSec=900
+{agent}TimeoutStartSec=900
 """
 TIMER_UNIT = """[Unit]
 Description=house: odbiór Signala co {every}
@@ -155,7 +155,7 @@ WantedBy=timers.target
 
 
 def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=subprocess.run,
-                         every: str = "5min", claude: str | None = None) -> list[Path]:
+                         every: str = "5min", claude: str | None = None, agent: bool = False) -> list[Path]:
     """Install and start the systemd user timer that runs `house signal pull --maintenance` periodically.
 
     Receiving without any open session keeps the store fresh and the linked device active; `--maintenance`
@@ -168,6 +168,7 @@ def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=
         every: Interval, a systemd time span such as "5min" (S7 uses "1min"). Defaults to "5min".
         claude: Path of `claude` (its directory goes to the unit's PATH, which systemd keeps minimal otherwise).
             Defaults to `shutil.which("claude")`.
+        agent: Also run `house signal agent tick` after every pull (S7 on). Defaults to False.
 
     Returns:
         Paths of the service and timer unit files.
@@ -181,7 +182,8 @@ def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=
     claude = claude or shutil.which("claude")
     path = ":".join(dict.fromkeys([*([str(Path(claude).parent)] if claude else []), "/usr/local/bin", "/usr/bin",
                                    "/bin"]))
-    service.write_text(SERVICE_UNIT.format(root=Path(root).resolve(), path=path))
+    tick = f"ExecStart={Path(root).resolve()}/bin/house signal agent tick\n" if agent else ""
+    service.write_text(SERVICE_UNIT.format(root=Path(root).resolve(), path=path, agent=tick))
     timer.write_text(TIMER_UNIT.format(every=every))
     for argv in (["systemctl", "--user", "daemon-reload"],
                  ["systemctl", "--user", "enable", "--now", f"{TIMER}.timer"]):

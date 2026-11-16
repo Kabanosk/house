@@ -190,4 +190,6 @@ def signal_status(now: datetime | None = None) -> list[str]:
     timer = signal_timer_status()
     if timer:
         lines.append(timer)
+    from . import signalagent
+    lines += signalagent.doctor_lines()
     return lines

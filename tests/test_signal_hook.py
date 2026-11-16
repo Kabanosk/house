@@ -169,3 +169,29 @@ class PreToolSignalTest(unittest.TestCase):
         matcher = adapters.claude_settings()["hooks"]["PreToolUse"][0]["matcher"]
         for tool in ("Read", "Grep", "Glob", "Bash", "Edit", "Write"):
             self.assertIn(tool, matcher.split("|"))
+
+
+class JobModeHookTest(unittest.TestCase):
+    def test_job_mode_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {"HOUSE_AGENT_JOB": "abc", "HOUSE_AGENT_WORKTREE": d, "HOUSE_GUARD": "off"}
+            event = {"cwd": d, "tool_name": "Bash", "tool_input": {"command": "git push"}}
+            self.assertEqual(hook.pre_tool(event, env)[0], 2)
+            with mock.patch("houselib.guard.check_job", side_effect=RuntimeError("boom")):
+                code, msg = hook.pre_tool({**event, "tool_input": {"command": "ls"}}, env)
+            self.assertEqual(code, 2)
+            self.assertIn("job mode", msg)
+            self.assertEqual(hook.pre_tool({**event, "tool_input": {"command": "ls"}}, env), (0, ""))
+
+    def test_house_hook_script_fails_closed_in_job_mode(self):
+        import subprocess
+
+        from houselib import HOUSE_ROOT
+        env = {**os.environ, "HOUSE_AGENT_JOB": "abc", "HOUSE_AGENT_WORKTREE": "/tmp"}
+        r = subprocess.run([str(HOUSE_ROOT / "bin/house-hook"), "pre-tool"], input="not json", text=True,
+                           capture_output=True, env=env, check=False)
+        self.assertEqual(r.returncode, 2)
+        env.pop("HOUSE_AGENT_JOB")
+        r = subprocess.run([str(HOUSE_ROOT / "bin/house-hook"), "pre-tool"], input="not json", text=True,
+                           capture_output=True, env=env, check=False)
+        self.assertEqual(r.returncode, 0)

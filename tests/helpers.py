@@ -11,6 +11,7 @@ os.environ["HOUSE_NOTIFY_CONFIG"] = "/nonexistent/house-notify.env"
 os.environ.setdefault("HOUSE_DATA_DIR", tempfile.mkdtemp(prefix="house-test-data-"))
 os.environ["HOUSE_SIGNAL_CONFIG"] = "/nonexistent/house-signal.toml"
 os.environ["HOUSE_SIGNAL_ATTACHMENTS"] = "/nonexistent/signal-cli-attachments"
+os.environ.pop("CLAUDECODE", None)  # the suite may run inside Claude Code; human-only commands check this
 
 NAME = "Test Owner"
 EMAIL = "owner@example.com"
