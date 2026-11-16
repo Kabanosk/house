@@ -10,11 +10,48 @@ from tests import helpers  # noqa: F401  (isolates Signal config)
 
 class FakeRun:
     def __init__(self, stdout: str = "", returncode: int = 0):
-        self.calls, self.stdout, self.returncode = [], stdout, returncode
+        self.calls, self.stdout, self.returncode, self.kw = [], stdout, returncode, None
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
+        self.kw = kw
         return subprocess.CompletedProcess(argv, self.returncode, self.stdout, "INFO noise\n")
+
+
+class FakePopen:
+    """Stands in for subprocess.Popen: `lines` on stdout (bytes), optional death after `die_after` lines."""
+
+    def __init__(self, lines, die_after=None, rc=0, stderr=""):
+        import io
+        self.raw = io.BytesIO("".join(f"{x}\n" for x in lines).encode())
+        self.die_after, self.rc, self.stderr_text = die_after, rc, stderr
+        self.argv = self.kw = None
+        self.terminated, self.killed, self.returncode = 0, False, None
+
+    def __call__(self, argv, **kw):
+        self.argv, self.kw = argv, kw
+        kw["stderr"].write(self.stderr_text.encode())
+        self.stdout = self._lines()
+        return self
+
+    def _lines(self):
+        for i, line in enumerate(self.raw):
+            if self.die_after is not None and i >= self.die_after:
+                raise OSError("pipe broken")
+            yield line
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.returncode = self.rc
+        return self.rc
+
+    def terminate(self):
+        self.terminated += 1
+
+    def kill(self):
+        self.killed = True
 
 
 class SignalTest(unittest.TestCase):
@@ -33,17 +70,88 @@ class SignalTest(unittest.TestCase):
     def test_send_failure_returns_none(self):
         self.assertIsNone(sig.Signal("+1", "sc", run=FakeRun("", 1)).send("x"))
 
-    def test_receive_skips_junk(self):
-        run = FakeRun('{"envelope": {"timestamp": 1}}\nnot json\n\n{"envelope": {"timestamp": 2}}\n')
-        out = sig.Signal("+1", "sc", run=run).receive(timeout=3)
-        self.assertEqual([e["envelope"]["timestamp"] for e in out], [1, 2])
-        self.assertEqual(run.calls[0], ["sc", "-a", "+1", "-o", "json", "receive", "--timeout", "3"])
+    def test_receive_streams_each_object(self):
+        popen = FakePopen(['{"envelope": {"timestamp": 1}}', '{"envelope": {"timestamp": 2}}'])
+        seen = []
+        res = sig.Signal("+1", "sc", popen=popen).receive(lambda o: seen.append(o["envelope"]["timestamp"]), timeout=3)
+        self.assertEqual(seen, [1, 2])
+        self.assertEqual(res.objects, 2)
+        self.assertIsNone(res.error)
+        self.assertEqual(popen.argv, ["sc", "-a", "+1", "-o", "json", "receive", "--timeout", "3", "--ignore-stories"])
+        self.assertIs(popen.kw["stdin"], subprocess.DEVNULL)
 
-    def test_receive_timeout_keeps_partial_output(self):
-        def run(argv, **kw):
-            raise subprocess.TimeoutExpired(argv, 1, output='{"envelope": {"timestamp": 7}}\n')
-        out = sig.Signal("+1", "sc", run=run).receive(timeout=1)
-        self.assertEqual([e["envelope"]["timestamp"] for e in out], [7])
+    def test_receive_max_messages(self):
+        popen = FakePopen([])
+        sig.Signal("+1", "sc", popen=popen).receive(lambda o: None, max_messages=200)
+        self.assertEqual(popen.argv[-3:], ["--max-messages", "200", "--ignore-stories"])
+
+    def test_receive_counts_bad_lines(self):
+        popen = FakePopen(['{"envelope": {}}', "not json", "[1]", ""])
+        seen = []
+        res = sig.Signal("+1", "sc", popen=popen).receive(seen.append)
+        self.assertEqual((len(seen), res.objects, res.bad_lines), (1, 1, 2))
+
+    def test_receive_process_dies_midway(self):
+        lines = [f'{{"envelope": {{"timestamp": {i}}}}}' for i in range(5)]
+        seen = []
+        res = sig.Signal("+1", "sc", popen=FakePopen(lines, die_after=3)).receive(seen.append)
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(res.error.startswith("read:"), res.error)
+
+    def test_receive_drains_after_stop(self):
+        lines = [f'{{"envelope": {{"timestamp": {i}}}}}' for i in range(3)]
+        popen = FakePopen(lines)
+        seen = []
+        res = sig.Signal("+1", "sc", popen=popen).receive(seen.append, should_stop=lambda: bool(seen))
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(popen.terminated, 1)
+        self.assertTrue(res.stopped)
+
+    def test_receive_error_line(self):
+        popen = FakePopen([], rc=1, stderr="INFO x\nERROR User +1 is not registered.\n" + "y" * 300)
+        res = sig.Signal("+1", "sc", popen=popen).receive(lambda o: None)
+        self.assertEqual(res.error, "ERROR User +1 is not registered.")
+        self.assertEqual(res.returncode, 1)
+
+    def test_receive_error_line_is_cut(self):
+        res = sig.Signal("+1", "sc", popen=FakePopen([], rc=1, stderr="E" * 300)).receive(lambda o: None)
+        self.assertEqual(len(res.error), 200)
+
+    def test_receive_missing_binary(self):
+        def popen(argv, **kw):
+            raise FileNotFoundError(argv[0])
+        seen = []
+        res = sig.Signal("+1", "sc", popen=popen).receive(seen.append)
+        self.assertEqual((seen, res.error), ([], "signal-cli not found"))
+
+    def test_receive_bad_bytes(self):
+        import io
+        popen = FakePopen([])
+        popen.raw = io.BytesIO(b'{"envelope": {"timestamp": 9, "x": "\xff\xfe"}}\n')
+        seen = []
+        sig.Signal("+1", "sc", popen=popen).receive(seen.append)
+        self.assertEqual(seen[0]["envelope"]["timestamp"], 9)
+
+    def test_receive_handler_error_kills_process(self):
+        popen = FakePopen(['{"envelope": {}}', '{"envelope": {}}'])
+        def boom(o):
+            raise RuntimeError("disk full")
+        with self.assertRaises(RuntimeError):
+            sig.Signal("+1", "sc", popen=popen).receive(boom)
+        self.assertTrue(popen.killed)
+
+    def test_receive_handler_oserror_propagates(self):
+        popen = FakePopen(['{"envelope": {}}'])
+        def boom(o):
+            raise OSError("no space left")
+        with self.assertRaises(OSError):
+            sig.Signal("+1", "sc", popen=popen).receive(boom)
+        self.assertTrue(popen.killed)
+
+    def test_send_closes_stdin(self):
+        run = FakeRun("1\n")
+        sig.Signal("+1", "sc", run=run).send("x")
+        self.assertIs(run.kw["stdin"], subprocess.DEVNULL)
 
     def test_list_groups(self):
         run = FakeRun('[{"id": "g1", "name": "Team", "isMember": true}]')
