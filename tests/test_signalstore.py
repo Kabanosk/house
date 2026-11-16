@@ -80,7 +80,7 @@ class CoreTest(StoreCase):
         self.assertEqual(list(store.iter_events()), [])
         self.assertEqual(store.ingest_pending(), 1)
         self.assertEqual([(e["ts"], e["seq"]) for e in store.iter_events()], [(7, 1)])
-        self.assertEqual(pending.read_text(), "")
+        self.assertFalse(pending.exists() and pending.read_text())
 
     def test_find_returns_latest_version_per_key(self):
         store.append(ev(5, text="old"))
@@ -586,3 +586,144 @@ class ArchiveTest(CompactCase):
         store.append(self.m(1794821893403, "x", chat="gT"))
         store.compact(force_archive={"gT"})
         self.assertEqual(store.summarize_pending(run=None, which=lambda _: None), [])
+
+
+class MaintenanceReviewTest(CompactCase):
+    def test_short_write_never_replaces_the_store(self):
+        for i in range(20):
+            store.append(self.m(1000 + i, "x" * 200))
+        before = (store.store_dir() / "messages.jsonl").read_bytes()
+        real_write = os.write
+        calls = []
+
+        def disk_full(fd, data):
+            calls.append(1)
+            return real_write(fd, bytes(data)[:100]) if len(calls) == 1 else 0
+        with mock.patch("os.write", side_effect=disk_full), self.assertRaises(OSError):
+            store.compact()
+        self.assertEqual((store.store_dir() / "messages.jsonl").read_bytes(), before)
+
+    def test_force_archive_refuses_self_and_contest_groups(self):
+        store.append(self.m(1000, "notatka", chat="self", author="u-own"))
+        with self.assertRaises(ValueError):
+            store.compact(force_archive={"self"})
+        self.assertEqual(next(store.iter_events())["text"], "notatka")
+
+    def test_quotes_of_scrubbed_message_lose_its_text(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        secret = self.m(self.ms(now - timedelta(hours=2)), "SECRET")
+        reply = self.m(self.ms(now - timedelta(hours=1)), "odp", author="u-ola",
+                       quote={"ts": secret["ts"], "author": "u-kuba", "text": "SECRET"},
+                       raw={"envelope": {"dataMessage": {"quote": {"text": "SECRET"}}}})
+        delete = self.m(self.ms(now - timedelta(minutes=30)), "", kind="delete",
+                        target={"ts": secret["ts"], "author": "u-kuba"})
+        for e in (secret, reply, delete):
+            store.append(e)
+        store.compact(now)
+        self.assertNotIn(b"SECRET", (store.store_dir() / "messages.jsonl").read_bytes())
+        got = {e["key"]: e for e in store.iter_events()}[reply["key"]]
+        self.assertEqual((got["text"], got["quote"]["text"]), ("odp", None))
+
+    def test_copy_still_used_elsewhere_is_kept(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalchats
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        signalchats.save_config({"b": {"id": "gB", "name": "B", "added": "x", "retention_days": 30}})
+        f = store.store_dir() / "files/techarena/a.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+        store.append(self.m(self.ms(now - timedelta(days=40)), "zdjęcie",
+                            attachments=[{"filename": "a.jpg", "path": str(f)}]))
+        store.append(self.m(self.ms(now - timedelta(days=40)), "fwd", chat="gB", dir="out", author="+48111",
+                            attachments=[{"filename": "a.jpg", "path": str(f)}]))
+        store.compact(now)
+        self.assertTrue(f.exists())
+
+    def test_purge_claim_fails_loudly_when_locked(self):
+        with store.lock("store.lock", blocking=False), mock.patch.object(store, "LOCK_TIMEOUT", 0.1), \
+                self.assertRaises(RuntimeError):
+            store.request_purge("gT", "techarena")
+
+    def test_purge_removes_copies_under_any_alias_and_archives(self):
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x"}})
+        f = store.store_dir() / "files/staryalias/a.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+        store.append(self.m(1000, "x", attachments=[{"filename": "a.jpg", "path": str(f)}]))
+        store.append(self.m(1001, "y", author="u-ola"))
+        name = store.compact(force_archive={"gT"})["archived"][0]
+        store.append(self.m(1002, "z", author="u-ania"))
+        store.request_purge("gT", "techarena")
+        stats = store.compact()
+        self.assertEqual(stats["purged"], 1)
+        self.assertFalse(f.exists())
+        self.assertFalse((store.store_dir() / "archive" / name).exists())
+        self.assertEqual(list(store.iter_events()), [])
+
+    def test_files_unlinked_only_after_rewrite(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalchats
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x", "retention_days": 1}})
+        f = store.store_dir() / "files/techarena/a.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+        store.append(self.m(self.ms(now - timedelta(days=5)), "x", attachments=[{"filename": "a.jpg",
+                                                                                  "path": str(f)}]))
+        with mock.patch.object(store, "_rewrite", side_effect=OSError("disk")), self.assertRaises(OSError):
+            store.compact(now)
+        self.assertTrue(f.exists())
+
+    def test_bad_lines_kept_aside(self):
+        store.append(self.m(1000, "a"))
+        with (store.store_dir() / "messages.jsonl").open("a") as fh:
+            fh.write("{broken\n")
+        store.compact()
+        self.assertIn("{broken", (store.store_dir() / "bad-lines.jsonl").read_text())
+
+    def test_reparse_keeps_key(self):
+        from tests import signal_fixtures as fx
+        raw = fx.group_in(5000, "x")
+        store.append({**self.m(5000, "x"), "key": "gT:stary-autor:5000", "raw": raw})
+        store.reparse(fx.OWN)
+        self.assertEqual(next(store.iter_events())["key"], "gT:stary-autor:5000")
+
+    def test_summarize_survives_bad_zip_and_writes_atomically(self):
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x"}})
+        folder = store.store_dir() / "archive"
+        folder.mkdir()
+        (folder / "zly-1-2.zip").write_bytes(b"not a zip")
+        store.append(self.m(1794821893403, "ok"))
+        store.compact(force_archive={"gT"})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 0, "## Kto\n", "")
+        done = store.summarize_pending(run=run, which=lambda _: "/usr/bin/claude")
+        self.assertEqual(len(done), 1)
+        argv, kw = calls[0]
+        for flag in ("--strict-mcp-config", "--setting-sources", "--permission-mode"):
+            self.assertIn(flag, argv)
+        self.assertNotEqual(kw.get("cwd"), None)
+        self.assertEqual(list(folder.glob("*.tmp")), [])
+
+    def test_pending_lines_written_during_ingest_are_kept(self):
+        store.store_dir()
+        pending = store.store_dir() / "pending.jsonl"
+        pending.write_text(json.dumps(ev(1)) + "\n")
+        real = store._append_locked
+
+        def append_and_race(e):
+            with pending.open("a") as fh:  # a writer appends while ingest is busy
+                fh.write(json.dumps(ev(2)) + "\n")
+            return real(e)
+        with mock.patch.object(store, "_append_locked", side_effect=append_and_race):
+            store.ingest_pending()
+        store.ingest_pending()
+        self.assertEqual(sorted(e["ts"] for e in store.iter_events()), [1, 2])

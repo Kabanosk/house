@@ -606,3 +606,28 @@ class ArchiveCliTest(CliCase):
             _, out, _ = self.run_cli("pull", "--maintenance")
         summ.assert_called_once()
         self.assertIn("archiwum: a.zip", out)
+
+
+class MaintenanceCliReviewTest(MaintenanceCliTest):
+    def test_deny_purge_reports_when_compact_is_skipped(self):
+        signalstore.append({"v": 1, "key": "gT:a:1", "kind": "message", "dir": "in", "chat": "gT", "ts": 1})
+        with mock.patch.multiple("houselib.signalcli", _tty=lambda: True, _ask=lambda prompt: "t"), \
+                mock.patch("houselib.signalstore.compact", return_value={"skipped": "magazyn zajęty"}):
+            code, out, _ = self.run_cli("deny", "techarena", "--purge")
+        self.assertEqual(code, 1)
+        self.assertNotIn("historia usunięta", out)
+        self.assertIn("najbliższym compact", out)
+        self.assertEqual(signalstore.read_state()["purge"], {"gT": "techarena"})
+
+    def test_deny_purge_keeps_config_when_store_busy(self):
+        from houselib import signalchats
+        with mock.patch.multiple("houselib.signalcli", _tty=lambda: True, _ask=lambda prompt: "t"), \
+                mock.patch("houselib.signalstore.request_purge", side_effect=RuntimeError("magazyn zajęty")):
+            code, _, _ = self.run_cli("deny", "techarena", "--purge")
+        self.assertEqual(code, 1)
+        self.assertIn("techarena", signalchats.load_config())
+
+    def test_archive_self_refused(self):
+        code, _, err = self.run_cli("archive", "self")
+        self.assertEqual(code, 2)
+        self.assertIn("Notatkę do siebie", err)

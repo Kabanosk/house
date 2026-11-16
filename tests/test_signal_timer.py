@@ -74,3 +74,32 @@ class TimerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimerReviewTest(TimerTest):
+    def test_service_has_path_and_long_timeout(self):
+        paths = setup.install_signal_timer(self.root, home=self.home, run=FakeRun(), claude="/opt/c/bin/claude")
+        service = paths[0].read_text()
+        self.assertIn("TimeoutStartSec=900", service)
+        self.assertIn("Environment=PATH=/opt/c/bin:", service)
+
+    def test_missing_systemctl_raises(self):
+        def run(argv, **kw):
+            raise FileNotFoundError("systemctl")
+        with self.assertRaises(RuntimeError):
+            setup.install_signal_timer(self.root, home=self.home, run=run)
+
+    def test_failed_enable_raises(self):
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 1, "", "Failed to connect to bus")
+        with self.assertRaises(RuntimeError):
+            setup.install_signal_timer(self.root, home=self.home, run=run)
+
+    def test_doctor_warns_without_linger(self):
+        setup.install_signal_timer(self.root, home=self.home, run=FakeRun())
+
+        def run(argv, **kw):
+            out = "active\n" if "is-active" in argv else "Linger=no\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        line = doctor.signal_timer_status(home=self.home, run=run)
+        self.assertIn("linger", line)

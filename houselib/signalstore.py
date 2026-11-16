@@ -15,6 +15,7 @@ Files in `<data dir>/signal/` (dir 0700, files 0600; data dir = $HOUSE_DATA_DIR 
 Readers take no lock: the file only grows, so a last line without a newline is simply skipped, and so is any
 line that is not a JSON object (`bad_lines()` lists them for `house doctor`).
 """
+import errno
 import fcntl
 import json
 import mimetypes
@@ -23,6 +24,7 @@ import re
 import shutil
 import signal as sigmod
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -81,17 +83,50 @@ def lock(name: str, blocking: bool, timeout: float | None = None):
         os.close(fd)
 
 
-def write_json(path: Path, obj) -> None:
-    """Write JSON atomically (temp file, fsync, rename) with mode 0600."""
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _write_fully(fd: int, data: bytes) -> None:
+    """Write all of `data` (looping over short writes); a write that makes no progress means a full disk."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        if not n:
+            raise OSError(errno.ENOSPC, "zapis przerwany (pełny dysk?)")
+        view = view[n:]
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename or a new file in `path` durable."""
+    fd = os.open(path, os.O_RDONLY)
     try:
-        os.write(fd, (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode())
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def replace_durably(path: Path, data: bytes) -> None:
+    """Write `data` to `path` atomically and durably: temp file, full write, size check, fsync, rename, dir fsync.
+
+    On any failure the old file stays untouched (the temp file is removed).
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        _write_fully(fd, data)
+        os.fsync(fd)
+        if os.fstat(fd).st_size != len(data):
+            raise OSError(errno.EIO, f"{tmp.name}: zapisano niepełny plik")
+    except BaseException:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    os.close(fd)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    _fsync_dir(path.parent)
+
+
+def write_json(path: Path, obj) -> None:
+    """Write JSON atomically and durably (`replace_durably`) with mode 0600."""
+    replace_durably(path, (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode())
 
 
 def read_json(path: Path, default):
@@ -133,7 +168,7 @@ def _append_bytes(path: Path, data: bytes) -> None:
         size = os.fstat(fd).st_size
         if size and os.pread(fd, 1, size - 1) != b"\n":
             data = b"\n" + data
-        os.write(fd, data)
+        _write_fully(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -203,12 +238,14 @@ def ingest_pending() -> int:
     with lock("store.lock", blocking=True) as held:
         if not held:
             return 0
-        events = list(_parse_lines(path.read_bytes()))
+        work = path.with_name(PENDING + ".ingesting")
+        if not work.exists():
+            os.replace(path, work)  # writers that append from now on create a fresh pending.jsonl
+        events = list(_parse_lines(work.read_bytes()))
         for e, _ in events:
             if e is not None:
                 _append_locked(e)
-        fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
-        os.close(fd)
+        work.unlink()
         return sum(1 for e, _ in events if e is not None)
 
 
@@ -592,47 +629,59 @@ SKELETON_NOTE = "skeleton keeps key, ts, kind, dir, chat, sender, meta, target a
 
 
 def _rewrite(events: list[dict]) -> None:
-    """Replace the store file atomically (temp file, fsync, rename); the caller holds `store.lock`.
+    """Replace the store file atomically and durably; the caller holds `store.lock`.
 
-    A reader that already opened the old file keeps reading the old version to its end.
+    A reader that already opened the old file keeps reading the old version to its end. A short write (full disk)
+    raises before the rename, so the store is never replaced by a truncated copy.
     """
-    path = store_dir() / MESSAGES
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, b"".join(_line(e) for e in events))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    replace_durably(store_dir() / MESSAGES, b"".join(_line(e) for e in events))
 
 
-def _remove_copy(path: str | None) -> None:
-    """Delete a copied attachment, but only inside `signal/files/` (never a file someone sent from elsewhere)."""
+def _in_files(path: str | None) -> Path | None:
+    """The resolved path when it lies inside `signal/files/` (only such copies are ever deleted), else None."""
     if not path:
-        return
-    p = Path(path)
+        return None
     try:
-        if p.resolve().is_relative_to((store_dir() / "files").resolve()):
-            p.unlink(missing_ok=True)
+        p = Path(path).resolve()
+        return p if p.is_relative_to((store_dir() / "files").resolve()) else None
     except OSError:
-        pass
+        return None
 
 
-def _scrub(e: dict, reason: str) -> None:
-    """Drop the content of an event and keep its skeleton (see SKELETON_NOTE)."""
+def _scrub(e: dict, reason: str, unlink: set) -> None:
+    """Drop the content of an event and keep its skeleton (see SKELETON_NOTE); copied files go to `unlink`, which
+    the caller deletes only after the new store is durable and only if no remaining event still points to them."""
     for a in e.get("attachments") or []:
-        _remove_copy(a.get("path"))
+        p = _in_files(a.get("path"))
+        if p is not None:
+            unlink.add(p)
     e.update(text="", raw=None, attachments=[], mentions=[], scrubbed=reason)
     if isinstance(e.get("quote"), dict):
         e["quote"] = {**e["quote"], "text": None}
 
 
+def _forget_quote(e: dict) -> None:
+    """Remove a scrubbed message's text from a reply that quotes it (the event and its envelope)."""
+    e["quote"] = {**e["quote"], "text": None}
+    env = (e.get("raw") or {}).get("envelope") or {}
+    for msg in (env.get("dataMessage"), (env.get("syncMessage") or {}).get("sentMessage"),
+                (env.get("editMessage") or {}).get("dataMessage")):
+        if isinstance(msg, dict) and isinstance(msg.get("quote"), dict):
+            msg["quote"]["text"] = None
+
+
 def request_purge(chat: str, alias: str) -> None:
-    """Mark a chat's whole history for removal by the next `compact` (`house signal deny --purge`)."""
-    purge = read_state().get("purge") or {}
-    update_state(purge={**purge, chat: alias})
+    """Mark a chat's whole history for removal by the next `compact` (`house signal deny --purge`).
+
+    Raises:
+        RuntimeError: The store is busy (`store.lock` not available); nothing was marked.
+    """
+    with lock("store.lock", blocking=True) as held:
+        if not held:
+            raise RuntimeError("magazyn zajęty, spróbuj za chwilę")
+        state = read_state()
+        state["purge"] = {**(state.get("purge") or {}), chat: alias}
+        write_json(store_dir() / STATE, state)
 
 
 ARCHIVE_AFTER_DAYS = 180
@@ -653,8 +702,8 @@ Pisz zwięźle, tylko fakty z rozmowy, bez zgadywania.
 """
 
 
-def _archive_chat(chat: str, alias: str, items: list[dict]) -> str | None:
-    """Zip a chat's not yet scrubbed events (without `raw`) and their copied files, then scrub them.
+def _archive_chat(chat: str, alias: str, items: list[dict], unlink: set) -> str | None:
+    """Zip a chat's not yet scrubbed events (without `raw`) and their copied files durably, then scrub them.
 
     Returns:
         The archive file name (`<alias>-<from>-<to>.zip`), or None when the chat has nothing left to archive.
@@ -681,19 +730,31 @@ def _archive_chat(chat: str, alias: str, items: list[dict]) -> str | None:
                 p = Path(str(a.get("path") or ""))
                 if a.get("path") and p.is_file():
                     zf.write(p, f"files/{p.name}")
+    fd = os.open(tmp, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     os.chmod(tmp, 0o600)
     os.replace(tmp, target)
+    _fsync_dir(folder)
     for e in events:
-        _scrub(e, "archiwum")
+        _scrub(e, "archiwum", unlink)
     return target.name
 
 
-def _inactive_chats(items: list[dict], now: datetime) -> dict[str, str]:
-    """`signal.toml` groups (never Note to Self or a running contest's group) with no message for 180 days."""
+def archivable() -> dict[str, str]:
+    """Chats that may ever be archived: `signal.toml` groups that are not a running contest's group (id → alias).
+    Note to Self and contest groups never are: `house inbox` needs their history."""
     from . import signalchats
-    from .signalread import parse_iso
     contest = {c.id for c in signalchats.allowed(None).values() if c.source.startswith("konkurs")}
-    groups = {g["id"]: alias for alias, g in signalchats.load_config().items() if g["id"] not in contest}
+    return {g["id"]: alias for alias, g in signalchats.load_config().items() if g["id"] not in contest}
+
+
+def _inactive_chats(items: list[dict], now: datetime) -> dict[str, str]:
+    """`archivable()` chats with no message for 180 days."""
+    from .signalread import parse_iso
+    groups = archivable()
     newest: dict[str, datetime] = {}
     for e in items:
         t = parse_iso(e.get("time"))
@@ -721,11 +782,22 @@ def compact(now: datetime | None = None, force_archive: set[str] | frozenset = f
     from . import signalchats
     from .signalread import parse_iso
     now = now or datetime.now().astimezone()
+    allowed_archive = archivable() if force_archive else {}
+    refused = [c for c in force_archive if c not in allowed_archive]
+    if refused:
+        raise ValueError("archiwizować można tylko grupy z signal.toml spoza konkursów (nie Notatkę do siebie "
+                         "ani grupę trwającego konkursu)")
+    unlink: set[Path] = set()
     with lock("store.lock", blocking=True) as held:
         if not held:
             return {"skipped": "magazyn zajęty"}
         path = store_dir() / MESSAGES
-        parsed = list(_parse_lines(path.read_bytes())) if path.exists() else []
+        raw_bytes = path.read_bytes() if path.exists() else b""
+        parsed = list(_parse_lines(raw_bytes))
+        bad = [line for (e, _), line in zip(parsed, [x for x in raw_bytes.split(b"\n")[:-1] if x.strip()],
+                                             strict=False) if e is None]
+        if bad:
+            _append_bytes(store_dir() / "bad-lines.jsonl", b"\n".join(bad) + b"\n")
         first: dict[str, int] = {}
         newest: dict[str, dict] = {}
         for e, _ in parsed:
@@ -736,6 +808,12 @@ def compact(now: datetime | None = None, force_archive: set[str] | frozenset = f
             newest[k] = e
         state = read_state()
         purge = state.get("purge") or {}
+        for e, _ in parsed:  # every version of a purged chat's events, also those an alias change left behind
+            if e is not None and e.get("chat") in purge:
+                for a in e.get("attachments") or []:
+                    p = _in_files(a.get("path"))
+                    if p is not None:
+                        unlink.add(p)
         items = sorted(({**e, "seq": first[k]} for k, e in newest.items() if e.get("chat") not in purge),
                        key=lambda e: e["seq"])
         retention = {g["id"]: int(g["retention_days"]) for g in signalchats.load_config().values()
@@ -759,32 +837,49 @@ def compact(now: datetime | None = None, force_archive: set[str] | frozenset = f
             elif e.get("chat") in retention and sent and sent < now - timedelta(days=retention[e["chat"]]):
                 reason = "retencja"
             if reason:
-                _scrub(e, reason)
+                _scrub(e, reason, unlink)
                 gone[(e.get("chat"), e.get("ts"))] = reason
                 scrubbed += 1
         for e in items:
             target = (e.get("chat"), (e.get("target") or {}).get("ts"))
             if e.get("kind") == "edit" and target in gone and not e.get("scrubbed"):
-                _scrub(e, gone[target])
+                _scrub(e, gone[target], unlink)
         to_archive = _inactive_chats(items, now)
         for chat in force_archive:
-            to_archive.setdefault(chat, next((str(e.get("chat_alias")) for e in items
-                                              if e.get("chat") == chat and e.get("chat_alias")), chat[:8]))
-        archived = [name for chat, alias in sorted(to_archive.items())
-                    if (name := _archive_chat(chat, alias, items))]
+            to_archive.setdefault(chat, allowed_archive[chat])
+        archived_chats = {}
+        for chat, alias in sorted(to_archive.items()):
+            name = _archive_chat(chat, alias, items, unlink)
+            if name:
+                archived_chats[name] = chat
+        scrubbed_ts = {(e.get("chat"), e.get("ts")) for e in items if e.get("scrubbed")}
+        for e in items:
+            q = e.get("quote")
+            if isinstance(q, dict) and q.get("text") and (e.get("chat"), q.get("ts")) in scrubbed_ts:
+                _forget_quote(e)
         _rewrite(items)
+        state = read_state()
+        archives = {**(state.get("archives") or {}), **archived_chats}
+        doomed = [name for name, chat in archives.items() if chat in purge]
+        top = max((e["seq"] for e in items), default=0)
+        state.update(generation=int(state.get("generation") or 0) + 1, purge={},
+                     archives={n: c for n, c in archives.items() if n not in doomed},
+                     next_seq=max(int(state.get("next_seq") or 0), top + 1),
+                     compacted_at=now.isoformat(timespec="seconds"))
+        write_json(store_dir() / STATE, state)
+        still_used = {p for e in items for a in e.get("attachments") or [] if (p := _in_files(a.get("path")))}
+        for p in unlink - still_used:  # only now: the new store and the archives are durable
+            p.unlink(missing_ok=True)
         for alias in purge.values():
             folder = store_dir() / "files" / _safe(str(alias))
             if folder.is_dir():
                 shutil.rmtree(folder, ignore_errors=True)
-        state = read_state()
-        top = max((e["seq"] for e in items), default=0)
-        state.update(generation=int(state.get("generation") or 0) + 1, purge={},
-                     next_seq=max(int(state.get("next_seq") or 0), top + 1),
-                     compacted_at=now.isoformat(timespec="seconds"))
-        write_json(store_dir() / STATE, state)
+        for name in doomed:
+            for f in (store_dir() / "archive" / name, (store_dir() / "archive" / name).with_suffix(".md")):
+                f.unlink(missing_ok=True)
+        archived = list(archived_chats)
     return {"events": len(items), "scrubbed": scrubbed, "purged": len(purge), "archived": archived,
-            "bad_lines": sum(1 for e, _ in parsed if e is None)}
+            "bad_lines": len(bad)}
 
 
 def _transcript(rows: list[dict]) -> str:
@@ -805,8 +900,9 @@ def _transcript(rows: list[dict]) -> str:
 def summarize_pending(run=subprocess.run, which=shutil.which, timeout: int = 600) -> list[str]:
     """Write `<archive>.md` summaries (decisions, findings, open threads) for archives that have none.
 
-    Uses `claude -p` with no tools at all (`--tools ""`): the conversation is data for the model, never something
-    it can act on. Without `claude` on PATH nothing happens.
+    Uses `claude -p` with no tools at all (`--tools ""`, no MCP servers, only local settings of an empty temporary
+    directory, `dontAsk`): the conversation is data for the model, never something it can act on. A broken zip is
+    skipped. Without `claude` on PATH nothing happens.
 
     Args:
         run: Runner with the signature of `subprocess.run`; replaceable in tests.
@@ -825,23 +921,24 @@ def summarize_pending(run=subprocess.run, which=shutil.which, timeout: int = 600
         md = z.with_suffix(".md")
         if md.exists():
             continue
-        with zipfile.ZipFile(z) as zf:
-            rows = [json.loads(x) for x in zf.read("messages.jsonl").decode().splitlines() if x.strip()]
+        try:
+            with zipfile.ZipFile(z) as zf:
+                rows = [json.loads(x) for x in zf.read("messages.jsonl").decode().splitlines() if x.strip()]
+        except (zipfile.BadZipFile, KeyError, ValueError, OSError):
+            continue
         alias = next((str(r["chat_alias"]) for r in rows if r.get("chat_alias")), z.stem)
         span = z.stem[len(alias) + 1:] if z.stem.startswith(alias + "-") else z.stem
         prompt = SUMMARY_PROMPT.format(alias=alias, span=span, transcript=_transcript(rows))
+        argv = [binary, "-p", "--tools", "", "--strict-mcp-config", "--setting-sources", "local",
+                "--permission-mode", "dontAsk", "--no-session-persistence"]
         try:
-            r = run([binary, "-p", "--tools", "", "--no-session-persistence"], input=prompt, capture_output=True,
-                    text=True, timeout=timeout, check=False)
+            with tempfile.TemporaryDirectory() as empty:  # no project settings, CLAUDE.md or files around
+                r = run(argv, input=prompt, capture_output=True, text=True, timeout=timeout, check=False, cwd=empty)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if r.returncode != 0 or not (r.stdout or "").strip():
             continue
-        fd = os.open(md, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, (f"# Archiwum `{z.name}`\n\n" + r.stdout.strip() + "\n").encode())
-        finally:
-            os.close(fd)
+        replace_durably(md, (f"# Archiwum `{z.name}`\n\n" + r.stdout.strip() + "\n").encode())
         done.append(md.name)
     return done
 
@@ -876,7 +973,7 @@ def reparse(own: str, now: datetime | None = None) -> int:
             if new is None:
                 out.append(e)
                 continue
-            new.update(seq=e.get("seq"), received_at=e.get("received_at") or new["received_at"],
+            new.update(seq=e.get("seq"), key=e.get("key"), received_at=e.get("received_at") or new["received_at"],
                        chat_alias=e.get("chat_alias") or new["chat_alias"])
             for a_new, a_old in zip(new.get("attachments") or [], e.get("attachments") or [], strict=False):
                 a_new["path"] = a_old.get("path")

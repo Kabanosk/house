@@ -5,6 +5,7 @@ Used by: `house doctor [contest]` (prints the summary and, with a contest, write
 agents can run (codex and local-model tiers fall back to other agents when missing).
 """
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timedelta
@@ -136,6 +137,14 @@ def signal_timer_status(home: Path | None = None, run=subprocess.run) -> str | N
     except (OSError, subprocess.TimeoutExpired):
         state = "unknown"
     if state == "active":
+        try:
+            linger = run(["loginctl", "show-user", os.environ.get("USER") or "", "-p", "Linger"], capture_output=True,
+                         text=True, check=False, timeout=5).stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            linger = ""
+        if "Linger=no" in linger:
+            return ("! signal: timer działa tylko, gdy jesteś zalogowany (linger wyłączony: "
+                    "`loginctl enable-linger`)")
         return "✓ signal: timer odbioru działa"
     return f"! signal: timer zainstalowany, ale nieaktywny ({state}); `house setup --signal-timer`"
 

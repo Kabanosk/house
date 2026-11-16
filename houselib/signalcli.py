@@ -72,7 +72,10 @@ def cmd_archive(args) -> int:
             chat = signalchats.resolve(args.alias)
         except ValueError as e:
             return _usage(str(e))
-        print(_compact_line(signalstore.compact(force_archive={chat.id})))
+        try:
+            print(_compact_line(signalstore.compact(force_archive={chat.id})))
+        except ValueError as e:
+            return _usage(str(e))
     if args.summarize:
         for name in signalstore.summarize_pending() or ["brak archiwów do streszczenia (albo nie ma `claude`)"]:
             print(f"streszczenie: {name}" if name.endswith(".md") else name)
@@ -331,14 +334,24 @@ def cmd_deny(args) -> int:
     if not _yes(f"Przestać zapisywać `{args.alias}` ({config[args.alias].get('name')})? {history} [t/N] "):
         print("nic nie zmieniono")
         return 1
-    entry = config.pop(args.alias)
-    signalchats.save_config(config)
+    entry = config[args.alias]
     if args.purge:
-        signalstore.request_purge(entry["id"], args.alias)
-        stats = signalstore.compact()
-        print(f"✓ `{args.alias}` usunięta z dozwolonych; historia usunięta ({_compact_line(stats)})")
+        try:
+            signalstore.request_purge(entry["id"], args.alias)  # first: a failure leaves the config unchanged
+        except RuntimeError as e:
+            print(f"error: nic nie zmieniono: {e}", file=sys.stderr)
+            return 1
+    del config[args.alias]
+    signalchats.save_config(config)
+    if not args.purge:
+        print(f"✓ `{args.alias}` usunięta z dozwolonych; zapisana historia zostaje w magazynie")
         return 0
-    print(f"✓ `{args.alias}` usunięta z dozwolonych; zapisana historia zostaje w magazynie")
+    stats = signalstore.compact()
+    if "skipped" in stats or not stats.get("purged"):
+        print(f"✓ `{args.alias}` usunięta z dozwolonych; historii nie usunięto teraz "
+              f"({stats.get('skipped') or 'nic do usunięcia'}), zrobi to najbliższym compact (`house signal compact`)")
+        return 1
+    print(f"✓ `{args.alias}` usunięta z dozwolonych; historia usunięta ({_compact_line(stats)})")
     return 0
 
 
