@@ -380,7 +380,7 @@ def approval(event: dict, store: JobStore) -> str | None:
 
 # --- workspace and launch -----------------------------------------------------------------------------------------
 
-BUDGET_USD = 10                                    # Q5: per job (--max-budget-usd)
+BUDGET_USD = None  # Q5 (Wojtek): jobs run on the subscription; the limit is RUNTIME_MAX_S, not dollars
 ALLOWED_DOMAINS = ["pypi.org", "files.pythonhosted.org", "download.pytorch.org"]  # Q3
 RUNTIME_MAX_S = 7200
 CONTEXT_MESSAGES = 30
@@ -498,7 +498,8 @@ def job_command(job: Job, wt: Path, claude: str) -> list[str]:
             claude, "-p", "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--setting-sources", "local", "--settings", str(files["settings"]), "--strict-mcp-config",
             "--allowedTools", *_tools(job, wt),
-            "--disallowedTools", "WebFetch", "WebSearch", "mcp__*", "--max-budget-usd", str(BUDGET_USD),
+            "--disallowedTools", "WebFetch", "WebSearch", "mcp__*",
+            *(["--max-budget-usd", str(BUDGET_USD)] if BUDGET_USD else []),
             "--output-format", "stream-json", "--verbose"]
 
 
@@ -550,7 +551,7 @@ REPLY_MAX = 1500
 REPLY_FILES = 3
 REPLY_FILE_MAX = 25 * 1024 * 1024
 REPLY_TYPES = {".png", ".jpg", ".jpeg", ".pdf", ".csv", ".txt", ".md", ".json", ".log"}
-DAILY_ALARM_USD = 50  # Q5: alarm only, never a block
+DAILY_ALARM_USD = None  # Q5: subscription; spend is only recorded (estimate) for `agent status`
 
 
 def _redact(text: str) -> str:
@@ -823,7 +824,7 @@ def _track_spend(sig, store: "JobStore", cost: float) -> None:
     spent = {**(state.get("spent") or {})}
     spent[today] = round(float(spent.get(today) or 0) + cost, 4)
     store.set_state(spent=spent)
-    if spent[today] > DAILY_ALARM_USD and state.get("alarmed") != today:
+    if DAILY_ALARM_USD and spent[today] > DAILY_ALARM_USD and state.get("alarmed") != today:
         store.set_state(alarmed=today)
         _say(sig, SELF, f"S7 wydał dziś już {spent[today]:.2f} USD (próg alarmu {DAILY_ALARM_USD} USD). Nic nie "
                         "blokuję; wyłączenie: /agent off.")

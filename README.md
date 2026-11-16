@@ -168,12 +168,12 @@ przerwany. Dozwolone rozmowy to „Notatka do siebie”, grupy trwających konku
 w dozwolonej rozmowie uruchamia sesję Claude Code we własnym worktree repo konkursu (grupa konkursu) albo repo
 `house` (Notatka do siebie, grupy z `signal.toml`), na gałęzi `signal/<id>`. Agent działa w sandboxie: bez
 dostępu do katalogu domowego, sekretów, innych repo i rozmów, z siecią tylko do pypi/pytorch, bez narzędzi web
-i MCP, najwyżej 2 h i 10 USD na zlecenie. Sam nie commituje ani nie wysyła: house robi commit na gałęzi
+i MCP, najwyżej 2 h na zlecenie (na subskrypcji, bez limitu w dolarach). Sam nie commituje ani nie wysyła: house robi commit na gałęzi
 i odsyła odpowiedź (po filtrze sekretów, ≤ 1500 znaków, ≤ 3 pliki). Scalanie robisz Ty. Zlecać mogą osoby, które
 były w grupie przy `allow` (`house signal agent members <czat>` odświeża listę); nowa osoba albo zlecenie starsze
 niż 2 h czeka na Twoje 👍 w Notatce do siebie. W czacie: `/status`, `/stop` (cytatem albo bieżące), `/lb`;
 w Notatce do siebie: `/agent off|on`. W terminalu: `house signal agent status|off [--kill]|stop <id>|gc`. 3
-porażki z rzędu wyłączają S7 z alarmem; ponad 50 USD dziennie daje alarm (bez blokady).
+porażki z rzędu wyłączają S7 z alarmem.
 Sandbox Basha potrzebuje zagnieżdżonych przestrzeni nazw użytkownika. Ubuntu z
 `kernel.apparmor_restrict_unprivileged_userns=1` ich nie pozwala, więc wtedy zlecenia idą bez Basha (agent czyta
 i edytuje, kodu nie uruchamia), a `house doctor` to pokazuje. Włączenie wymaga sudo: profil AppArmor dla sandboxa

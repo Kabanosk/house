@@ -32,6 +32,11 @@ help and is not used), bubblewrap (Claude Code sandbox), `unittest`.
 | Q4 | Claude Code's built-in sandbox (bubblewrap) + one systemd unit per job; no separate OS user yet | — |
 | Q5 | `--max-budget-usd 10` per job; Note to Self alarm (no block) above 50 USD/day; pause after 3 failures in a row | `signalagent.BUDGET_USD`, `DAILY_ALARM_USD`, `BREAKER` |
 
+**Answers (Signal, 2026-11-16):** Q1 ❤ (default), Q2 ❤ (default), Q3 ❤ (default), Q4 „Dockerowy kontener”
+(isolation in a container: follow-up, needs a Claude token for the container and Docker setup at the computer;
+until then the built-in sandbox, and without nested userns the no-Bash fallback — Q6 A), Q5 „subskrypcja, limit
+np. 2 h” (no `--max-budget-usd`, no daily dollar alarm; `RuntimeMaxSec=7200` is the limit).
+
 ## Global Constraints
 
 - Only events already in the store are read (`signalstore.iter_events`), after `signalstore.pull`; the dispatcher

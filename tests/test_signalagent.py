@@ -325,7 +325,7 @@ class LaunchTest(JobStoreCase):
         self.assertEqual(pairs["--permission-prompts"], "none")
         self.assertEqual(pairs["--setting-sources"], "local")
         self.assertEqual(pairs["--settings"], str(files["settings"]))
-        self.assertEqual(pairs["--max-budget-usd"], str(agent.BUDGET_USD))
+        self.assertNotIn("--max-budget-usd", claude)  # Q5: subscription, the limit is 2 h per job
         self.assertEqual(pairs["--output-format"], "stream-json")
         self.assertIn("mcp__*", claude)
         allowed = claude[claude.index("--allowedTools") + 1:claude.index("--allowedTools") + 6]
@@ -756,6 +756,14 @@ class AgentCliTest(TickTest):
         code, _, _ = self.run_cli("gc")
         self.assertEqual(code, 0)
         self.assertFalse(agent.worktree_of(job).exists())
+
+
+class SubscriptionTest(TickTest):
+    def test_no_daily_dollar_alarm(self):
+        for _ in range(3):
+            agent._track_spend(self.sig, self.store, 40.0)
+        self.assertEqual(self.sig.sent, [])
+        self.assertEqual(self.store.state()["spent"][f"{datetime.now():%Y-%m-%d}"], 120.0)
 
 
 class GreetingDoctorTest(TickTest):
