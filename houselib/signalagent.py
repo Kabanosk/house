@@ -767,7 +767,7 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
             if isinstance(item, Request):
                 _accept(item, sig, store, chats, out_events, now)
             elif isinstance(item, Command):
-                log += handle_command(item, sig, store, run=run)
+                log += handle_command(item, sig, store, run=run, chats=chats, now=now)
             elif e.get("kind") == "message" and (e.get("quote") or {}).get("ts") in out_events:
                 meta = out_events[e["quote"]["ts"]].get("meta") or {}
                 original = by_key.get(str(meta.get("request") or ""))
@@ -794,6 +794,98 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
     return log
 
 
-def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run) -> list[str]:
-    """Placeholder until Task 8: commands are acknowledged in the log only."""
-    return [f"agent: komenda {cmd.name}"]
+STATUS_EVERY = timedelta(seconds=30)
+
+
+def stop_job(job: Job, store: "JobStore", run=subprocess.run) -> Job:
+    """Stop a running job's unit (or drop a queued one); the worktree and branch stay for inspection."""
+    if job.status == "running" and job.unit:
+        run(["systemctl", "--user", "stop", job.unit], capture_output=True, text=True, check=False)
+    return store.update(job.id, status="stopped", ended=datetime.now().astimezone().isoformat(timespec="seconds"),
+                        result="zatrzymane")
+
+
+def _elapsed(job: Job, now: datetime) -> str:
+    from .signalread import parse_iso
+    start = parse_iso(job.started)
+    return f"{int((now - start).total_seconds() // 60)} min" if start else "?"
+
+
+def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, chats: dict | None = None,
+                   now: datetime | None = None) -> list[str]:
+    """Answer a chat command without a model: /status, /lb, /stop (this chat's jobs only), /agent off|on (owner)."""
+    now = now or datetime.now().astimezone()
+    quote = (int(cmd.key.rsplit(":", 1)[1]), cmd.author)
+    if cmd.name == "agent-off":
+        store.set_enabled(False)
+        _say(sig, SELF, "S7 wyłączony: nowe zlecenia nie startują (działające trwają; `house signal agent off "
+                        "--kill` je zatrzyma).", quote=quote)
+        return ["agent: wyłączony z Signala"]
+    if cmd.name == "agent-on":
+        store.set_enabled(True)
+        _say(sig, SELF, "S7 włączony.", quote=quote)
+        return ["agent: włączony z Signala"]
+    mine = [j for j in store.all() if j.chat == cmd.chat]
+    contest = next((j.contest for j in mine if j.contest), None)
+    if cmd.name == "status":
+        last = (store.state().get("status_at") or {}).get(cmd.chat)
+        from .signalread import parse_iso
+        if last and now - parse_iso(last) < STATUS_EVERY:
+            return []
+        store.set_state(status_at={**(store.state().get("status_at") or {}), cmd.chat: now.isoformat()})
+        running = [f"„{_snippet(j.text)}” ({j.author_name}, {_elapsed(j, now)})" for j in mine if j.status == "running"]
+        queued = [f"„{_snippet(j.text)}”" for j in mine if j.status in ("queued", "waiting-approval")]
+        lines = [f"w toku: {', '.join(running) or 'nic'}", f"kolejka: {', '.join(queued) or 'pusta'}"]
+        if not store.enabled():
+            lines.append("S7 wyłączony")
+        _say(sig, cmd.chat, "\n".join(lines), contest=contest, quote=quote)
+        return []
+    if cmd.name == "lb":
+        from . import exp
+        contests = list((chats or {}).get(cmd.chat).contests) if (chats or {}).get(cmd.chat) else []
+        if not contests:
+            _say(sig, cmd.chat, "brak konkursu dla tej rozmowy", quote=quote)
+            return []
+        for c in contests:
+            line = None
+            try:
+                line = exp.summary_line(c)
+            except Exception:  # noqa: BLE001 — a broken experiments file must not break the dispatcher
+                line = None
+            _say(sig, cmd.chat, line or "brak wyników eksperymentów", contest=str(c), quote=quote)
+        return []
+    if cmd.name == "stop":
+        target = None
+        if cmd.quote_ts is not None:
+            target = next((j for j in mine if cmd.quote_ts in (j.ack_ts, j.ts)), None)
+        if target is None:
+            target = next((j for j in sorted(mine, key=lambda j: j.created, reverse=True)
+                           if j.status == "running"), None)
+        if target is None or target.status not in ("running", "queued", "waiting-approval"):
+            _say(sig, cmd.chat, "nic do zatrzymania", contest=contest, quote=quote)
+            return []
+        was = target.status
+        stop_job(target, store, run)
+        what = "zatrzymane" if was == "running" else "usunięte z kolejki"
+        _say(sig, target, f"{what}: „{_snippet(target.text)}” · gałąź {target.branch or '—'} zostaje", quote=quote)
+        return [f"agent: {what} {target.id}"]
+    return []
+
+
+GC_AFTER = timedelta(days=7)
+
+
+def gc(now: datetime | None = None) -> list[str]:
+    """Remove worktrees of jobs that ended over 7 days ago (their branches stay for merging)."""
+    from .signalread import parse_iso
+    now = now or datetime.now().astimezone()
+    store, removed = JobStore(), []
+    for job in store.all():
+        ended = parse_iso(job.ended)
+        wt = worktree_of(job)
+        if job.status in ("done", "failed", "stopped") and ended and now - ended > GC_AFTER and wt.exists():
+            subprocess.run(["git", "-C", job.repo, "worktree", "remove", "--force", str(wt)], capture_output=True,
+                           text=True, check=False)
+            if not wt.exists():
+                removed.append(job.id)
+    return removed

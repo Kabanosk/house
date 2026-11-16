@@ -464,7 +464,7 @@ ENV_REASON = ("HOUSE_* path overrides (HOUSE_SIGNAL_CONFIG, HOUSE_NOTIFY_CONFIG,
 DATA_REASON = "house data (~/.local/share/house: the Signal store, caches, cursors) is written only by house commands"
 HOUSE_DATA_DIR = ".local/share/house"
 HOUSE_ENV_RE = re.compile(r"\bHOUSE_(SIGNAL_CONFIG|NOTIFY_CONFIG|DATA_DIR|SIGNAL_ATTACHMENTS)=")
-ALLOW_RE = re.compile(r"house\S*\s+signal\s+(allow|deny)\b")
+ALLOW_RE = re.compile(r"house\S*\s+signal\s+(allow|deny|agent\s+(on|members))\b")
 INNER_SIGNAL_CLI_RE = re.compile(r"(^|[;&|(`]|\$\()\s*(\S*/)?signal-cli(\s|$)")
 WRAPPERS = {"timeout", "env", "nice", "nohup", "sudo", "stdbuf", "exec", "command", "unbuffer", "script", "xargs",
             "time", "setsid"}
@@ -598,7 +598,7 @@ def check_job(tool: str, args: dict, cwd: Path, worktree: Path, home: Path | Non
         return reason
     if tool == "Bash":
         for seg in _segments(str(args.get("command") or "")):
-            name, rest = _command_name(seg)
+            name, _ = _command_name(seg)
             if name in JOB_BLOCKED_COMMANDS:
                 return JOB_REASON.format(what=f"`{name}` is not available")
             if name == "git":

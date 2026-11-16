@@ -309,7 +309,12 @@ def cmd_allow(args) -> int:
     config[alias] = {"id": group["id"], "name": name,
                      "added": datetime.now().astimezone().isoformat(timespec="seconds")}
     signalchats.save_config(config)
-    print(f"✓ {alias} → {name} ({short}). Od teraz zapisywane i czytelne dla agentów.")
+    from . import signalagent
+    members = sig.group_members(group["id"]) if hasattr(sig, "group_members") else []
+    if members:
+        signalagent.JobStore().set_members(group["id"], members)
+    print(f"✓ {alias} → {name} ({short}). Od teraz zapisywane i czytelne dla agentów"
+          + (f"; {len(members)} osób może zlecać @claude." if members else "."))
     return 0
 
 
@@ -484,6 +489,73 @@ def _migrating(func):
     return run
 
 
+def cmd_agent(args) -> int:
+    """`house signal agent tick|status|on|off [--kill]|stop ID|members ALIAS|gc`: the @claude agent (S7).
+
+    `on` and `members` need a terminal (they widen what runs or who may ask); `off` works for anyone.
+    Exit 0, 1 Signal not configured (tick, members), 2 no terminal / unknown job or chat.
+    """
+    from . import setup, signalagent
+    store = signalagent.JobStore()
+    action = args.action
+    if action == "tick":
+        for line in signalagent.tick(_client()):
+            print(line)
+        return 0
+    if action == "status":
+        state = store.state()
+        print(f"S7: {'włączony' if store.enabled() else 'wyłączony'} · porażki z rzędu: {state.get('failures', 0)} · "
+              f"dziś: {float((state.get('spent') or {}).get(f'{datetime.now():%Y-%m-%d}') or 0):.2f} USD")
+        for j in sorted(store.all(), key=lambda j: j.created)[-20:]:
+            print(f"{j.id} {j.status:<16} {j.chat_alias:<12} {Path(j.repo).name:<20} {j.created[:16]} "
+                  f"„{signalread.snippet(j.text, 40)}”")
+        return 0
+    if action in ("on", "members"):
+        refused = _human_only(f"agent {action}")
+        if refused:
+            return refused
+    if action == "on":
+        store.set_enabled(True)
+        if store.state().get("cursor") is None:
+            store.set_state(cursor=signalstore.last_seq())
+        setup.install_signal_timer(every="1min", agent=True)
+        print("✓ S7 włączony: odbiór co minutę, `@claude …` w dozwolonych rozmowach uruchamia agenta")
+        return 0
+    if action == "off":
+        store.set_enabled(False)
+        if args.kill:
+            for job in store.running():
+                signalagent.stop_job(job, store)
+        setup.install_signal_timer(every="5min")
+        print("✓ S7 wyłączony" + (" i zatrzymany" if args.kill else ""))
+        return 0
+    if action == "stop":
+        job = store.get(args.target or "")
+        if job is None:
+            return _usage(f"nie ma zlecenia {args.target}")
+        signalagent.stop_job(job, store)
+        print(f"✓ zatrzymane {job.id}")
+        return 0
+    if action == "members":
+        try:
+            chat = signalchats.resolve(args.target or "")
+        except ValueError as e:
+            return _usage(str(e))
+        sig = _client()
+        if sig is None:
+            print("error: Signal nie jest skonfigurowany", file=sys.stderr)
+            return 1
+        ids = sig.group_members(chat.id)
+        store.set_members(chat.id, ids)
+        print(f"✓ {chat.alias}: {len(ids)} osób może zlecać (@claude)")
+        return 0
+    if action == "gc":
+        removed = signalagent.gc()
+        print(f"usunięte worktree: {len(removed)}")
+        return 0
+    return _usage(f"nieznana akcja {action}")
+
+
 def register(sub) -> None:
     """Add the `signal` command with its subcommands to the top-level subparsers of `house`."""
     sg = sub.add_parser("signal", help="team chats on Signal: read, unread, show, send, groups, allow, pull")
@@ -500,6 +572,11 @@ def register(sub) -> None:
     ar.add_argument("alias", nargs="?")
     ar.add_argument("--summarize", action="store_true", help="write missing summaries with `claude -p` (no tools)")
     ar.set_defaults(func=_migrating(cmd_archive))
+    ag = ss.add_parser("agent", help="@claude agent from Signal (S7): tick, status, on, off, stop, members, gc")
+    ag.add_argument("action", choices=["tick", "status", "on", "off", "stop", "members", "gc"])
+    ag.add_argument("target", nargs="?", help="stop: job id; members: chat alias")
+    ag.add_argument("--kill", action="store_true", help="off: also stop running jobs")
+    ag.set_defaults(func=_migrating(cmd_agent))
     m = ss.add_parser("migrate", help="move the old inbox.jsonl / sent.jsonl into the store (idempotent)")
     m.set_defaults(func=cmd_migrate)
     sd = ss.add_parser("send", help="send to an allowed chat (prefix 🤖, logged): send CHAT TEXT [--reply-to TS]")

@@ -199,7 +199,8 @@ class SignalRulesTest(unittest.TestCase):
     def test_allow_deny_from_agent_blocked(self):
         for cmd in ("bin/house signal allow techarena_claude --alias t", "house signal deny techarena",
                     'echo t | script -qc "house signal allow techarena --alias x" /dev/null',
-                    "unbuffer ~/house/bin/house signal allow x"):
+                    "unbuffer ~/house/bin/house signal allow x", "house signal agent on",
+                    "echo t | script -qc 'house signal agent members techarena' /dev/null"):
             reason = self.check("Bash", command=cmd)
             self.assertIsNotNone(reason, cmd)
             self.assertIn("human", reason)

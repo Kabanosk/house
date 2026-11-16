@@ -243,3 +243,11 @@ class ErrorLineTest(unittest.TestCase):
     def test_warn_only_is_redacted(self):
         line = sig._error_line("WARN something about +48555000111\n")
         self.assertNotIn("555000111", line)
+
+
+class GroupMembersTest(unittest.TestCase):
+    def test_group_members(self):
+        run = FakeRun('[{"id": "g1", "name": "T", "members": [{"number": "+1", "uuid": "u1"}, {"number": "+2"}]},'
+                      ' {"id": "g2", "members": [{"uuid": "u9"}]}]')
+        self.assertEqual(sig.Signal("+48111", "sc", run=run).group_members("g1"), ["u1", "+2"])
+        self.assertEqual(run.calls[0], ["sc", "-a", "+48111", "-o", "json", "listGroups", "-d"])

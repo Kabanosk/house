@@ -420,6 +420,9 @@ class FakeAgentSig:
         return ts
 
 
+REAL_RUN = __import__("subprocess").run
+
+
 class FakeSystemd:
     def __init__(self):
         self.calls, self.active = [], set()
@@ -436,7 +439,9 @@ class FakeSystemd:
         if argv[:3] == ["systemctl", "--user", "stop"]:
             self.active.discard(argv[3])
             return subprocess.CompletedProcess(argv, 0, "", "")
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[0] == "systemctl":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return REAL_RUN(argv, **kw)
 
     def launches(self):
         return [c for c in self.calls if c[0] == "systemd-run"]
@@ -603,3 +608,131 @@ class TickTest(JobStoreCase):
         self.tick()
         self.assertFalse(self.store.enabled())
         self.assertTrue(any("wyłączam S7" in s["text"] for s in self.sig.sent))
+
+
+class CommandTest(TickTest):
+    def test_status_lists_this_chat_and_is_rate_limited(self):
+        self.add(fx.self_note(1000, "@claude zadanie A"))
+        self.tick()
+        self.add(fx.self_note(2000, "/status"))
+        self.add(fx.self_note(2001, "/status"))
+        self.tick()
+        answers = [s["text"] for s in self.sig.sent if "w toku" in s["text"]]
+        self.assertEqual(len(answers), 1)
+        self.assertIn("zadanie A", answers[0])
+
+    def test_stop_running_job(self):
+        self.add(fx.self_note(1000, "@claude długie"))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop"))
+        self.tick()
+        self.assertIn(["systemctl", "--user", "stop", job.unit], self.sd.calls)
+        job = self.store.get(job.id)
+        self.assertEqual(job.status, "stopped")
+        self.assertTrue(any("zatrzymane" in s["text"] for s in self.sig.sent))
+        self.assertTrue(agent.worktree_of(job).exists())
+
+    def test_stop_from_other_chat_does_not_touch_job(self):
+        self.add(fx.self_note(1000, "@claude długie"))
+        self.tick()
+        self.add(fx.group_in(2000, "/stop"))
+        self.tick()
+        self.assertEqual(self.store.all()[0].status, "running")
+
+    def test_stop_quoted_queued_job(self):
+        self.add(fx.self_note(1000, "@claude a"))
+        self.add(fx.self_note(1001, "@claude b"))
+        self.tick()
+        queued = next(j for j in self.store.all() if j.status == "queued")
+        self.add(fx.self_note(2000, "/stop", quote=(queued.ack_ts, fx.OWN, "🤖 przyjąłem")))
+        self.tick()
+        self.assertEqual(self.store.get(queued.id).status, "stopped")
+
+    def test_agent_off_on_from_note_to_self(self):
+        self.add(fx.self_note(2000, "/agent off"))
+        self.tick()
+        self.assertFalse(self.store.enabled())
+        self.add(fx.self_note(2001, "/agent on"))
+        self.tick()
+        self.assertTrue(self.store.enabled())
+
+    def test_lb_without_contest(self):
+        self.add(fx.self_note(2000, "/lb"))
+        self.tick()
+        self.assertIn("brak konkursu", self.sig.sent[-1]["text"])
+
+    def test_lb_with_contest(self):
+        from unittest import mock
+
+        from houselib.signalchats import Chat
+        contest = self.tmp / "fr-2026"
+        (contest / ".house").mkdir(parents=True)
+        self.chats[fx.GID] = Chat(fx.GID, "fr", "Team", "konkurs fr", (contest,))
+        with mock.patch("houselib.exp.summary_line", return_value="exp: best 0.81 (E-004)"):
+            self.add(fx.group_in(2000, "/lb"))
+            self.tick()
+        self.assertIn("best 0.81", self.sig.sent[-1]["text"])
+
+
+class AgentCliTest(TickTest):
+    def run_cli(self, *argv, tty=False):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from houselib import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("houselib.signalcli._tty", return_value=tty), \
+                mock.patch("houselib.signalcli._ask", return_value="t"), \
+                mock.patch("houselib.signal.from_config", return_value=self.sig), \
+                mock.patch("houselib.signalagent.subprocess.run", self.sd):
+            code = cli.main(["signal", "agent", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_on_needs_tty(self):
+        self.store.set_enabled(False)
+        self.assertEqual(self.run_cli("on")[0], 2)
+        self.assertFalse(self.store.enabled())
+        with __import__("unittest").mock.patch("houselib.setup.install_signal_timer") as timer:
+            self.assertEqual(self.run_cli("on", tty=True)[0], 0)
+        self.assertTrue(self.store.enabled())
+        timer.assert_called_once()
+        self.assertEqual(timer.call_args.kwargs.get("every"), "1min")
+
+    def test_off_works_for_anyone_and_kill_stops_jobs(self):
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        (job,) = self.store.all()
+        with __import__("unittest").mock.patch("houselib.setup.install_signal_timer"):
+            code, _, _ = self.run_cli("off", "--kill")
+        self.assertEqual(code, 0)
+        self.assertFalse(self.store.enabled())
+        self.assertEqual(self.store.get(job.id).status, "stopped")
+
+    def test_status(self):
+        self.add(fx.self_note(1000, "@claude zadanie"))
+        self.tick()
+        code, out, _ = self.run_cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("S7: włączony", out)
+        self.assertIn("running", out)
+
+    def test_members_snapshot(self):
+        self.sig.group_members = lambda gid: ["u-a", "u-b"]
+        self.assertEqual(self.run_cli("members", "techarena")[0], 2)
+        code, _, _ = self.run_cli("members", "techarena", tty=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.store.members(fx.GID), ["u-a", "u-b"])
+
+    def test_gc_removes_old_worktrees(self):
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        (job,) = self.store.all()
+        self.finish_unit(job)
+        self.tick()
+        self.store.update(job.id, ended="2020-01-01T00:00:00+00:00")
+        code, _, _ = self.run_cli("gc")
+        self.assertEqual(code, 0)
+        self.assertFalse(agent.worktree_of(job).exists())
