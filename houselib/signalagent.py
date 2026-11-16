@@ -388,6 +388,10 @@ JOB_MEMORY_MAX = "8G"
 JOB_TASKS_MAX = 512
 COMMIT_FILE_MAX = 50 * 1024 * 1024
 REPLY_READ_MAX = 64 * 1024
+SANDBOX_PLACEHOLDERS = {".env", ".env.local", ".env.development", ".env.development.local", ".env.production",
+                        ".env.production.local", ".env.test", ".env.test.local", ".gitmodules", ".npmrc", ".yarnrc",
+                        ".yarnrc.yml", "bunfig.toml", "package.json", "package-lock.json", "pnpm-lock.yaml",
+                        "yarn.lock"}
 PROMPT_TEMPLATE = "core/templates/signal-agent-prompt.md"
 CODE_ROOT = Path(__file__).resolve().parents[1]  # the house checkout running this code (template, house-hook)
 
@@ -748,10 +752,16 @@ def _commit(job: Job, wt: Path) -> str:
            "LANG": "C.UTF-8"}
     git = ["git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
            "-c", f"user.name={who['name'] or 'house'}", "-c", f"user.email={who['email'] or 'house@localhost'}"]
-    big = _big_files(wt)
-
     def run(*a: str) -> subprocess.CompletedProcess:
         return subprocess.run([*git, *a], cwd=wt, env=env, capture_output=True, text=True, check=False)
+    untracked = run("ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0")
+    for rel in untracked:  # empty mount points the sandbox runtime creates in the working directory
+        p = wt / rel
+        if rel and Path(rel).name in SANDBOX_PLACEHOLDERS and p.is_file() and not p.is_symlink() \
+                and p.stat().st_size == 0:
+            p.unlink()
+    big = _big_files(wt)
+
     run("add", "-A", "--", ".", ":(exclude).house-job", *[f":(exclude){p}" for p in big])
     if run("diff", "--cached", "--quiet").returncode == 0:
         summary = "bez zmian w repo"

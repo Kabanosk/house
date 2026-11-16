@@ -982,3 +982,19 @@ class SecurityReviewTest(TickTest):
         line = (contest / ".house/PROGRESS.md").read_text()
         self.assertNotIn("\n## Q-999", line)
         self.assertLess(len(line), 400)
+
+
+class SandboxPlaceholderTest(TickTest):
+    def test_empty_sandbox_placeholders_are_not_committed(self):
+        from tests.helpers import git
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        (job,) = self.store.all()
+        wt = agent.worktree_of(job)
+        for name in (".env", ".env.local", "package.json", "yarn.lock", ".npmrc", "bunfig.toml"):
+            (wt / name).write_text("")
+        (wt / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")  # a real file the agent wrote stays
+        self.finish_unit(job)
+        self.tick()
+        files = git(self.repo, "show", "--name-only", "--format=", f"signal/{job.id}").split()
+        self.assertEqual(sorted(files), ["nowy.py", "pnpm-lock.yaml"])
