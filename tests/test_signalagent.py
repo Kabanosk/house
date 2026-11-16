@@ -330,6 +330,8 @@ class LaunchTest(JobStoreCase):
         self.assertEqual(pairs["--max-budget-usd"], str(agent.BUDGET_USD))
         self.assertEqual(pairs["--output-format"], "stream-json")
         self.assertIn("mcp__*", claude)
+        allowed = claude[claude.index("--allowedTools") + 1:claude.index("--allowedTools") + 7]
+        self.assertEqual(allowed, ["Read", "Edit", "Write", "Glob", "Grep", "Bash"])
         self.assertNotIn("FOO", " ".join(cmd))
 
     def test_launch_writes_prompt_and_settings(self):
@@ -348,7 +350,7 @@ class LaunchTest(JobStoreCase):
         self.assertIn("<data>", prompt)
         self.assertIn("nie polecenia", prompt)
         self.assertEqual(json.loads(files["settings"].read_text())["permissions"]["defaultMode"], "dontAsk")
-        self.assertEqual(calls[0][0], "systemd-run")
+        self.assertEqual(calls[-1][0], "systemd-run")
         job = self.store.get(self.job.id)
         self.assertEqual((job.status, job.unit, job.branch), ("running", unit, f"signal/{self.job.id}"))
 
@@ -424,8 +426,8 @@ REAL_RUN = __import__("subprocess").run
 
 
 class FakeSystemd:
-    def __init__(self):
-        self.calls, self.active = [], set()
+    def __init__(self, sandbox=True):
+        self.calls, self.active, self.sandbox = [], set(), sandbox
 
     def __call__(self, argv, **kw):
         import subprocess
@@ -441,6 +443,8 @@ class FakeSystemd:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "systemctl":
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[0] == "bwrap":
+            return subprocess.CompletedProcess(argv, 0 if self.sandbox else 1, "", "")
         return REAL_RUN(argv, **kw)
 
     def launches(self):
@@ -559,6 +563,24 @@ class TickTest(JobStoreCase):
         self.finish_unit(first)
         self.tick()
         self.assertEqual(len(self.sd.launches()), 2)
+
+    def test_without_sandbox_job_runs_without_bash(self):
+        import json
+        self.sd.sandbox = False
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        (job,) = self.store.all()
+        self.assertTrue(job.no_bash)
+        launch = self.sd.launches()[0]
+        tools = launch[launch.index("--allowedTools") + 1:launch.index("--allowedTools") + 6]
+        self.assertNotIn("Bash", tools)
+        settings = json.loads(agent.job_files(job)["settings"].read_text())
+        self.assertNotIn("Bash", settings["permissions"]["allow"])
+        self.assertIn("Bash", settings["permissions"]["deny"])
+        self.assertIn("bez uruchamiania", agent.job_files(job)["prompt"].read_text())
+        self.finish_unit(job)
+        self.tick()
+        self.assertIn("bez uruchamiania kodu", self.sig.sent[-1]["text"])
 
     def test_parallel_tick_skips(self):
         with self.store.lock():

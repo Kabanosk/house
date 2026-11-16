@@ -215,6 +215,7 @@ class Job:
     approve_ts: int | None = None
     reply_ts: int | None = None
     reply_pending: bool = False
+    no_bash: bool = False
 
 
 class JobStore:
@@ -375,6 +376,7 @@ BUDGET_USD = 10                                    # Q5: per job (--max-budget-u
 ALLOWED_DOMAINS = ["pypi.org", "files.pythonhosted.org", "download.pytorch.org"]  # Q3
 RUNTIME_MAX_S = 7200
 CONTEXT_MESSAGES = 30
+JOB_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep", "Bash")  # explicit: env scrub otherwise forces default mode
 PROMPT_TEMPLATE = "core/templates/signal-agent-prompt.md"
 CODE_ROOT = Path(__file__).resolve().parents[1]  # the house checkout running this code (template, house-hook)
 
@@ -430,13 +432,32 @@ def job_env(job: Job, wt: Path, claude: str) -> dict[str, str]:
             "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 
+def sandbox_usable(run=subprocess.run) -> bool:
+    """Whether Claude Code's Bash sandbox can start here: it needs a user namespace inside a user namespace, which
+    Ubuntu's AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`) refuses by default."""
+    try:
+        r = run(["bwrap", "--ro-bind", "/", "/", "--unshare-user", "--unshare-net", "--",
+                 "bwrap", "--ro-bind", "/", "/", "--unshare-user", "true"], capture_output=True, text=True,
+                check=False, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def _tools(job: Job) -> list[str]:
+    return [t for t in JOB_TOOLS if not (job.no_bash and t == "Bash")]
+
+
 def job_settings(job: Job, wt: Path) -> dict:
-    """Claude Code settings for the job: `dontAsk`, no web or MCP tools, sandbox that fails closed, job hook."""
+    """Claude Code settings for the job: `dontAsk`, no web or MCP tools, sandbox that fails closed, job hook.
+
+    Without a usable sandbox (`job.no_bash`) Bash is denied altogether: the agent reads and edits code only.
+    """
     return {
         "permissions": {"defaultMode": "dontAsk",
-                        "allow": ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+                        "allow": _tools(job),
                         "deny": ["WebFetch", "WebSearch", "mcp__*", "Read(~/.ssh/**)", "Read(~/.config/**)",
-                                 "Read(~/.local/share/**)", "Read(~/.claude/**)"]},
+                                 "Read(~/.local/share/**)", "Read(~/.claude/**)", *(["Bash"] if job.no_bash else [])]},
         "sandbox": {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
                     "autoAllowBashIfSandboxed": True,
                     "filesystem": {"denyRead": ["~/"], "allowRead": [str(wt)], "allowWrite": [str(wt)]},
@@ -457,6 +478,7 @@ def job_command(job: Job, wt: Path, claude: str) -> list[str]:
             "--", "/usr/bin/env", "-i", *env,
             claude, "-p", "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--setting-sources", "local", "--settings", str(files["settings"]), "--strict-mcp-config",
+            "--allowedTools", *_tools(job),
             "--disallowedTools", "WebFetch", "WebSearch", "mcp__*", "--max-budget-usd", str(BUDGET_USD),
             "--output-format", "stream-json", "--verbose"]
 
@@ -464,9 +486,13 @@ def job_command(job: Job, wt: Path, claude: str) -> list[str]:
 def _prompt(job: Job, wt: Path) -> str:
     jd = wt / ".house-job"
     files = ", ".join(sorted(p.name for p in (jd / "in").iterdir())) or "brak"
-    return (CODE_ROOT / PROMPT_TEMPLATE).read_text().format(
+    text = (CODE_ROOT / PROMPT_TEMPLATE).read_text().format(
         repo=Path(job.repo).name, branch=f"signal/{job.id}", author=job.author_name, request=job.text, files=files,
         quote="")
+    if job.no_bash:
+        text += ("\nUwaga: na tej maszynie pracujesz bez uruchamiania kodu (brak Basha, sandbox niedostępny). Czytaj "
+                 "i edytuj pliki; napisz w reply.md, co trzeba uruchomić i sprawdzić.\n")
+    return text
 
 
 def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | None:
@@ -481,6 +507,8 @@ def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | Non
     except (OSError, subprocess.CalledProcessError) as e:
         store.update(job.id, status="failed", error=f"worktree: {e}"[:300])
         return None
+    if not sandbox_usable(run):
+        job = store.update(job.id, no_bash=True)
     files = job_files(job)
     files["prompt"].write_text(_prompt(job, wt))
     files["settings"].write_text(json.dumps(job_settings(job, wt), indent=2))
@@ -652,6 +680,8 @@ def finish(job: Job, sig, store: "JobStore") -> None:
     body = f"{head}: „{_snippet(job.text)}”\n{text}\n\ngałąź: {job.branch or 'signal/' + job.id} · {diff}"
     if notes:
         body += "\n" + "; ".join(notes)
+    if job.no_bash:
+        body += "\n(uwaga: bez uruchamiania kodu, sandbox niedostępny na tej maszynie: `house doctor`)"
     store.update(job.id, status="done" if ok else "failed", ended=datetime.now().astimezone().isoformat(
         timespec="seconds"), cost=cost, result=head, error=why, reply_pending=True)
     _progress(job, f"zlecenie od {job.author_name}: „{_snippet(job.text)}” → {head}, gałąź {job.branch}")
@@ -917,11 +947,12 @@ def doctor_lines(run=subprocess.run, which=shutil.which) -> list[str]:
     lines = [f"✓ S7: włączony · w toku: {running} · porażki z rzędu: {store.state().get('failures', 0)}"]
     if not which("bwrap"):
         lines.append("✗ S7: brak bwrap (sandbox Claude Code); `sudo apt install bubblewrap`")
+    elif sandbox_usable(run):
+        lines.append("✓ S7: sandbox (bwrap, zagnieżdżone userns) działa")
     else:
-        r = run(["bwrap", "--ro-bind", "/", "/", "--unshare-net", "true"], capture_output=True, text=True,
-                check=False, timeout=10)
-        lines.append("✓ S7: bwrap działa" if r.returncode == 0 else
-                     f"✗ S7: bwrap nie działa ({(r.stderr or '').strip()[:120]}); sprawdź AppArmor userns")
+        lines.append("✗ S7: bwrap nie działa w sandboxie Claude Code (AppArmor blokuje zagnieżdżone userns); zlecenia "
+                     "idą bez uruchamiania kodu. Naprawa wymaga sudo (profil AppArmor albo "
+                     "kernel.apparmor_restrict_unprivileged_userns=0)")
     if not which("systemd-run"):
         lines.append("✗ S7: brak systemd-run")
     if not which("claude"):
