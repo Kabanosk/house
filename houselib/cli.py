@@ -1,7 +1,7 @@
 """`house` command line.
 
 Used by: the owner and every agent role through `bin/house <command>`. Commands: doctor, check, merge, guard,
-notify, ask, inbox, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
+notify, ask, inbox, signal, deadlines, night, review, exp, new, adapt, export, sync, setup, adopt, yc. `<contest>` is the contest
 name (lowercase words with single hyphens), resolved to `contests/<name>` under the house root.
 
 Rules an agent should know:
@@ -34,6 +34,7 @@ from . import (
     registry,
     scaffold,
     setup,
+    signalcli,
     yc,
 )
 
@@ -604,6 +605,8 @@ def build_parser() -> argparse.ArgumentParser:
     ib = sub.add_parser("inbox", help="read answers from Signal (quote-replies) into QUESTIONS.md / DECISIONS.md")
     ib.add_argument("name", nargs="?", help="one contest (default: every running contest)")
     ib.set_defaults(func=cmd_inbox)
+
+    signalcli.register(sub)
 
     dl = sub.add_parser("deadlines", help="remind about / apply defaults of critical questions past their deadline")
     dl.add_argument("name", nargs="?")

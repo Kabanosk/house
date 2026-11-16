@@ -244,3 +244,86 @@ class PullTest(StoreCase):
         res = store.pull(FakeSig([bad, fx.group_in(100, "ok")]), chats())
         self.assertEqual((res.kept, res.bad_lines), (1, 1))
         self.assertEqual(store.read_state()["bad_lines"], 1)
+
+
+SELF_LINES = [
+    {"ts": 300, "chat": "self", "sender": "Wojciech Fiołka", "text": "B", "quote_ts": 250},
+    {"ts": 100, "chat": "self", "sender": "Wojciech Fiołka", "text": "A odpisze", "quote_ts": None},
+    {"ts": 200, "chat": "gT", "sender": "Patryk Zieliński", "text": "Pepo smile", "quote_ts": 150},
+    {"ts": 400, "chat": "self", "sender": "Wojciech Fiołka", "text": "notatka"},
+]
+
+
+class MigrateTest(StoreCase):
+    def write_old(self, lines=SELF_LINES, done=(100,), sent=True):
+        from houselib import notify
+        d = notify.data_dir()
+        (d / "inbox.jsonl").write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in lines))
+        (d / "inbox_done.json").write_text(json.dumps(list(done)) + "\n")
+        if sent:
+            (d / "sent.jsonl").write_text(json.dumps({"ts": 250, "contest": "fr-2026", "question": "Q-001",
+                                                      "chat": "self"}) + "\n")
+        return d
+
+    def test_migrate_inbox(self):
+        d = self.write_old(sent=False)
+        before = (d / "inbox.jsonl").read_bytes()
+        log = store.migrate()
+        events = list(store.iter_events())
+        self.assertEqual([e["ts"] for e in events], [100, 200, 300, 400])
+        self.assertEqual([e["seq"] for e in events], [1, 2, 3, 4])
+        self.assertEqual([e["dir"] for e in events], ["own", "in", "own", "own"])
+        e = events[2]
+        self.assertEqual((e["kind"], e["chat"], e["key"], e["raw"], e["meta"]),
+                         ("message", "self", "self:migrated:300", None, {"migrated": True}))
+        self.assertEqual(e["quote"], {"ts": 250, "author": None, "text": None})
+        self.assertIsNone(events[0]["quote"])
+        self.assertEqual(events[1]["sender"], {"name": "Patryk Zieliński", "number": None, "uuid": None})
+        self.assertFalse((d / "inbox.jsonl").exists())
+        renamed = list(d.glob("inbox.jsonl.migrated-*"))
+        self.assertEqual(len(renamed), 1)
+        self.assertRegex(renamed[0].name, r"^inbox\.jsonl\.migrated-\d{8}-\d{6}$")
+        self.assertEqual(renamed[0].read_bytes(), before)
+        self.assertTrue(store.read_state()["migrated"])
+        self.assertTrue(any("4" in line for line in log), log)
+
+    def test_migrate_done_keys(self):
+        d = self.write_old(sent=False)
+        store.migrate()
+        self.assertEqual(json.loads((store.store_dir() / "inbox_done.json").read_text()),
+                         {"self:migrated:100": None})
+        self.assertFalse((d / "inbox_done.json").exists())
+        self.assertEqual(len(list(d.glob("inbox_done.json.migrated-*"))), 1)
+
+    def test_migrate_sent(self):
+        self.write_old()
+        store.migrate()
+        out = [e for e in store.iter_events() if e["dir"] == "out"]
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["meta"], {"origin": "notify", "contest": "fr-2026", "question": "Q-001",
+                                          "migrated": True})
+        self.assertEqual((out[0]["ts"], out[0]["chat"], out[0]["sender"]["name"]), (250, "self", "house"))
+
+    def test_migrate_twice_is_noop(self):
+        self.write_old()
+        store.migrate()
+        before = self.messages().read_bytes()
+        self.assertEqual(store.migrate(), [])
+        self.assertEqual(store.ensure_migrated(), [])
+        self.assertEqual(self.messages().read_bytes(), before)
+
+    def test_reappearing_inbox_is_migrated_again(self):
+        d = self.write_old(sent=False)
+        store.migrate()
+        (d / "inbox.jsonl").write_text(json.dumps(SELF_LINES[0]) + "\n" + json.dumps(
+            {"ts": 500, "chat": "self", "sender": "Wojciech Fiołka", "text": "nowa", "quote_ts": None}) + "\n")
+        self.assertTrue(store.ensure_migrated())
+        self.assertEqual([e["ts"] for e in store.iter_events()], [100, 200, 300, 400, 500])
+        self.assertFalse((d / "inbox.jsonl").exists())
+
+    def test_bad_old_lines_are_skipped(self):
+        d = self.write_old(sent=False)
+        with (d / "inbox.jsonl").open("a") as f:
+            f.write("{broken\n" + json.dumps({"chat": "self"}) + "\n")
+        store.migrate()
+        self.assertEqual(len(list(store.iter_events())), 4)

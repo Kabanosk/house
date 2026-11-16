@@ -367,3 +367,113 @@ def pull(sig, chats: dict | None = None, timeout: int = 1, max_messages: int | N
     if stop:
         os.kill(os.getpid(), stop[0])
     return res
+
+
+# --- migration from the P3 files ------------------------------------------------------------------------------
+
+OLD_FILES = ("inbox.jsonl", "inbox_done.json", "sent.jsonl")
+
+
+def _set_aside(path: Path, now: datetime) -> str:
+    """Rename `path` to `<name>.migrated-<YYYYmmdd-HHMMSS>` (never overwriting) and return the new name."""
+    base = path.with_name(f"{path.name}.migrated-{now:%Y%m%d-%H%M%S}")
+    target, n = base, 1
+    while target.exists():
+        n += 1
+        target = base.with_name(f"{base.name}-{n}")
+    path.rename(target)
+    return target.name
+
+
+def _old_lines(path: Path) -> list[dict]:
+    return [e for e, _ in _parse_lines(path.read_bytes()) if e is not None]
+
+
+def _skeleton(chat: str, author: str, ts: int, dir_: str, sender: dict, text: str, quote, meta: dict) -> dict:
+    """A store event for data that never had a signal-cli envelope (migrated lines)."""
+    from . import signalchats
+    time_ = datetime.fromtimestamp(ts / 1000).astimezone().isoformat(timespec="seconds")
+    return {"v": 1, "key": f"{chat}:{author}:{ts}", "kind": "message", "dir": dir_, "chat": chat,
+            "chat_alias": signalchats.alias_of(chat), "ts": ts, "time": time_, "received_at": None,
+            "sender": sender, "text": text, "quote": quote, "mentions": [], "attachments": [], "expires_in": 0,
+            "target": None, "meta": meta, "status": "ok", "raw": None}
+
+
+def migrate(now: datetime | None = None) -> list[str]:
+    """Move the P3 files (`inbox.jsonl`, `inbox_done.json`, `sent.jsonl` in the data dir) into the store.
+
+    Idempotent: each old file is renamed to `<name>.migrated-<stamp>` (kept, never deleted) after its lines are
+    in the store, and a line whose (chat, ts) is already stored is skipped. So a file that reappears (old code
+    still writing `inbox.jsonl`) is migrated again without duplicates.
+
+    Args:
+        now: Time used for the rename stamp and `state.migrated`. Defaults to the current time.
+
+    Returns:
+        Log lines (Polish), one per migrated file; [] when there was nothing to migrate.
+    """
+    now = now or datetime.now()
+    data = notify.data_dir()
+    if not any((data / name).exists() for name in OLD_FILES):
+        return []
+    log = []
+    with lock("store.lock", blocking=True) as held:
+        if not held:
+            return ["migracja pominięta: magazyn zajęty"]
+        stored = {(e.get("chat"), e.get("ts")) for e in iter_events(raw=False)}
+        path = data / "inbox.jsonl"
+        if path.exists():
+            lines = [x for x in _old_lines(path) if str(x.get("ts", "")).isdigit() and x.get("chat")]
+            owners = {x.get("sender") for x in lines if x.get("chat") == "self"}
+            added = 0
+            for x in sorted(lines, key=lambda x: int(x["ts"])):
+                ts, chat = int(x["ts"]), str(x["chat"])
+                if (chat, ts) in stored:
+                    continue
+                q = x.get("quote_ts")
+                quote = {"ts": int(q), "author": None, "text": None} if str(q or "").isdigit() else None
+                dir_ = "own" if chat == "self" or x.get("sender") in owners else "in"
+                sender = {"name": str(x.get("sender") or "?"), "number": None, "uuid": None}
+                _append_locked(_skeleton(chat, "migrated", ts, dir_, sender, str(x.get("text") or ""), quote,
+                                         {"migrated": True}))
+                stored.add((chat, ts))
+                added += 1
+            log.append(f"inbox.jsonl: {added} wiadomości → magazyn ({len(lines) - added} już były); "
+                       f"oryginał: {_set_aside(path, now)}")
+        path = data / "sent.jsonl"
+        if path.exists():
+            lines = [x for x in _old_lines(path) if str(x.get("ts", "")).isdigit()]
+            added = 0
+            for x in lines:
+                ts, chat = int(x["ts"]), str(x.get("chat") or "self")
+                if (chat, ts) in stored:
+                    continue
+                meta = {"origin": "notify", "contest": x.get("contest"), "question": x.get("question"),
+                        "migrated": True}
+                _append_locked(_skeleton(chat, "migrated-out", ts, "out", {"name": "house", "number": None,
+                                                                            "uuid": None}, "", None, meta))
+                stored.add((chat, ts))
+                added += 1
+            log.append(f"sent.jsonl: {added} wysłanych → magazyn; oryginał: {_set_aside(path, now)}")
+        path = data / "inbox_done.json"
+        if path.exists():
+            old = read_json(path, [])
+            done_ts = {int(t) for t in old if str(t).isdigit()} if isinstance(old, list) else set()
+            new_path = store_dir() / "inbox_done.json"
+            done = read_json(new_path, {})
+            done = done if isinstance(done, dict) else {}
+            for e in iter_events(raw=False):
+                if e.get("ts") in done_ts and e.get("dir") != "out":
+                    done.setdefault(str(e["key"]), None)
+            write_json(new_path, done)
+            log.append(f"inbox_done.json: {len(done_ts)} obsłużonych; oryginał: {_set_aside(path, now)}")
+        state = read_state()
+        state["migrated"] = now.astimezone().isoformat(timespec="seconds")
+        write_json(store_dir() / STATE, state)
+    return log
+
+
+def ensure_migrated() -> list[str]:
+    """Run `migrate` when any P3 file is present in the data dir; [] otherwise (cheap: three `exists` calls)."""
+    data = notify.data_dir()
+    return migrate() if any((data / name).exists() for name in OLD_FILES) else []
