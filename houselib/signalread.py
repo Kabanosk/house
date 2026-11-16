@@ -553,3 +553,21 @@ def render_unread(view: View, msgs: list[Msg], since: datetime | None, name: str
     lines.append("(podgląd: nic nie oznaczono jako przeczytane)" if peek
                  else "(oznaczone jako przeczytane; `--peek` nie oznacza)")
     return "\n".join(lines) + "\n"
+
+
+def night_line(since_seq: int) -> str:
+    """Counts only (the report may be public): `Signal: 3 nowe wiadomości w 2 rozmowach, nieprzeczytane: …`.
+
+    Args:
+        since_seq: Store seq when the night started; messages first stored after it are counted (house's own
+            sent messages and reactions are not).
+    """
+    from . import signalstore
+    new = [e for e in signalstore.latest(signalstore.iter_events(raw=False))
+           if int(e.get("first_seq") or 0) > since_seq and e.get("kind") in ("message", "other")
+           and e.get("dir") in ("in", "own")]
+    if not new:
+        return "Signal: brak nowych wiadomości"
+    chats = len({e.get("chat") for e in new})
+    return (f"Signal: {nowe(len(new))} {'wiadomość' if len(new) == 1 else 'wiadomości'} w {chats} "
+            f"{'rozmowie' if chats == 1 else 'rozmowach'}, nieprzeczytane: `house signal unread`")

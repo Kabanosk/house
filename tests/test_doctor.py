@@ -55,3 +55,59 @@ class WriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SignalStatusTest(unittest.TestCase):
+    def setUp(self):
+        import os
+        from unittest import mock
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.patches = [mock.patch.dict(os.environ, {"HOUSE_DATA_DIR": str(self.tmp / "data"),
+                                                     "HOUSE_SIGNAL_CONFIG": str(self.tmp / "signal.toml")}),
+                        mock.patch("houselib.signal.read_config", return_value={"HOUSE_NOTIFY_CHANNEL": "signal"}),
+                        mock.patch("houselib.signal.from_config",
+                                   return_value=type("S", (), {"binary": "/x/signal-cli", "account": "+1"})())]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self._tmp.cleanup()
+
+    def test_never_pulled(self):
+        out = "\n".join(doctor.signal_status())
+        self.assertIn("✓ signal: /x/signal-cli", out)
+        self.assertIn("nie było udanego odbioru", out)
+
+    def test_doctor_last_pull_and_error(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalstore
+        signalstore.update_state(last_pull_ok=datetime.now().astimezone().isoformat(timespec="seconds"))
+        out = "\n".join(doctor.signal_status())
+        self.assertIn("ostatni odbiór", out)
+        self.assertNotIn("!", out)
+        old = (datetime.now() - timedelta(days=9)).astimezone().isoformat(timespec="seconds")
+        signalstore.update_state(last_pull_ok=old, last_pull_error="ERROR User +1 is not registered.")
+        out = "\n".join(doctor.signal_status())
+        self.assertIn("odłączyć bezczynne", out)
+        self.assertIn("urządzenie odłączone", out)
+
+    def test_doctor_bad_lines_and_perms(self):
+        from houselib import signalchats, signalstore
+        signalstore.append({"v": 1, "key": "k", "kind": "message", "chat": "self", "ts": 1})
+        path = signalstore.store_dir() / "messages.jsonl"
+        with path.open("a") as f:
+            f.write("{broken\n")
+        path.chmod(0o644)
+        signalchats.save_config({"fr": {"id": "gX", "name": "x", "added": "x"}})
+        out = "\n".join(doctor.signal_status())
+        self.assertIn("uszkodzone linie magazynu: 2", out)
+        self.assertIn("messages.jsonl", out)
+        self.assertIn("0o644", out)
+
+    def test_doctor_reports_config_problems(self):
+        (self.tmp / "signal.toml").write_text("[groups.x\n")
+        self.assertIn("signal.toml", "\n".join(doctor.signal_status()))

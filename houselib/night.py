@@ -67,10 +67,12 @@ class NightReport:
         attempts: Every attempt in order, merged and failed.
         stopped_because: Why the night ended, e.g. "STOP file", "time limit", "nothing ready", "interrupted".
         report_path: The written `.house/reports/night-<date>.md`, or None before it is written.
+        signal_seq: Signal store seq at the start; the report counts messages stored after it (counts only).
     """
     attempts: list[Attempt] = field(default_factory=list)
     stopped_because: str = ""
     report_path: Path | None = None
+    signal_seq: int | None = None
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -407,6 +409,12 @@ def _write_report(contest: Path, rep: NightReport, started: datetime, tampering:
     for a in rep.attempts:
         details = a.message.replace("\n", " ").replace("|", "/")[:300]
         lines.append(f"| {a.task} | {a.n} | {a.outcome} | {details} | `{a.log}` |")
+    if rep.signal_seq is not None:
+        try:
+            from .signalread import night_line
+            lines += ["", night_line(rep.signal_seq)]
+        except Exception:  # noqa: BLE001, S110 — the report must be written even if the store is unreadable
+            pass
     questions = _open_questions(house)
     lines += ["", "## Open questions", *([f"- {q}" for q in questions] or ["- none"])]
     if tampering:
@@ -464,6 +472,11 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
     tools = _tools(contest)
     started_at, t0 = datetime.now(), now()
     rep = NightReport()
+    try:
+        from . import signalstore
+        rep.signal_seq = signalstore.last_seq()
+    except Exception:  # noqa: BLE001, S110 — Signal trouble never stops the night
+        pass
     running: dict[str, tuple] = {}  # task → (proc, start, worktree, log, attempt n, branch)
     attempts: dict[str, int] = {}
     last_failure: dict[str, str] = {}

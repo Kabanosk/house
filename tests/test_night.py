@@ -311,3 +311,26 @@ class SafetyTest(LoopTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SignalReportLineTest(unittest.TestCase):
+    def test_night_report_signal_line(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        from houselib import signalstore
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOUSE_DATA_DIR": d + "/data"}):
+            def ev(ts, chat, dir_="in"):
+                return {"v": 1, "key": f"{chat}:a:{ts}", "kind": "message", "dir": dir_, "chat": chat, "ts": ts,
+                        "text": "TAJNA treść"}
+            signalstore.append(ev(1, "gT"))
+            start = signalstore.last_seq()
+            for e in (ev(2, "gT"), ev(3, "gT"), ev(4, "self"), ev(5, "gT", "out")):
+                signalstore.append(e)
+            c = Path(d) / "c"
+            (c / ".house").mkdir(parents=True)
+            rep = night.NightReport(stopped_because="time limit", signal_seq=start)
+            text = night._write_report(c, rep, datetime(2026, 11, 20, 22, 0), []).read_text()
+        self.assertIn("Signal: 3 nowe wiadomości w 2 rozmowach, nieprzeczytane: `house signal unread`", text)
+        self.assertNotIn("TAJNA", text)
