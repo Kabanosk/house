@@ -421,3 +421,11 @@ class CursorTest(unittest.TestCase):
         self.assertEqual(signalread.reader_name(tmp / "wt"), "house")
         self.assertEqual(signalread.reader_name(tmp), Path(self._tmp.name).name)
 
+
+
+class ScrubbedTest(unittest.TestCase):
+    def test_scrubbed_message_says_why(self):
+        e = msg(at(12, 0), "", scrubbed="retencja")
+        view = signalread.View([e], NOW)
+        self.assertIn("Kuba Nowak: [treść usunięta: retencja]", view.render_read(view.msgs, title=TECHARENA, total=1,
+                                                                                 last_pull=None))

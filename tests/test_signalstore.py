@@ -386,3 +386,126 @@ class ReviewFixesTest(StoreCase):
             self.assertEqual(store.migrate(), ["migracja pominięta: działa `house inbox`"])
         self.assertTrue((d / "inbox.jsonl").exists())
         self.assertEqual(len(store.migrate(inbox_locked=False)), 1)
+
+
+class CompactTest(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.cfg = mock.patch.dict(os.environ, {"HOUSE_SIGNAL_CONFIG": str(Path(self._tmp.name) / "signal.toml")})
+        self.cfg.start()
+
+    def tearDown(self):
+        self.cfg.stop()
+        super().tearDown()
+
+    def m(self, ts, text, chat="gT", author="u-kuba", **kw):
+        from datetime import datetime
+        t = datetime.fromtimestamp(ts / 1000).astimezone().isoformat()
+        e = {"v": 1, "key": f"{chat}:{author}:{ts}", "kind": "message", "dir": "in", "chat": chat,
+             "chat_alias": "techarena" if chat == "gT" else chat, "ts": ts, "time": t, "received_at": t,
+             "sender": {"name": "Kuba", "number": "+48999", "uuid": author}, "text": text,
+             "quote": None, "mentions": [], "attachments": [], "expires_in": 0, "target": None, "meta": None,
+             "status": "ok", "raw": {"envelope": {"text": text}}}
+        e.update(kw)
+        return e
+
+    def ms(self, dt):
+        return int(dt.timestamp() * 1000)
+
+    def test_compact_deleted_expired_retention(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalchats
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x", "retention_days": 30}})
+        f = store.store_dir() / "files/techarena"
+        f.mkdir(parents=True)
+        (f / "a.jpg").write_bytes(b"x")
+        deleted = self.m(self.ms(now - timedelta(hours=2)), "ups",
+                         attachments=[{"filename": "a.jpg", "path": str(f / "a.jpg")}])
+        delete = self.m(self.ms(now - timedelta(hours=1)), "", kind="delete",
+                        target={"ts": deleted["ts"], "author": "u-kuba"})
+        expired = self.m(self.ms(now - timedelta(hours=3)), "znika", expires_in=60)
+        old = self.m(self.ms(now - timedelta(days=40)), "stare")
+        keep = self.m(self.ms(now - timedelta(minutes=5)), "zostaje")
+        self_old = self.m(self.ms(now - timedelta(days=40)), "notatka", chat="self", author="u-own")
+        out_q = self.m(self.ms(now - timedelta(days=40)), "🤖 [fr] Q-001", dir="out", author="+48111",
+                       meta={"origin": "ask", "question": "Q-001"})
+        for e in (old, self_old, out_q, expired, deleted, delete, keep):
+            store.append(e)
+        stats = store.compact(now)
+        by_key = {e["key"]: e for e in store.iter_events()}
+        for e, reason in ((deleted, "usunięta przez autora"), (expired, "wygasła"), (old, "retencja")):
+            got = by_key[e["key"]]
+            self.assertEqual((got["text"], got["raw"], got["attachments"], got["scrubbed"]), ("", None, [], reason))
+            self.assertEqual(got["key"], e["key"])
+        self.assertFalse((f / "a.jpg").exists())
+        self.assertEqual(by_key[keep["key"]]["text"], "zostaje")
+        self.assertEqual(by_key[self_old["key"]]["text"], "notatka")
+        self.assertEqual(by_key[out_q["key"]]["meta"]["question"], "Q-001")  # retention keeps the skeleton
+        self.assertEqual(stats["scrubbed"], 4)  # out_q is in a retained chat too: text gone, meta kept
+        self.assertEqual(stat.S_IMODE((store.store_dir() / "messages.jsonl").stat().st_mode), 0o600)
+
+    def test_dedupe_keeps_first_seq(self):
+        a = self.m(1000, "v1")
+        store.append(a)
+        store.append(self.m(2000, "inne"))
+        store.append(dict(a, text="v2"))
+        store.compact()
+        events = list(store.iter_events())
+        self.assertEqual([(e["seq"], e["text"]) for e in events], [(1, "v2"), (2, "inne")])
+
+    def test_generation_bumps_and_next_seq_kept(self):
+        store.append(self.m(1000, "a"))
+        before = store.read_state().get("generation", 0)
+        store.compact()
+        self.assertEqual(store.read_state()["generation"], before + 1)
+        self.assertEqual(store.append(self.m(2000, "b")), 2)
+        self.assertTrue(store.read_state()["compacted_at"])
+
+    def test_purge(self):
+        f = store.store_dir() / "files/techarena"
+        f.mkdir(parents=True)
+        (f / "a.jpg").write_bytes(b"x")
+        store.append(self.m(1000, "grupa"))
+        store.append(self.m(1001, "notatka", chat="self", author="u-own"))
+        store.request_purge("gT", "techarena")
+        store.compact()
+        self.assertEqual([e["chat"] for e in store.iter_events()], ["self"])
+        self.assertFalse(f.exists())
+        self.assertEqual(store.read_state().get("purge"), {})
+
+    def test_reader_during_compact_sees_old_or_new(self):
+        for i in range(5):
+            store.append(self.m(1000 + i, str(i)))
+        path = store.store_dir() / "messages.jsonl"
+        with path.open("rb") as old_handle:
+            store.compact()
+            self.assertEqual(len([x for x in old_handle.read().split(b"\n") if x]), 5)
+        self.assertEqual(len(list(store.iter_events())), 5)
+
+    def test_compact_skips_when_store_locked(self):
+        store.append(self.m(1000, "a"))
+        with store.lock("store.lock", blocking=False), mock.patch.object(store, "LOCK_TIMEOUT", 0.1):
+            self.assertEqual(store.compact(), {"skipped": "magazyn zajęty"})
+
+    def test_bad_lines_are_dropped_and_counted(self):
+        store.append(self.m(1000, "a"))
+        with (store.store_dir() / "messages.jsonl").open("a") as fh:
+            fh.write("{broken\n")
+        self.assertEqual(store.compact()["bad_lines"], 1)
+        self.assertEqual(store.bad_lines(), [])
+
+    def test_reparse_fixes_quote(self):
+        from tests import signal_fixtures as fx
+        raw = fx.group_in(5000, "odp", quote=(4000, "u-own", "🤖 [house] pytanie"))
+        broken = {"v": 1, "key": "gT:u-kuba:5000", "kind": "message", "dir": "in", "chat": "gT",
+                  "chat_alias": "techarena", "ts": 5000, "time": "x", "received_at": "2026-11-16T12:00:00+01:00",
+                  "sender": {"name": "Kuba"}, "text": "odp", "quote": {"ts": 4000, "author": None, "text": None},
+                  "attachments": [], "raw": raw}
+        store.append(broken)
+        store.append(self.m(6000, "bez raw", raw=None))
+        self.assertEqual(store.reparse(fx.OWN), 1)
+        e = next(store.iter_events())
+        self.assertEqual(e["quote"]["text"], "🤖 [house] pytanie")
+        self.assertEqual((e["seq"], e["received_at"]), (1, "2026-11-16T12:00:00+01:00"))

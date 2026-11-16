@@ -27,7 +27,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import notify, signalparse
@@ -582,3 +582,177 @@ def ensure_migrated(inbox_locked: bool = False) -> list[str]:
     """Run `migrate` when any P3 file is present in the data dir; [] otherwise (cheap: three `exists` calls)."""
     data = notify.data_dir()
     return migrate(inbox_locked=inbox_locked) if any((data / name).exists() for name in OLD_FILES) else []
+
+
+# --- maintenance: compact, purge, reparse ---------------------------------------------------------------------
+
+SKELETON_NOTE = "skeleton keeps key, ts, kind, dir, chat, sender, meta, target and quote ts so matches still work"
+
+
+def _rewrite(events: list[dict]) -> None:
+    """Replace the store file atomically (temp file, fsync, rename); the caller holds `store.lock`.
+
+    A reader that already opened the old file keeps reading the old version to its end.
+    """
+    path = store_dir() / MESSAGES
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, b"".join(_line(e) for e in events))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def _remove_copy(path: str | None) -> None:
+    """Delete a copied attachment, but only inside `signal/files/` (never a file someone sent from elsewhere)."""
+    if not path:
+        return
+    p = Path(path)
+    try:
+        if p.resolve().is_relative_to((store_dir() / "files").resolve()):
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _scrub(e: dict, reason: str) -> None:
+    """Drop the content of an event and keep its skeleton (see SKELETON_NOTE)."""
+    for a in e.get("attachments") or []:
+        _remove_copy(a.get("path"))
+    e.update(text="", raw=None, attachments=[], mentions=[], scrubbed=reason)
+    if isinstance(e.get("quote"), dict):
+        e["quote"] = {**e["quote"], "text": None}
+
+
+def request_purge(chat: str, alias: str) -> None:
+    """Mark a chat's whole history for removal by the next `compact` (`house signal deny --purge`)."""
+    purge = read_state().get("purge") or {}
+    update_state(purge={**purge, chat: alias})
+
+
+def compact(now: datetime | None = None) -> dict:
+    """Rewrite the store: one line per key, content of deleted / expired / out-of-retention messages removed.
+
+    Under `store.lock`. Keeps, per key, the latest version under the seq of its first line (so cursors stay
+    valid). Scrubs (text, raw, attachments and their copies in `files/`, quoted text) messages deleted by their
+    author, disappearing messages past `received_at + expires_in`, and messages of `signal.toml` groups older than
+    their `retention_days`; edits of those go too. Removes every event of chats marked by `request_purge` and their
+    `files/<alias>/`. Bumps `generation` (search indexes rebuild on a change).
+
+    Args:
+        now: Reference time. Defaults to now.
+
+    Returns:
+        Counts: `events`, `scrubbed`, `purged` (chats), `bad_lines` (dropped unparsable lines); or
+        `{"skipped": "magazyn zajęty"}` when `store.lock` is not available.
+    """
+    from . import signalchats
+    from .signalread import parse_iso
+    now = now or datetime.now().astimezone()
+    with lock("store.lock", blocking=True) as held:
+        if not held:
+            return {"skipped": "magazyn zajęty"}
+        path = store_dir() / MESSAGES
+        parsed = list(_parse_lines(path.read_bytes())) if path.exists() else []
+        first: dict[str, int] = {}
+        newest: dict[str, dict] = {}
+        for e, _ in parsed:
+            if e is None:
+                continue
+            k = str(e.get("key"))
+            first.setdefault(k, int(e.get("seq") or 0))
+            newest[k] = e
+        state = read_state()
+        purge = state.get("purge") or {}
+        items = sorted(({**e, "seq": first[k]} for k, e in newest.items() if e.get("chat") not in purge),
+                       key=lambda e: e["seq"])
+        retention = {g["id"]: int(g["retention_days"]) for g in signalchats.load_config().values()
+                     if str(g.get("retention_days", "")).isdigit()}
+        deleted = {(e.get("chat"), (e.get("target") or {}).get("ts"), str(e.get("key")).rsplit(":", 2)[1])
+                   for e in items if e.get("kind") == "delete" and e.get("target")}
+        gone: dict[tuple, str] = {}
+        scrubbed = 0
+        for e in items:
+            if e.get("kind") not in ("message", "other") or e.get("scrubbed"):
+                continue
+            author = str(e.get("key")).rsplit(":", 2)[1] if str(e.get("key")).count(":") >= 2 else ""
+            received = parse_iso(e.get("received_at")) or parse_iso(e.get("time"))
+            sent = parse_iso(e.get("time"))
+            reason = None
+            if (e.get("chat"), e.get("ts"), author) in deleted:
+                reason = "usunięta przez autora"
+            elif int(e.get("expires_in") or 0) and received and \
+                    received + timedelta(seconds=int(e["expires_in"])) < now:
+                reason = "wygasła"
+            elif e.get("chat") in retention and sent and sent < now - timedelta(days=retention[e["chat"]]):
+                reason = "retencja"
+            if reason:
+                _scrub(e, reason)
+                gone[(e.get("chat"), e.get("ts"))] = reason
+                scrubbed += 1
+        for e in items:
+            target = (e.get("chat"), (e.get("target") or {}).get("ts"))
+            if e.get("kind") == "edit" and target in gone and not e.get("scrubbed"):
+                _scrub(e, gone[target])
+        _rewrite(items)
+        for alias in purge.values():
+            folder = store_dir() / "files" / _safe(str(alias))
+            if folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+        state = read_state()
+        top = max((e["seq"] for e in items), default=0)
+        state.update(generation=int(state.get("generation") or 0) + 1, purge={},
+                     next_seq=max(int(state.get("next_seq") or 0), top + 1),
+                     compacted_at=now.isoformat(timespec="seconds"))
+        write_json(store_dir() / STATE, state)
+    return {"events": len(items), "scrubbed": scrubbed, "purged": len(purge),
+            "bad_lines": sum(1 for e, _ in parsed if e is None)}
+
+
+def reparse(own: str, now: datetime | None = None) -> int:
+    """Rebuild events that keep their signal-cli envelope (`raw`) with the current parser, without receiving.
+
+    Keeps `seq`, `received_at`, `chat_alias` and the local `path` of each attachment; scrubbed events and events
+    without `raw` (sent, migrated) stay as they are. Bumps `generation` when anything changed.
+
+    Args:
+        own: The account number (to recognise Note to Self).
+        now: Fallback for `received_at`. Defaults to now.
+
+    Returns:
+        How many events changed.
+    """
+    with lock("store.lock", blocking=True) as held:
+        if not held:
+            return 0
+        path = store_dir() / MESSAGES
+        events = [e for e, _ in _parse_lines(path.read_bytes()) if e is not None] if path.exists() else []
+        changed, out = 0, []
+        for e in events:
+            new = None
+            if e.get("raw") and not e.get("scrubbed"):
+                chat = str(e.get("chat"))
+                try:
+                    new, _ = signalparse.extract(e["raw"], own, {chat: e.get("chat_alias") or chat}, now)
+                except Exception:  # noqa: BLE001 — keep the old event when the parser still cannot read it
+                    new = None
+            if new is None:
+                out.append(e)
+                continue
+            new.update(seq=e.get("seq"), received_at=e.get("received_at") or new["received_at"],
+                       chat_alias=e.get("chat_alias") or new["chat_alias"])
+            for a_new, a_old in zip(new.get("attachments") or [], e.get("attachments") or [], strict=False):
+                a_new["path"] = a_old.get("path")
+            new = {"v": new.pop("v"), "seq": new.pop("seq"), **new}
+            if new != e:
+                changed += 1
+            out.append(new)
+        if changed:
+            _rewrite(out)
+            state = read_state()
+            state["generation"] = int(state.get("generation") or 0) + 1
+            write_json(store_dir() / STATE, state)
+        return changed

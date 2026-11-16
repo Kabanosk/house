@@ -512,3 +512,46 @@ class AutoMigrateTest(CliCase):
         self.assertEqual(code, 0)
         self.assertIn("stara", out)
         self.assertIn("migracja:", err)
+
+
+class MaintenanceCliTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+        self.noconf = mock.patch("houselib.signal.from_config", return_value=None)
+        self.noconf.start()
+
+    def tearDown(self):
+        self.noconf.stop()
+        super().tearDown()
+
+    def test_compact_command(self):
+        signalstore.append({"v": 1, "key": "gT:a:1", "kind": "message", "dir": "in", "chat": "gT", "ts": 1})
+        code, out, _ = self.run_cli("compact")
+        self.assertEqual(code, 0)
+        self.assertIn("compact: 1 zdarzeń", out)
+
+    def test_deny_purge(self):
+        signalstore.append({"v": 1, "key": "gT:a:1", "kind": "message", "dir": "in", "chat": "gT", "ts": 1})
+        with mock.patch.multiple("houselib.signalcli", _tty=lambda: True, _ask=lambda prompt: "t"):
+            code, out, _ = self.run_cli("deny", "techarena", "--purge")
+        self.assertEqual(code, 0)
+        self.assertEqual(list(signalstore.iter_events()), [])
+        self.assertIn("historia usunięta", out)
+
+    def test_reparse_needs_signal(self):
+        code, _, err = self.run_cli("reparse")
+        self.assertEqual(code, 1)
+        self.assertIn("Signal", err)
+
+    def test_pull_maintenance_compacts_once_a_day(self):
+        from tests.test_signalstore import FakeSig
+        with mock.patch("houselib.signal.from_config", return_value=FakeSig([])), \
+                mock.patch("houselib.signalstore.compact", return_value={"events": 0, "scrubbed": 0, "purged": 0,
+                                                                         "bad_lines": 0}) as compact:
+            self.run_cli("pull", "--maintenance")
+            self.assertEqual(compact.call_count, 1)
+            signalstore.update_state(compacted_at=__import__("datetime").datetime.now().astimezone().isoformat())
+            self.run_cli("pull", "--maintenance")
+            self.assertEqual(compact.call_count, 1)

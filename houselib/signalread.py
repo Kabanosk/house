@@ -321,6 +321,8 @@ class View:
     def _body(self, m: Msg) -> str:
         if m.deleted:
             return "[usunięta przez autora]"
+        if m.ev.get("scrubbed"):
+            return f"[treść usunięta: {m.ev['scrubbed']}]"
         return m.text + (" (edytowano)" if m.edited else "")
 
     @staticmethod
