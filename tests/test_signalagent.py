@@ -146,3 +146,104 @@ class RouteTest(unittest.TestCase):
         out = {900: {"meta": {"contest": "obcy"}}}
         r = agent.route(self.req("@claude x", quote=(900, "u-own", "🤖")), self.chats(self.fr), out)
         self.assertEqual(r.contest, self.fr)
+
+
+class JobStoreCase(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.env = mock.patch.dict(os.environ, {"HOUSE_DATA_DIR": str(self.tmp / "data"),
+                                                "HOUSE_SIGNAL_CONFIG": str(self.tmp / "signal.toml")})
+        self.env.start()
+        self.store = agent.JobStore()
+        self.store.set_enabled(True)
+        self.store.set_members(fx.GID, ["u-kuba", "u-ola"])
+        self.repo = self.tmp / "repo"
+
+    def tearDown(self):
+        self.env.stop()
+        self._tmp.cleanup()
+
+    def req(self, text="@claude zrób X", ts=1000, uuid="u-kuba", received=None, chat=fx.GID):
+        obj = fx.group_in(ts, text, uuid=uuid, gid=chat) if chat != "self" else fx.self_note(ts, text)
+        if received is None:
+            obj["envelope"].pop("serverReceivedTimestamp", None)
+        else:
+            obj["envelope"]["serverReceivedTimestamp"] = received
+        return agent.parse(ev(obj))
+
+
+class JobStoreTest(JobStoreCase):
+    def test_add_is_idempotent(self):
+        r = self.req()
+        job = self.store.add(r, self.repo, None, "queued")
+        self.assertEqual((job.status, job.chat, job.text, job.repo), ("queued", fx.GID, "zrób X", str(self.repo)))
+        self.assertIsNone(self.store.add(r, self.repo, None, "queued"))
+        self.assertEqual(len(self.store.all()), 1)
+        audit = (self.store.dir / "jobs.jsonl").read_text().splitlines()
+        self.assertEqual(len(audit), 1)
+        self.assertNotIn("zrób X", audit[0])  # audit keeps a hash of the text, not the text
+
+    def test_update_and_queries(self):
+        a = self.store.add(self.req(ts=1), self.repo, None, "queued")
+        b = self.store.add(self.req(ts=2), self.repo, None, "queued")
+        self.store.update(a.id, status="running", unit="house-agent-x")
+        self.assertEqual([j.id for j in self.store.running()], [a.id])
+        self.assertEqual([j.id for j in self.store.queued(self.repo)], [b.id])
+        self.assertEqual(self.store.get(a.id).unit, "house-agent-x")
+
+    def test_admit_rules(self):
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        ms = int(now.timestamp() * 1000)
+        self.assertEqual(agent.admit(self.req(received=ms - 60_000), self.store, now), ("queued", None))
+        status, why = agent.admit(self.req(received=ms - 3 * 3600_000), self.store, now)
+        self.assertEqual(status, "waiting-approval")
+        self.assertIn("sprzed 3 h", why)
+        status, why = agent.admit(self.req(uuid="u-nowy"), self.store, now)
+        self.assertEqual(status, "waiting-approval")
+        self.assertIn("nowa osoba", why)
+        self.assertEqual(agent.admit(self.req(chat="self"), self.store, now), ("queued", None))
+        self.store.set_enabled(False)
+        self.assertEqual(agent.admit(self.req(), self.store, now)[0], "refused")
+
+    def test_unknown_member_allowed_without_snapshot_rule(self):
+        from unittest import mock
+        with mock.patch.object(agent, "REQUIRE_SNAPSHOT", False):
+            self.assertEqual(agent.admit(self.req(uuid="u-nowy"), self.store, datetime.now().astimezone()),
+                             ("queued", None))
+
+    def test_queue_limit(self):
+        for i in range(5):
+            self.store.add(self.req(ts=i + 1), self.repo, None, "queued")
+        status, why = agent.admit(self.req(ts=99), self.store, datetime.now().astimezone())
+        self.assertEqual((status, why), ("refused", "kolejka pełna (5)"))
+
+    def test_breaker(self):
+        self.assertFalse(self.store.record_failure())
+        self.assertFalse(self.store.record_failure())
+        self.assertTrue(self.store.record_failure())
+        self.assertFalse(self.store.enabled())
+        self.store.set_enabled(True)
+        self.store.record_failure()
+        self.store.record_success()
+        self.assertEqual(self.store.state()["failures"], 0)
+
+    def test_approval_by_owner_reaction(self):
+        job = self.store.add(self.req(uuid="u-nowy"), self.repo, None, "waiting-approval")
+        self.store.update(job.id, approve_ts=5555)
+        own_like = ev(fx.reaction(6000, "👍🏽", 5555, fx.OWN, gid="self"))
+        self.assertEqual(agent.approval(own_like, self.store), job.id)
+        stranger = ev(fx.reaction(6001, "👍", 5555, fx.OWN))
+        self.assertIsNone(agent.approval(stranger, self.store))
+        heart = ev(fx.reaction(6002, "❤️", 5555, fx.OWN, gid="self"))
+        self.assertIsNone(agent.approval(heart, self.store))
+
+    def test_lock_is_exclusive(self):
+        with self.store.lock() as a:
+            self.assertTrue(a)
+            with agent.JobStore().lock() as b:
+                self.assertFalse(b)

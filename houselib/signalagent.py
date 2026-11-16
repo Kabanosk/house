@@ -11,9 +11,15 @@ Rules a reader of this module must keep:
 * The agent runs sandboxed in its own worktree and never commits, pushes or sends; house does that afterwards,
   after filtering what goes back to the chat.
 """
+import fcntl
+import hashlib
+import json
+import os
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b", re.IGNORECASE)
@@ -166,3 +172,196 @@ def route(req: Request, chats: dict, out_events: dict[int, dict]) -> Route:
     return Route(None, None, req.full_text,
                  [(c, f"odpowiedz cytatem na tę wiadomość, jeśli zlecenie „{short}” jest do {notify.alias(c)}")
                   for c in contests])
+
+
+# --- jobs ---------------------------------------------------------------------------------------------------------
+
+REQUIRE_SNAPSHOT = True      # Q1: only members present at `allow` (or refreshed by `agent members`) start jobs
+QUEUE_LIMIT = 5              # per chat
+BREAKER = 3                  # failures in a row that switch S7 off
+MAX_AGE = timedelta(hours=2)  # older requests wait for the owner's 👍
+ACTIVE = ("waiting-approval", "queued", "running")
+
+
+@dataclass
+class Job:
+    """One request turned into work. Persisted in `signal/agent/jobs.json`; every change is audited in
+    `jobs.jsonl` (with a hash of the text instead of the text)."""
+
+    id: str
+    key: str
+    chat: str
+    chat_alias: str
+    author: str
+    author_name: str
+    own: bool
+    ts: int
+    text: str
+    repo: str
+    contest: str | None
+    status: str
+    created: str
+    started: str | None = None
+    ended: str | None = None
+    unit: str | None = None
+    branch: str | None = None
+    worktree: str | None = None
+    result: str | None = None
+    cost: float | None = None
+    error: str | None = None
+    ack_ts: int | None = None
+    approve_ts: int | None = None
+    reply_ts: int | None = None
+    reply_pending: bool = False
+
+
+class JobStore:
+    """Jobs and S7 state under `<data dir>/signal/agent/` (dir 0700, files 0600).
+
+    `state.json`: `enabled`, `cursor` (store seq read so far), `failures` in a row, `members` (chat → ACIs),
+    `greeted` chats, `spent` (date → USD). Writers hold `lock()`; `tick` never waits for it.
+    """
+
+    def __init__(self):
+        from . import signalstore
+        self.dir = signalstore.store_dir() / "agent"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.dir.chmod(0o700)
+
+    @contextmanager
+    def lock(self):
+        """Non-blocking exclusive lock `agent.lock`; yields whether it is held."""
+        fd = os.open(self.dir / "agent.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+            except BlockingIOError:
+                held = False
+            yield held
+            if held:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def _read(self, name: str, default):
+        from . import signalstore
+        value = signalstore.read_json(self.dir / name, default)
+        return value if isinstance(value, type(default)) else default
+
+    def _write(self, name: str, value) -> None:
+        from . import signalstore
+        signalstore.write_json(self.dir / name, value)
+
+    def state(self) -> dict:
+        return self._read("state.json", {})
+
+    def set_state(self, **changes) -> dict:
+        state = self.state()
+        state.update(changes)
+        self._write("state.json", state)
+        return state
+
+    def _audit(self, job: Job, change: dict) -> None:
+        from . import signalstore
+        record = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), "job": job.id, **change}
+        if "text" in record:
+            record["text_sha256"] = hashlib.sha256(str(record.pop("text")).encode()).hexdigest()
+        signalstore._append_bytes(self.dir / "jobs.jsonl", (json.dumps(record, ensure_ascii=False) + "\n").encode())
+
+    def all(self) -> list[Job]:
+        return [Job(**j) for j in self._read("jobs.json", {}).values()]
+
+    def get(self, job_id: str) -> Job | None:
+        raw = self._read("jobs.json", {}).get(job_id)
+        return Job(**raw) if raw else None
+
+    def by_key(self, key: str) -> Job | None:
+        return next((j for j in self.all() if j.key == key), None)
+
+    def add(self, req: Request, repo: Path, contest: Path | None, status: str) -> Job | None:
+        """Record a job for `req` (claim before launch); None when this request already has one."""
+        if self.by_key(req.key) is not None:
+            return None
+        job = Job(id=hashlib.sha1(req.key.encode()).hexdigest()[:8], key=req.key, chat=req.chat,
+                  chat_alias=req.chat_alias, author=req.author, author_name=req.author_name, own=req.own,
+                  ts=req.ts, text=req.text, repo=str(repo), contest=str(contest) if contest else None,
+                  status=status, created=datetime.now().astimezone().isoformat(timespec="seconds"))
+        jobs = self._read("jobs.json", {})
+        jobs[job.id] = asdict(job)
+        self._write("jobs.json", jobs)
+        self._audit(job, {k: v for k, v in asdict(job).items() if k != "id"})
+        return job
+
+    def update(self, job_id: str, **fields) -> Job:
+        jobs = self._read("jobs.json", {})
+        jobs[job_id].update(fields)
+        self._write("jobs.json", jobs)
+        job = Job(**jobs[job_id])
+        self._audit(job, fields)
+        return job
+
+    def running(self) -> list[Job]:
+        return [j for j in self.all() if j.status == "running"]
+
+    def queued(self, repo: Path) -> list[Job]:
+        return sorted((j for j in self.all() if j.status == "queued" and j.repo == str(repo)), key=lambda j: j.created)
+
+    def active_in_chat(self, chat: str) -> list[Job]:
+        return [j for j in self.all() if j.chat == chat and j.status in ACTIVE]
+
+    def enabled(self) -> bool:
+        return bool(self.state().get("enabled"))
+
+    def set_enabled(self, on: bool) -> None:
+        self.set_state(enabled=on, failures=0 if on else self.state().get("failures", 0))
+
+    def record_failure(self) -> bool:
+        """Count a failed job; True when this one switched S7 off (the caller alerts the owner)."""
+        failures = int(self.state().get("failures") or 0) + 1
+        self.set_state(failures=failures)
+        if failures >= BREAKER:
+            self.set_state(enabled=False)
+            return True
+        return False
+
+    def record_success(self) -> None:
+        self.set_state(failures=0)
+
+    def members(self, chat: str) -> list[str]:
+        return list((self.state().get("members") or {}).get(chat) or [])
+
+    def set_members(self, chat: str, ids: list[str]) -> None:
+        members = self.state().get("members") or {}
+        members[chat] = sorted(set(ids))
+        self.set_state(members=members)
+
+
+def admit(req: Request, store: JobStore, now: datetime) -> tuple[str, str | None]:
+    """Decide what happens to a new request: ("queued", None), ("waiting-approval", why) or ("refused", why)."""
+    if not store.enabled():
+        return "refused", "S7 wyłączony (właściciel: /agent on w Notatce do siebie)"
+    if len(store.active_in_chat(req.chat)) >= QUEUE_LIMIT:
+        return "refused", f"kolejka pełna ({QUEUE_LIMIT})"
+    if req.received_ms is not None:
+        age = now - datetime.fromtimestamp(req.received_ms / 1000).astimezone()
+        if age > MAX_AGE:
+            return "waiting-approval", f"stare zlecenie (sprzed {int(age.total_seconds() // 3600)} h)"
+    if REQUIRE_SNAPSHOT and not req.own and req.chat != SELF and req.author not in store.members(req.chat):
+        return "waiting-approval", "nowa osoba w grupie (spoza listy z chwili dodania grupy)"
+    return "queued", None
+
+
+def approval(event: dict, store: JobStore) -> str | None:
+    """Job id approved by this event: the owner's own 👍 in Note to Self on house's approval question."""
+    if event.get("kind") != "reaction" or event.get("dir") != "own" or event.get("chat") != SELF:
+        return None
+    r = event.get("reaction") or {}
+    if r.get("remove"):
+        return None
+    from .inbox import reaction_answer
+    if reaction_answer(str(r.get("emoji") or "")) != "yes":
+        return None
+    target = (event.get("target") or {}).get("ts")
+    job = next((j for j in store.all() if j.status == "waiting-approval" and j.approve_ts == target), None)
+    return job.id if job else None
