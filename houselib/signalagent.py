@@ -16,7 +16,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess
 import unicodedata
 from contextlib import contextmanager
@@ -94,6 +96,8 @@ def parse(event: dict) -> "Request | Command | None":
     """
     if event.get("kind") != "message" or event.get("dir") not in ("in", "own"):
         return None
+    if not event.get("raw") or (event.get("meta") or {}).get("migrated"):
+        return None  # migrated or reconstructed events: no envelope, no receive time, never a trigger
     sent = _sent_text(event)
     if sent.lstrip().startswith("🤖"):
         return None
@@ -216,6 +220,8 @@ class Job:
     reply_ts: int | None = None
     reply_pending: bool = False
     no_bash: bool = False
+    gitdir: str | None = None
+    gitfile: str | None = None
 
 
 class JobStore:
@@ -284,9 +290,10 @@ class JobStore:
 
     def add(self, req: Request, repo: Path, contest: Path | None, status: str) -> Job | None:
         """Record a job for `req` (claim before launch); None when this request already has one."""
-        if self.by_key(req.key) is not None:
+        job_id = hashlib.sha256(req.key.encode()).hexdigest()[:16]
+        if self.by_key(req.key) is not None or self.get(job_id) is not None:
             return None
-        job = Job(id=hashlib.sha1(req.key.encode()).hexdigest()[:8], key=req.key, chat=req.chat,
+        job = Job(id=job_id, key=req.key, chat=req.chat,
                   chat_alias=req.chat_alias, author=req.author, author_name=req.author_name, own=req.own,
                   ts=req.ts, text=req.text, repo=str(repo), contest=str(contest) if contest else None,
                   status=status, created=datetime.now().astimezone().isoformat(timespec="seconds"))
@@ -346,10 +353,11 @@ def admit(req: Request, store: JobStore, now: datetime) -> tuple[str, str | None
         return "refused", "S7 wyłączony (właściciel: /agent on w Notatce do siebie)"
     if len(store.active_in_chat(req.chat)) >= QUEUE_LIMIT:
         return "refused", f"kolejka pełna ({QUEUE_LIMIT})"
-    if req.received_ms is not None:
-        age = now - datetime.fromtimestamp(req.received_ms / 1000).astimezone()
-        if age > MAX_AGE:
-            return "waiting-approval", f"stare zlecenie (sprzed {int(age.total_seconds() // 3600)} h)"
+    if req.received_ms is None:
+        return "waiting-approval", "nieznany czas odbioru"
+    age = now - datetime.fromtimestamp(req.received_ms / 1000).astimezone()
+    if age > MAX_AGE:
+        return "waiting-approval", f"stare zlecenie (sprzed {int(age.total_seconds() // 3600)} h)"
     if REQUIRE_SNAPSHOT and not req.own and req.chat != SELF and req.author not in store.members(req.chat):
         return "waiting-approval", "nowa osoba w grupie (spoza listy z chwili dodania grupy)"
     return "queued", None
@@ -376,7 +384,10 @@ BUDGET_USD = 10                                    # Q5: per job (--max-budget-u
 ALLOWED_DOMAINS = ["pypi.org", "files.pythonhosted.org", "download.pytorch.org"]  # Q3
 RUNTIME_MAX_S = 7200
 CONTEXT_MESSAGES = 30
-JOB_TOOLS = ("Read", "Edit", "Write", "Glob", "Grep", "Bash")  # explicit: env scrub otherwise forces default mode
+JOB_MEMORY_MAX = "8G"
+JOB_TASKS_MAX = 512
+COMMIT_FILE_MAX = 50 * 1024 * 1024
+REPLY_READ_MAX = 64 * 1024
 PROMPT_TEMPLATE = "core/templates/signal-agent-prompt.md"
 CODE_ROOT = Path(__file__).resolve().parents[1]  # the house checkout running this code (template, house-hook)
 
@@ -407,6 +418,9 @@ def prepare(job: Job) -> Path:
         subprocess.run(["git", "worktree", "add", "-q", "-b", branch, str(wt), "HEAD"], cwd=repo, check=True,
                        capture_output=True, text=True)
     gitutil.exclude(wt, ".house-job/")
+    gitdir = subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"], capture_output=True,
+                            text=True, check=True).stdout.strip()
+    JobStore().update(job.id, gitdir=gitdir, gitfile=(wt / ".git").read_text())
     jd = wt / ".house-job"
     for sub in ("in", "out"):
         (jd / sub).mkdir(parents=True, exist_ok=True)
@@ -444,8 +458,11 @@ def sandbox_usable(run=subprocess.run) -> bool:
     return r.returncode == 0
 
 
-def _tools(job: Job) -> list[str]:
-    return [t for t in JOB_TOOLS if not (job.no_bash and t == "Bash")]
+def _tools(job: Job, wt: Path) -> list[str]:
+    """Permission rules the job may use without asking: file tools scoped to the worktree, Glob and Grep (the hook
+    keeps them inside it). Bash is never listed: it runs only when sandboxed (`autoAllowBashIfSandboxed`), so a
+    sandbox that does not engage means no Bash, not unsandboxed Bash."""
+    return [f"Read(/{wt}/**)", f"Edit(/{wt}/**)", f"Write(/{wt}/**)", "Glob", "Grep"]
 
 
 def job_settings(job: Job, wt: Path) -> dict:
@@ -455,15 +472,16 @@ def job_settings(job: Job, wt: Path) -> dict:
     """
     return {
         "permissions": {"defaultMode": "dontAsk",
-                        "allow": _tools(job),
+                        "allow": _tools(job, wt),
                         "deny": ["WebFetch", "WebSearch", "mcp__*", "Read(~/.ssh/**)", "Read(~/.config/**)",
                                  "Read(~/.local/share/**)", "Read(~/.claude/**)", *(["Bash"] if job.no_bash else [])]},
         "sandbox": {"enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
                     "autoAllowBashIfSandboxed": True,
-                    "filesystem": {"denyRead": ["~/"], "allowRead": [str(wt)], "allowWrite": [str(wt)]},
+                    "filesystem": {"denyRead": ["~/"], "allowRead": [str(wt), str(Path(job.repo) / ".git")],
+                                   "allowWrite": [str(wt)]},
                     "network": {"allowedDomains": list(ALLOWED_DOMAINS)}},
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": f"{CODE_ROOT}/bin/house-hook pre-tool"}]}]},
+            {"type": "command", "command": f"{shlex.quote(str(CODE_ROOT / 'bin/house-hook'))} pre-tool"}]}]},
     }
 
 
@@ -474,11 +492,12 @@ def job_command(job: Job, wt: Path, claude: str) -> list[str]:
     return ["systemd-run", "--user", "--unit", f"house-agent-{job.id}", "--collect", "--quiet",
             "-p", f"RuntimeMaxSec={RUNTIME_MAX_S}", "-p", "KillMode=control-group", "-p", f"WorkingDirectory={wt}",
             "-p", f"StandardInput=file:{files['prompt']}", "-p", f"StandardOutput=append:{files['log']}",
-            "-p", f"StandardError=append:{files['err']}",
+            "-p", f"StandardError=append:{files['err']}", "-p", f"MemoryMax={JOB_MEMORY_MAX}",
+            "-p", f"TasksMax={JOB_TASKS_MAX}",
             "--", "/usr/bin/env", "-i", *env,
             claude, "-p", "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--setting-sources", "local", "--settings", str(files["settings"]), "--strict-mcp-config",
-            "--allowedTools", *_tools(job),
+            "--allowedTools", *_tools(job, wt),
             "--disallowedTools", "WebFetch", "WebSearch", "mcp__*", "--max-budget-usd", str(BUDGET_USD),
             "--output-format", "stream-json", "--verbose"]
 
@@ -504,7 +523,8 @@ def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | Non
         return None
     try:
         wt = prepare(job)
-    except (OSError, subprocess.CalledProcessError) as e:
+        job = store.get(job.id)
+    except Exception as e:  # noqa: BLE001 — a broken workspace fails this job only
         store.update(job.id, status="failed", error=f"worktree: {e}"[:300])
         return None
     if not sandbox_usable(run):
@@ -540,40 +560,90 @@ def _redact(text: str) -> str:
     return text.replace(str(Path.home()), "~")
 
 
+def _real_dir(path: Path, expected: Path) -> bool:
+    """A directory that is not a symlink and resolves exactly to `expected` (the agent cannot redirect it)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode) and path.resolve() == expected
+    except OSError:
+        return False
+
+
+def _read_nofollow(path: Path, limit: int) -> bytes | None:
+    """Read at most `limit` bytes of a regular file without following a symlink; None otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, left = [], limit
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def build_reply(job: Job, wt: Path) -> tuple[str, list[Path], list[str]]:
     """What goes back to the chat: the agent's `reply.md` (redacted, ≤ 1500 chars, the rest as `wynik.md`) and
-    at most 3 safe files from `.house-job/out/`.
+    at most 3 safe files from `.house-job/out/`, copied into the house-owned job dir before they are checked.
 
-    Files are refused when they are symlinks or leave `out/`, are not of an allowed type, are over 25 MB, look
-    like `.env*`, or contain something that looks like a secret.
+    `.house-job/` and `out/` must be real directories of this worktree (no symlinks). Files are read without
+    following symlinks and refused when they are not regular, not of an allowed type, over 25 MB, look like
+    `.env*`, or contain something that looks like a secret.
 
     Returns:
-        (text, files to attach, notes about what was left out).
+        (text, files to attach — copies under the job dir, notes about what was left out).
     """
     from .export import has_secret
-    jd = wt / ".house-job"
-    reply = jd / "reply.md"
-    text = reply.read_text(errors="replace") if reply.is_file() and not reply.is_symlink() else ""
-    text = _redact(text.strip()) or "zakończone bez odpowiedzi (agent nie zapisał reply.md)"
+    root = wt.resolve()
+    jd, out = wt / ".house-job", wt / ".house-job" / "out"
     files: list[Path] = []
     notes: list[str] = []
-    out_dir = (jd / "out").resolve()
-    for p in sorted((jd / "out").iterdir()) if (jd / "out").is_dir() else []:
-        why = None
-        if p.is_symlink() or not p.resolve().is_relative_to(out_dir) or not p.is_file():
-            why = "nie zwykły plik"
-        elif p.name.lower().startswith(".env") or p.suffix.lower() not in REPLY_TYPES:
-            why = "niedozwolony typ"
-        elif p.stat().st_size > REPLY_FILE_MAX:
-            why = "za duży"
-        elif has_secret(p):
-            why = "wygląda na sekret"
-        elif len(files) >= REPLY_FILES:
-            why = f"limit {REPLY_FILES} plików"
-        if why:
-            notes.append(f"pominięto {p.name} ({why})")
-        else:
-            files.append(p)
+    if not _real_dir(jd, root / ".house-job"):
+        return "zakończone bez odpowiedzi", [], ["pominięto .house-job (podmieniony katalog)"]
+    raw = _read_nofollow(jd / "reply.md", REPLY_READ_MAX) or b""
+    text = _redact(raw.decode("utf-8", errors="replace").strip()) or \
+        "zakończone bez odpowiedzi (agent nie zapisał reply.md)"
+    send = job_files(job)["dir"] / "send"
+    if not _real_dir(out, root / ".house-job" / "out"):
+        notes.append("pominięto out/ (podmieniony katalog)")
+    else:
+        if send.exists():
+            shutil.rmtree(send)
+        send.mkdir(mode=0o700)
+        for p in sorted(out.iterdir()):
+            why = None
+            data = None
+            if p.name.lower().startswith(".env") or p.suffix.lower() not in REPLY_TYPES:
+                why = "niedozwolony typ"
+            elif len(files) >= REPLY_FILES:
+                why = f"limit {REPLY_FILES} plików"
+            else:
+                data = _read_nofollow(p, REPLY_FILE_MAX + 1)
+                if data is None:
+                    why = "nie zwykły plik"
+                elif len(data) > REPLY_FILE_MAX:
+                    why = "za duży"
+            if why is None:
+                copy = send / p.name
+                fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.write(fd, data)
+                finally:
+                    os.close(fd)
+                if has_secret(copy):
+                    copy.unlink()
+                    why = "wygląda na sekret"
+                else:
+                    files.append(copy)
+            if why:
+                notes.append(f"pominięto {p.name} ({why})")
     if len(text) > REPLY_MAX:
         full = job_files(job)["dir"] / "wynik.md"
         full.write_text(text + "\n")
@@ -611,12 +681,14 @@ def _snippet(text: str, width: int = 40) -> str:
     return snippet(text, width)
 
 
-def unit_active(job: Job, run=subprocess.run) -> bool:
-    """Whether the job's systemd unit is still running."""
+def unit_active(job: Job, run=subprocess.run) -> bool | None:
+    """Whether the job's systemd unit is still running; None when systemd could not be asked (skip this round)."""
     r = run(["systemctl", "--user", "show", str(job.unit), "-p", "ActiveState", "-p", "SubState"],
             capture_output=True, text=True, check=False)
     state = dict(line.split("=", 1) for line in (r.stdout or "").splitlines() if "=" in line)
-    return state.get("ActiveState") in ("active", "activating", "deactivating", "reloading")
+    if r.returncode != 0 or "ActiveState" not in state:
+        return None
+    return state["ActiveState"] in ("active", "activating", "deactivating", "reloading")
 
 
 def _result(job: Job) -> dict | None:
@@ -635,23 +707,59 @@ def _result(job: Job) -> dict | None:
     return found
 
 
+def _big_files(wt: Path) -> list[str]:
+    """Paths (relative to the worktree) of regular files over COMMIT_FILE_MAX, never followed through links."""
+    big = []
+    for top, dirs, names in os.walk(wt, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in (".git", ".house-job")]
+        for name in names:
+            p = Path(top) / name
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size > COMMIT_FILE_MAX:
+                big.append(str(p.relative_to(wt)))
+    return big
+
+
 def _commit(job: Job, wt: Path) -> str:
     """Commit what the agent left in its worktree on the job branch (house does it, never the agent).
 
+    The agent controlled the worktree, so git is pinned: the git dir recorded at `prepare` (the `.git` file must be
+    unchanged), no system or global config, no hooks, no fsmonitor, `--no-verify`; `.house-job/` and files over
+    50 MB are left out.
+
     Returns:
-        The diff summary ("2 files changed, …") or "bez zmian w repo".
+        The diff summary ("2 files changed, …"), "bez zmian w repo", or why nothing was committed.
     """
-    git = ["git", "-C", str(wt)]
-    subprocess.run([*git, "add", "-A"], capture_output=True, text=True, check=False)
-    if subprocess.run([*git, "diff", "--cached", "--quiet"], check=False).returncode == 0:
-        return "bez zmian w repo"
-    msg = f"signal: {_snippet(job.text, 60)} ({job.author_name})"
-    r = subprocess.run([*git, "commit", "-q", "-m", msg], capture_output=True, text=True, check=False)
-    if r.returncode != 0:
-        return f"commit nie wyszedł: {(r.stderr or '').strip()[:120]}"
-    stat = subprocess.run([*git, "diff", "--shortstat", "HEAD~1", "HEAD"], capture_output=True, text=True,
-                          check=False).stdout.strip()
-    return stat or "zmiany zapisane"
+    gitfile = wt / ".git"
+    try:
+        intact = stat.S_ISREG(os.lstat(gitfile).st_mode) and gitfile.read_text() == job.gitfile and job.gitdir
+    except OSError:
+        intact = False
+    if not intact:
+        return "nie commituję: plik .git w worktree został zmieniony"
+    who = {k: subprocess.run(["git", "-C", job.repo, "config", f"user.{k}"], capture_output=True, text=True,
+                             check=False).stdout.strip() for k in ("name", "email")}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(Path.home()), "GIT_DIR": job.gitdir,
+           "GIT_WORK_TREE": str(wt), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "LANG": "C.UTF-8"}
+    git = ["git", "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+           "-c", f"user.name={who['name'] or 'house'}", "-c", f"user.email={who['email'] or 'house@localhost'}"]
+    big = _big_files(wt)
+
+    def run(*a: str) -> subprocess.CompletedProcess:
+        return subprocess.run([*git, *a], cwd=wt, env=env, capture_output=True, text=True, check=False)
+    run("add", "-A", "--", ".", ":(exclude).house-job", *[f":(exclude){p}" for p in big])
+    if run("diff", "--cached", "--quiet").returncode == 0:
+        summary = "bez zmian w repo"
+    else:
+        r = run("commit", "-q", "--no-verify", "-m", f"signal: {_snippet(job.text, 60)} ({job.author_name[:40]})")
+        if r.returncode != 0:
+            return f"commit nie wyszedł: {(r.stderr or '').strip()[:120]}"
+        summary = run("diff", "--shortstat", "HEAD~1", "HEAD").stdout.strip() or "zmiany zapisane"
+    return summary + (f"; pominięte duże pliki: {', '.join(big[:3])}" if big else "")
 
 
 def _progress(job: Job, line: str) -> None:
@@ -660,8 +768,9 @@ def _progress(job: Job, line: str) -> None:
         return
     path = Path(job.contest) / ".house/PROGRESS.md"
     if path.parent.is_dir():
+        clean = " ".join(line.split())[:300]  # one line: chat text must not become Markdown structure
         with path.open("a") as f:
-            f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · signal · {line}\n")
+            f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · signal · {clean}\n")
 
 
 def finish(job: Job, sig, store: "JobStore") -> None:
@@ -684,7 +793,8 @@ def finish(job: Job, sig, store: "JobStore") -> None:
         body += "\n(uwaga: bez uruchamiania kodu, sandbox niedostępny na tej maszynie: `house doctor`)"
     store.update(job.id, status="done" if ok else "failed", ended=datetime.now().astimezone().isoformat(
         timespec="seconds"), cost=cost, result=head, error=why, reply_pending=True)
-    _progress(job, f"zlecenie od {job.author_name}: „{_snippet(job.text)}” → {head}, gałąź {job.branch}")
+    _progress(job, f"zlecenie od {job.author_name[:40]} (cytat z czatu, dane): „{_snippet(job.text)}” → {head}, "
+                   f"gałąź {job.branch}")
     (job_files(job)["dir"] / "reply.txt").write_text(json.dumps({"text": body, "files": [str(p) for p in files]}))
     if ok:
         store.record_success()
@@ -696,7 +806,11 @@ def finish(job: Job, sig, store: "JobStore") -> None:
 
 
 def _send_reply(job: Job, sig, store: "JobStore") -> None:
-    saved = json.loads((job_files(job)["dir"] / "reply.txt").read_text())
+    try:
+        saved = json.loads((job_files(job)["dir"] / "reply.txt").read_text())
+    except (OSError, ValueError):
+        store.update(job.id, reply_pending=False, error=(job.error or "") + " (odpowiedź utracona)")
+        return
     ts = _say(sig, job, saved["text"], quote=(job.ts, job.author), files=[Path(p) for p in saved["files"]],
               meta={"job": job.id})
     if ts is not None:
@@ -740,10 +854,13 @@ def _accept(req: Request, sig, store: "JobStore", chats: dict, out_events: dict,
         return
     if status == "waiting-approval":
         _say(sig, job, f"czekam na zgodę Wojtka ({why})", quote=(req.ts, req.author))
-        ts = _say(sig, SELF, f"Zlecenie od {req.author_name} w „{req.chat_alias}”: „{_snippet(req.text, 80)}” "
-                             f"({why}). 👍 na tę wiadomość = uruchom.", contest=job.contest,
+        ts = _say(sig, SELF, f"Zlecenie od {req.author_name[:40]} (id {req.author[:8]}…) w „{req.chat_alias}”: "
+                             f"„{_snippet(req.text, 80)}” ({why}). 👍 na tę wiadomość = uruchom.", contest=job.contest,
                   meta={"approve": job.id})
-        store.update(job.id, approve_ts=ts)
+        if ts is None:
+            store.update(job.id, status="failed", error="nie udało się zapytać Wojtka o zgodę")
+        else:
+            store.update(job.id, approve_ts=ts)
         return
     position = len(store.queued(where.repo)) - 1 + len([j for j in store.running() if j.repo == str(where.repo)])
     ack = f"przyjąłem: „{_snippet(req.text)}” · repo {Path(where.repo).name}"
@@ -796,7 +913,7 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
             item = parse(e)
             if isinstance(item, Request):
                 _accept(item, sig, store, chats, out_events, now)
-            elif isinstance(item, Command):
+            elif isinstance(item, Command) and item.chat in chats:
                 log += handle_command(item, sig, store, run=run, chats=chats, now=now)
             elif e.get("kind") == "message" and (e.get("quote") or {}).get("ts") in out_events:
                 meta = out_events[e["quote"]["ts"]].get("meta") or {}
@@ -807,9 +924,16 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
                         _accept(first, sig, store, chats, out_events, now, forced_quote=e["quote"]["ts"])
         store.set_state(cursor=top)
         for job in store.running():
-            if not unit_active(job, run):
+            if unit_active(job, run) is not False:
+                continue  # still running, or systemd unreachable this round
+            try:
                 finish(job, sig, store)
                 log.append(f"agent: zakończone {job.id}")
+            except Exception as e:  # noqa: BLE001 — one poisoned job must not wedge the queue
+                store.update(job.id, status="failed", reply_pending=False, error=f"finish: {type(e).__name__}")
+                _say(sig, job, f"✗ nie udało się zakończyć zlecenia ({type(e).__name__}); gałąź {job.branch}",
+                     quote=(job.ts, job.author))
+                log.append(f"agent: finish {job.id} nieudany ({type(e).__name__})")
         for job in [j for j in store.all() if j.reply_pending and j.status in ("done", "failed", "stopped")]:
             _send_reply(job, sig, store)
         if store.enabled():
@@ -817,7 +941,11 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
             busy = {j.repo for j in store.running()}
             for repo in sorted({j.repo for j in store.all() if j.status == "queued"} - busy):
                 job = store.queued(Path(repo))[0]
-                unit = launch(job, run=run, claude=claude)
+                try:
+                    unit = launch(job, run=run, claude=claude)
+                except Exception as e:  # noqa: BLE001
+                    store.update(job.id, status="failed", error=f"launch: {type(e).__name__}")
+                    unit = None
                 log.append(f"agent: start {job.id}" if unit else f"agent: start {job.id} nieudany")
                 if unit is None:
                     failed = store.get(job.id)
@@ -955,6 +1083,8 @@ def doctor_lines(run=subprocess.run, which=shutil.which) -> list[str]:
                      "kernel.apparmor_restrict_unprivileged_userns=0)")
     if not which("systemd-run"):
         lines.append("✗ S7: brak systemd-run")
+    if not which("socat"):
+        lines.append("✗ S7: brak socat (proxy sieci sandboxa); `sudo apt install socat`")
     if not which("claude"):
         lines.append("✗ S7: brak `claude`")
     return lines

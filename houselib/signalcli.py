@@ -215,8 +215,10 @@ def _ask(prompt: str) -> str:
 
 
 def _human_only(command: str) -> int | None:
-    """Exit code 2 with the refusal when there is no terminal; None when a human is at the keyboard."""
-    if _tty():
+    """Exit code 2 with the refusal when there is no terminal or the command runs inside a Claude Code session
+    (`CLAUDECODE` set: an agent, even one with a pty from `script`); None when a human is at the keyboard."""
+    import os
+    if _tty() and not os.environ.get("CLAUDECODE"):
         return None
     print(f"error: dodanie lub usunięcie grupy to decyzja człowieka: poproś Wojtka o `house signal {command}` "
           "w terminalu", file=sys.stderr)
@@ -515,9 +517,12 @@ def cmd_agent(args) -> int:
         if refused:
             return refused
     if action == "on":
+        store.set_state(cursor=signalstore.last_seq())  # always: nothing written while S7 was off ever runs
+        sig = _client()
+        for chat in signalchats.allowed(sig).values():
+            if chat.id != signalchats.SELF and not store.members(chat.id) and sig is not None:
+                store.set_members(chat.id, sig.group_members(chat.id))
         store.set_enabled(True)
-        if store.state().get("cursor") is None:
-            store.set_state(cursor=signalstore.last_seq())
         setup.install_signal_timer(every="1min", agent=True)
         print("✓ S7 włączony: odbiór co minutę, `@claude …` w dozwolonych rozmowach uruchamia agenta")
         return 0
@@ -526,7 +531,7 @@ def cmd_agent(args) -> int:
         if args.kill:
             for job in store.running():
                 signalagent.stop_job(job, store)
-        setup.install_signal_timer(every="5min")
+        setup.install_signal_timer(every="5min", agent=True)  # tick still finishes and answers running jobs
         print("✓ S7 wyłączony" + (" i zatrzymany" if args.kill else ""))
         return 0
     if action == "stop":

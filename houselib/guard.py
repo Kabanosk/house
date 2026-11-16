@@ -465,6 +465,8 @@ DATA_REASON = "house data (~/.local/share/house: the Signal store, caches, curso
 HOUSE_DATA_DIR = ".local/share/house"
 HOUSE_ENV_RE = re.compile(r"\bHOUSE_(SIGNAL_CONFIG|NOTIFY_CONFIG|DATA_DIR|SIGNAL_ATTACHMENTS)=")
 ALLOW_RE = re.compile(r"house\S*\s+signal\s+(allow|deny|agent\s+(on|members))\b")
+HUMAN_WORDS = {"allow", "deny"}
+HUMAN_AGENT_WORDS = {"on", "members"}
 INNER_SIGNAL_CLI_RE = re.compile(r"(^|[;&|(`]|\$\()\s*(\S*/)?signal-cli(\s|$)")
 WRAPPERS = {"timeout", "env", "nice", "nohup", "sudo", "stdbuf", "exec", "command", "unbuffer", "script", "xargs",
             "time", "setsid"}
@@ -513,7 +515,7 @@ def check_signal(tool: str, args: dict, cwd: Path, home: Path | None = None) -> 
         command = str(args.get("command") or "")
         if SIGNAL_CLI_DIR in command:
             return SIGNAL_FILES_REASON
-        if ALLOW_RE.search(command):
+        if ALLOW_RE.search(command) or _human_only_command(command):
             return HUMAN_REASON
         if HOUSE_ENV_RE.search(command):
             return ENV_REASON
@@ -540,6 +542,25 @@ def check_signal(tool: str, args: dict, cwd: Path, home: Path | None = None) -> 
     return None
 
 
+def _human_only_command(command: str) -> bool:
+    """`… signal allow|deny …` or `… signal agent … on|members …` in any form the tokenizer sees (quoted words,
+    flags before the action, the program name in a variable), also inside quoted command strings."""
+    texts = [command]
+    for seg in _segments(command):
+        texts += [t for t in seg if " " in t]
+    for text in texts:
+        for seg in _segments(text):
+            words = [t.strip("'\"").lower() for t in seg]
+            if "signal" not in words:
+                continue
+            rest = [w for w in words[words.index("signal") + 1:] if not w.startswith("-")]
+            if rest[:1] and rest[0] in HUMAN_WORDS:
+                return True
+            if rest[:1] == ["agent"] and HUMAN_AGENT_WORDS & set(rest[1:]):
+                return True
+    return False
+
+
 def _runs_signal_cli(seg: list[str]) -> bool:
     """Tell whether a simple command runs signal-cli: as the command (after `VAR=x` and wrappers such as
     `timeout 5`, `env`, `script -qc`), or inside a quoted command string (`bash -c "signal-cli …"`)."""
@@ -562,6 +583,7 @@ JOB_BLOCKED_COMMANDS = {"gh", "curl", "wget", "ssh", "scp", "sftp", "nc", "ncat"
                         "house", "signal-cli", "sudo", "su", "doas", "systemctl", "systemd-run", "crontab", "at"}
 JOB_BLOCKED_GIT = {"push", "remote", "config", "fetch", "pull", "clone", "submodule", "commit", "worktree", "gc",
                    "filter-branch", "update-ref", "symbolic-ref", "hooks"}
+JOB_SYSTEM_READ = ("/usr", "/etc/ssl", "/etc/ca-certificates", "/etc/alternatives", "/lib", "/lib64", "/opt")
 JOB_REASON = ("Signal job: {what}. The job works only inside its worktree, without network, git history changes "
               "or house commands; house commits and replies when the job ends")
 
@@ -605,25 +627,42 @@ def check_job(tool: str, args: dict, cwd: Path, worktree: Path, home: Path | Non
                 sub, _ = _git_parts(seg, cwd)
                 if sub[:1] and sub[0] in JOB_BLOCKED_GIT:
                     return JOB_REASON.format(what=f"`git {sub[0]}` is not available")
+            if name == "ln" or any("symlink" in t for t in seg):
+                return JOB_REASON.format(what="links are not available (house sends only real files)")
             for target, base in _written_paths(seg, cwd):
-                if not _under(_expand(target, base, home), wt):
+                full = _expand(target, base, home)
+                if not _under(full, wt):
                     return JOB_REASON.format(what=f"writing {target} outside the worktree")
+                if _protected_in_worktree(full, wt):
+                    return JOB_REASON.format(what=f"{target} is managed by house")
             for tok in seg:
                 if tok.startswith(("~", "$HOME", "${HOME}", "/")) and _under(_expand(tok, cwd, home), home) \
                         and not _under(_expand(tok, cwd, home), wt):
                     return JOB_REASON.format(what=f"{tok} is outside the worktree")
         return None
     path = args.get("file_path") or args.get("notebook_path") or args.get("path")
+    pattern = str(args.get("pattern") or "")
+    if tool == "Glob" and pattern.startswith(("/", "~")):
+        path = pattern.split("*", 1)[0] or "/"
     if not path:
         return None
     full = _expand(str(path), cwd, home)
     if tool in READ_TOOLS:
-        if _under(full, home) and not _under(full, wt):
+        if not _under(full, wt) and not any(_under(full, Path(p)) for p in JOB_SYSTEM_READ):
             return JOB_REASON.format(what=f"reading {path} outside the worktree")
         return None
     if not _under(full, wt):
         return JOB_REASON.format(what=f"writing {path} outside the worktree")
+    if _protected_in_worktree(full, wt):
+        return JOB_REASON.format(what=f"{path} is managed by house (git metadata, Claude settings)")
     return None
+
+
+def _protected_in_worktree(full: Path, wt: Path) -> bool:
+    """`.git` (file or dir, at any depth), `.gitattributes`, `.gitmodules` and `.claude/` inside the worktree."""
+    parts = full.relative_to(wt).parts if _under(full, wt) else ()
+    return any(p in (".git", ".claude") for p in parts) or (parts[-1:] and parts[-1] in (".gitattributes",
+                                                                                         ".gitmodules"))
 
 
 def _sha(path: Path) -> str | None:

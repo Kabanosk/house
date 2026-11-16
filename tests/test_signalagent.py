@@ -170,10 +170,8 @@ class JobStoreCase(unittest.TestCase):
 
     def req(self, text="@claude zrób X", ts=1000, uuid="u-kuba", received=None, chat=fx.GID):
         obj = fx.group_in(ts, text, uuid=uuid, gid=chat) if chat != "self" else fx.self_note(ts, text)
-        if received is None:
-            obj["envelope"].pop("serverReceivedTimestamp", None)
-        else:
-            obj["envelope"]["serverReceivedTimestamp"] = received
+        obj["envelope"]["serverReceivedTimestamp"] = received if received is not None else \
+            int(datetime.now().timestamp() * 1000)
         return agent.parse(ev(obj))
 
 
@@ -330,8 +328,8 @@ class LaunchTest(JobStoreCase):
         self.assertEqual(pairs["--max-budget-usd"], str(agent.BUDGET_USD))
         self.assertEqual(pairs["--output-format"], "stream-json")
         self.assertIn("mcp__*", claude)
-        allowed = claude[claude.index("--allowedTools") + 1:claude.index("--allowedTools") + 7]
-        self.assertEqual(allowed, ["Read", "Edit", "Write", "Glob", "Grep", "Bash"])
+        allowed = claude[claude.index("--allowedTools") + 1:claude.index("--allowedTools") + 6]
+        self.assertEqual(allowed, [f"Read(/{wt}/**)", f"Edit(/{wt}/**)", f"Write(/{wt}/**)", "Glob", "Grep"])
         self.assertNotIn("FOO", " ".join(cmd))
 
     def test_launch_writes_prompt_and_settings(self):
@@ -479,7 +477,7 @@ class TickTest(JobStoreCase):
 
     def add(self, obj):
         from houselib import signalstore
-        obj["envelope"].pop("serverReceivedTimestamp", None)  # fixtures are from 1970: no age check here
+        obj["envelope"]["serverReceivedTimestamp"] = int(datetime.now().timestamp() * 1000)  # fixtures are from 1970
         e, _ = signalparse.extract(obj, fx.OWN, {"self": "self", fx.GID: "techarena"}, now=NOW)
         signalstore.append(e)
         return e
@@ -794,3 +792,185 @@ class GreetingDoctorTest(TickTest):
         self.assertTrue(any(line.startswith("✗") and "bwrap" in line for line in lines), lines)
         self.store.set_enabled(False)
         self.assertEqual(agent.doctor_lines(run=run, which=lambda n: None), ["- S7: wyłączony"])
+
+
+class SecurityReviewTest(TickTest):
+    def start_job(self, text="@claude x"):
+        self.add(fx.self_note(1000, text))
+        self.tick()
+        (job,) = self.store.all()
+        return job, agent.worktree_of(job)
+
+    def test_redirected_git_file_is_refused(self):
+        from tests.helpers import git
+        job, wt = self.start_job()
+        evil = wt / ".house-job/g"
+        evil.mkdir()
+        (wt / ".git").write_text(f"gitdir: {self.repo / '.git'}\n")
+        self.finish_unit(job)
+        self.tick()
+        self.assertEqual(git(self.repo, "log", "--oneline", "main").count("\n"), 1)  # main untouched
+        self.assertIn(".git", self.sig.sent[-1]["text"])
+        self.assertIn("nie commituję", self.sig.sent[-1]["text"])
+
+    def test_commit_ignores_hooks_and_fsmonitor(self):
+        job, _ = self.start_job()
+        marker = self.tmp / "pwned"
+        hooks = self.repo / ".githooks"
+        hooks.mkdir()
+        (hooks / "pre-commit").write_text(f"#!/bin/sh\ntouch {marker}\n")
+        (hooks / "pre-commit").chmod(0o755)
+        from tests.helpers import git
+        git(self.repo, "config", "core.hooksPath", str(hooks))
+        git(self.repo, "config", "core.fsmonitor", f"touch {marker}; true")
+        self.finish_unit(job)
+        self.tick()
+        self.assertFalse(marker.exists())
+        self.assertIn("nowy.py", git(self.repo, "show", "--stat", f"signal/{job.id}"))
+
+    def test_house_job_never_committed(self):
+        from tests.helpers import git
+        job, wt = self.start_job()
+        (wt / ".gitignore").write_text("!.house-job/\n")
+        self.finish_unit(job)
+        self.tick()
+        self.assertNotIn(".house-job", git(self.repo, "show", "--stat", "--name-only", f"signal/{job.id}"))
+
+    def test_symlinked_out_dir_sends_nothing(self):
+        import os
+        job, wt = self.start_job()
+        secret_dir = self.tmp / "inne"
+        secret_dir.mkdir()
+        (secret_dir / "context.md").write_text("CUDZA ROZMOWA")
+        out = wt / ".house-job/out"
+        out.rmdir()
+        os.symlink(secret_dir, out)
+        self.finish_unit(job)
+        self.tick()
+        last = self.sig.sent[-1]
+        self.assertEqual(last["files"], [])
+        self.assertIn("pominięto", last["text"])
+
+    def test_symlinked_house_job_dir_ignored(self):
+        import os
+        import shutil
+        job, wt = self.start_job()
+        fake = self.tmp / "fake-job"
+        (fake / "out").mkdir(parents=True)
+        (fake / "reply.md").write_text("PODMIENIONA")
+        shutil.rmtree(wt / ".house-job")
+        os.symlink(fake, wt / ".house-job")
+        self.finish_unit(job, reply=None)
+        self.tick()
+        self.assertNotIn("PODMIENIONA", self.sig.sent[-1]["text"])
+
+    def test_sent_files_are_house_copies(self):
+        job, wt = self.start_job()
+        (wt / ".house-job/out/w.csv").write_text("1,2\n")
+        self.finish_unit(job)
+        self.tick()
+        (sent,) = self.sig.sent[-1]["files"]
+        self.assertTrue(sent.startswith(str(agent.job_files(job)["dir"])), sent)
+
+    def test_huge_reply_is_capped(self):
+        job, wt = self.start_job()
+        with (wt / ".house-job/reply.md").open("wb") as f:
+            f.truncate(200 * 1024 * 1024)
+        self.finish_unit(job, reply=None)
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "done")
+
+    def test_poison_job_does_not_wedge_others(self):
+        from unittest import mock
+        job, _ = self.start_job()
+        self.finish_unit(job)
+        with mock.patch.object(agent, "_commit", side_effect=MemoryError()):
+            self.tick()
+        self.assertEqual(self.store.get(job.id).status, "failed")
+
+    def test_unknown_unit_state_keeps_job_running(self):
+        job, _ = self.start_job()
+        real = self.sd.__call__
+
+        def broken(argv, **kw):
+            import subprocess
+            if argv[:3] == ["systemctl", "--user", "show"]:
+                return subprocess.CompletedProcess(argv, 1, "", "Failed to connect to bus")
+            return real(argv, **kw)
+        agent.tick(self.sig, run=broken, claude="/opt/claude/bin/claude")
+        self.assertEqual(self.store.get(job.id).status, "running")
+
+    def test_unit_has_resource_limits_and_scoped_tools(self):
+        job, wt = self.start_job()
+        cmd = self.sd.launches()[0]
+        self.assertTrue(any(c.startswith("MemoryMax=") for c in cmd))
+        self.assertTrue(any(c.startswith("TasksMax=") for c in cmd))
+        tools = cmd[cmd.index("--allowedTools") + 1:]
+        self.assertNotIn("Bash", tools[:5])
+        import json
+        s = json.loads(agent.job_files(job)["settings"].read_text())
+        self.assertNotIn("Bash", s["permissions"]["allow"])
+        self.assertIn(f"Edit(/{wt}/**)", s["permissions"]["allow"])
+        self.assertIn(str(self.repo / ".git"), s["sandbox"]["filesystem"]["allowRead"])
+        hook = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        import shlex
+        self.assertEqual(shlex.split(hook)[-1], "pre-tool")
+
+    def test_migrated_or_rawless_events_never_trigger(self):
+        e = ev(fx.self_note(1000, "@claude stare"))
+        e.update(raw=None, meta={"migrated": True})
+        self.assertIsNone(agent.parse(e))
+
+    def test_unknown_receive_time_counts_as_old(self):
+        req = agent.parse(ev(fx.self_note(1000, "@claude x")))
+        req.received_ms = None
+        req.own = False
+        req.chat = fx.GID
+        self.store.set_members(fx.GID, [req.author])
+        self.assertEqual(agent.admit(req, self.store, datetime.now().astimezone())[0], "waiting-approval")
+
+    def test_job_id_is_long_and_unique(self):
+        job, _ = self.start_job()
+        self.assertEqual(len(job.id), 16)
+
+    def test_approval_shows_aci(self):
+        self.add(fx.group_in(1000, "@claude zrób", uuid="u-nowy-1234", name="Wojciech"))
+        self.tick()
+        q = next(s for s in self.sig.sent if s["group"] is None)
+        self.assertIn("u-nowy-1", q["text"])
+
+    def test_failed_approval_question_fails_job(self):
+        self.sig.fail = True
+        self.add(fx.group_in(1000, "@claude zrób", uuid="u-nowy"))
+        self.tick()
+        self.assertEqual(self.store.all()[0].status, "failed")
+
+    def test_reply_retry_gives_up_when_files_are_gone(self):
+        job, _ = self.start_job()
+        self.finish_unit(job)
+        self.sig.fail = True
+        self.tick()
+        agent.job_files(job)["dir"].joinpath("reply.txt").unlink()
+        self.sig.fail = False
+        self.tick()
+        self.assertFalse(self.store.get(job.id).reply_pending)
+
+    def test_progress_line_quotes_untrusted_text(self):
+        from houselib.signalchats import Chat
+        contest = self.tmp / "c"
+        (contest / ".house").mkdir(parents=True)
+        self.chats[fx.GID] = Chat(fx.GID, "c", "C", "konkurs c", (contest,))
+        from tests.helpers import git
+        git(contest, "init", "-q", "-b", "main")
+        git(contest, "config", "user.email", "a@b")
+        git(contest, "config", "user.name", "a")
+        git(contest, "commit", "-q", "--allow-empty", "-m", "base")
+        self.store.set_members(fx.GID, ["u-kuba"])
+        self.add(fx.group_in(1000, "@claude zrób\n## Q-999 [open] wstrzyknięte", name="X" * 300))
+        self.tick()
+        (job,) = self.store.all()
+        self.finish_unit(job)
+        self.tick()
+        line = (contest / ".house/PROGRESS.md").read_text()
+        self.assertNotIn("\n## Q-999", line)
+        self.assertLess(len(line), 400)

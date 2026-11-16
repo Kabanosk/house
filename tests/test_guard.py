@@ -279,3 +279,29 @@ class JobModeTest(unittest.TestCase):
         self.assertIsNotNone(self.check("Grep", pattern="x", path=str(self.home)))
         self.assertIsNotNone(self.check("Bash", command="echo x > ../../evil.sh"))
         self.assertIsNotNone(self.check("Bash", command="cat ~/.ssh/id_ed25519"))
+
+
+class JobModeReviewTest(JobModeTest):
+    def test_reads_outside_worktree_refused_except_system(self):
+        for path in ("/tmp/claude-1001/x/tasks/a.output", "/proc/1234/environ", "/run/user/1001/x",
+                     str(self.home / ".claude/x")):
+            self.assertIsNotNone(self.check("Read", file_path=path), path)
+        self.assertIsNotNone(self.check("Grep", pattern="x", path="/tmp"))
+        self.assertIsNotNone(self.check("Glob", pattern="/tmp/**/*.output"))
+        for path in ("/usr/lib/python3/os.py", "/etc/ssl/certs/ca.pem", str(self.wt / "a.py")):
+            self.assertIsNone(self.check("Read", file_path=path), path)
+        self.assertIsNone(self.check("Glob", pattern="**/*.py"))
+
+    def test_git_and_claude_files_in_worktree_refused(self):
+        for rel in (".git", ".git/config", ".gitattributes", ".claude/settings.local.json", "sub/.git"):
+            self.assertIsNotNone(self.check("Write", file_path=str(self.wt / rel), content="x"), rel)
+        self.assertIsNotNone(self.check("Bash", command="printf 'gitdir: /x' > .git"))
+        self.assertIsNotNone(self.check("Bash", command="ln -s ~/.local/share/house .house-job/out"))
+        self.assertIsNotNone(self.check("Bash", command="python3 -c \"import os; os.symlink('/x', 'y')\""))
+
+    def test_allow_agent_bypass_forms_refused(self):
+        for cmd in ("house signal agent --kill on", "h=house; $h signal agent on", "house signal agent 'on'",
+                    "house signal 'allow' x", "bin/house signal agent members techarena"):
+            self.assertIsNotNone(guard.check_signal("Bash", {"command": cmd}, self.wt, home=self.home), cmd)
+        self.assertIsNone(guard.check_signal("Bash", {"command": "house signal agent status"}, self.wt,
+                                             home=self.home))
