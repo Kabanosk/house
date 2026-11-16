@@ -129,3 +129,51 @@ def hints(tools: dict) -> list[str]:
     out.append("before a video sprint: `npx remotion browser ensure` in the video project "
                "(downloads Remotion's Chrome Headless Shell once, so the first render doesn't)")
     return out
+
+
+TIMER = "house-signal-pull"
+SERVICE_UNIT = """[Unit]
+Description=house: odbiór Signala do magazynu (house signal pull)
+
+[Service]
+Type=oneshot
+ExecStart={root}/bin/house signal pull --timeout 5 --maintenance
+TimeoutStartSec=180
+"""
+TIMER_UNIT = """[Unit]
+Description=house: odbiór Signala co {every}
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec={every}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=subprocess.run,
+                         every: str = "5min") -> list[Path]:
+    """Install and start the systemd user timer that runs `house signal pull --maintenance` periodically.
+
+    Receiving without any open session keeps the store fresh and the linked device active; `--maintenance`
+    also compacts the store once a day. Rewriting the units is idempotent.
+
+    Args:
+        root: House repo root (the unit runs `<root>/bin/house`).
+        home: Home directory. Defaults to `Path.home()`.
+        run: Runner for `systemctl` (signature of `subprocess.run`); replaceable in tests.
+        every: Interval, a systemd time span such as "5min" (S7 uses "1min"). Defaults to "5min".
+
+    Returns:
+        Paths of the service and timer unit files.
+    """
+    units = (home or Path.home()) / ".config/systemd/user"
+    units.mkdir(parents=True, exist_ok=True)
+    service, timer = units / f"{TIMER}.service", units / f"{TIMER}.timer"
+    service.write_text(SERVICE_UNIT.format(root=Path(root).resolve()))
+    timer.write_text(TIMER_UNIT.format(every=every))
+    run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, check=False)
+    run(["systemctl", "--user", "enable", "--now", f"{TIMER}.timer"], capture_output=True, text=True, check=False)
+    return [service, timer]
