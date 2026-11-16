@@ -59,3 +59,19 @@ class ServeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuietErrorsTest(unittest.TestCase):
+    def test_client_reset_logs_one_line_not_a_traceback(self):
+        import contextlib
+        import io
+        server = agentproxy.make_server("127.0.0.1", 0, set())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            except ConnectionResetError:
+                server.handle_error(None, ("1.2.3.4", 5))
+        server.server_close()
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertIn("agentproxy:", err.getvalue())

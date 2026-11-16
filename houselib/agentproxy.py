@@ -75,6 +75,10 @@ class _Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address) -> None:
+        """One line instead of a traceback: clients that reset or time out are normal."""
+        print(f"agentproxy: connection error ({sys.exc_info()[0].__name__})", file=sys.stderr, flush=True)
+
 
 def make_server(host: str, port: int, allow: set[str]) -> _Server:
     """A ready proxy server (not yet serving); `resolve` and `ports` can be replaced in tests."""
