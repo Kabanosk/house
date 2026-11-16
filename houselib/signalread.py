@@ -483,7 +483,8 @@ def _new(name: str, now: datetime, chat: str | None) -> tuple[list[Msg], dict, d
     allowed = signalchats.allowed(None)
     msgs = [m for m in build(events, now)
             if m.ev.get("dir") in ("in", "own") and m.chat in allowed and (chat is None or m.chat == chat)
-            and int(m.ev.get("seq") or 0) > int((cur.get("chats") or {}).get(m.chat, cur["start"]))]
+            and int(m.ev.get("first_seq") or m.ev.get("seq") or 0)
+            > int((cur.get("chats") or {}).get(m.chat, cur["start"]))]
     return msgs, cur, cursors, events
 
 

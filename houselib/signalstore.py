@@ -229,10 +229,16 @@ def bad_lines() -> list[int]:
 
 
 def latest(events) -> list[dict]:
-    """Deduplicate by `key`: the last line of each key wins, in order of that key's first appearance."""
+    """Deduplicate by `key`: the last line of each key wins, in order of that key's first appearance.
+
+    Each returned event also carries `first_seq`, the seq of the key's first line, so a re-delivered or
+    re-parsed copy is not mistaken for a new message.
+    """
     by_key: dict[str, dict] = {}
     for e in events:
-        by_key[str(e.get("key"))] = e
+        k = str(e.get("key"))
+        prev = by_key.get(k)
+        by_key[k] = {**e, "first_seq": prev["first_seq"] if prev else e.get("seq")}
     return list(by_key.values())
 
 

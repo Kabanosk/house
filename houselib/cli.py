@@ -505,11 +505,16 @@ def cmd_setup(args) -> int:
     """Implement `house setup`: install user-level skills, fetch the Remotion skill, check tools, print next steps.
 
     Args:
-        args: Parsed arguments (none used).
+        args: Parsed arguments: `signal_hook` (only write the house repo's Signal session hook, then stop).
 
     Returns:
         0 always; missing tools and offline skips are reported as hints.
     """
+    if getattr(args, "signal_hook", False):
+        path = adapters.write_house_settings(HOUSE_ROOT)
+        print(f"✓ hook Signala w repo house: {path} (podsumowanie nowych wiadomości na starcie sesji, "
+              "blokada gołego signal-cli)")
+        return 0
     for name in setup.install_user_skills():
         print(f"✓ skill {name} → ~/.claude/skills/{name}")
     remotion = setup.fetch_remotion_skill()
@@ -530,6 +535,9 @@ def cmd_setup(args) -> int:
         print("\nnext steps:")
         for line in todo:
             print(f"  - {line}")
+    from .signal import read_config
+    if read_config():
+        print("Signal: `house setup --signal-hook` pokaże nowe wiadomości na starcie sesji w repo house")
     print("\nthen: bin/house sync && bin/house adapt <contest>")
     return 0
 
@@ -658,6 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_sync)
 
     st = sub.add_parser("setup", help="prepare this machine: user skills, tool check, next steps")
+    st.add_argument("--signal-hook", action="store_true",
+                    help="only: add the Signal session hook to this repo's .claude/settings.local.json")
     st.set_defaults(func=cmd_setup)
 
     ad = sub.add_parser("adopt", help="attach an existing contest repo in place (symlink in contests/, adds .house/)")

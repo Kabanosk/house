@@ -317,6 +317,13 @@ class CursorTest(unittest.TestCase):
         self.add(msg(at(12, 5), "c"))
         self.assertEqual(self.texts("house"), ["c"])
 
+    def test_redelivered_duplicate_not_new(self):
+        a = msg(at(12, 0), "a")
+        self.add(a)
+        self.assertEqual(self.texts("house"), ["a"])
+        self.add(dict(a))
+        self.assertEqual(self.texts("house"), [])
+
     def test_unread_peek_keeps_cursor(self):
         self.add(msg(at(12, 0), "a"))
         self.assertEqual(self.texts("house", peek=True), ["a"])
