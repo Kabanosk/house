@@ -5,6 +5,7 @@ Used by: `house doctor [contest]` (prints the summary and, with a contest, write
 agents can run (codex and local-model tiers fall back to other agents when missing).
 """
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timedelta
@@ -123,6 +124,31 @@ def _perm_problems() -> list[str]:
     return out
 
 
+def signal_timer_status(home: Path | None = None, run=subprocess.run) -> str | None:
+    """One line about the Signal pull timer: None when not installed, ✓ when active, ! when installed but not."""
+    from .setup import TIMER
+    unit = (home or Path.home()) / ".config/systemd/user" / f"{TIMER}.timer"
+    if not unit.exists():
+        return None
+    try:
+        r = run(["systemctl", "--user", "is-active", f"{TIMER}.timer"], capture_output=True, text=True,
+                check=False, timeout=5)
+        state = (r.stdout or "").strip()
+    except (OSError, subprocess.TimeoutExpired):
+        state = "unknown"
+    if state == "active":
+        try:
+            linger = run(["loginctl", "show-user", os.environ.get("USER") or "", "-p", "Linger"], capture_output=True,
+                         text=True, check=False, timeout=5).stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            linger = ""
+        if "Linger=no" in linger:
+            return ("! signal: timer działa tylko, gdy jesteś zalogowany (linger wyłączony: "
+                    "`loginctl enable-linger`)")
+        return "✓ signal: timer odbioru działa"
+    return f"! signal: timer zainstalowany, ale nieaktywny ({state}); `house setup --signal-timer`"
+
+
 def signal_status(now: datetime | None = None) -> list[str]:
     """Check the Signal setup for `house doctor`.
 
@@ -161,4 +187,7 @@ def signal_status(now: datetime | None = None) -> list[str]:
                      + " (czytelnicy je pomijają)")
     lines += [f"! signal: {p}" for p in signalchats.collisions()]
     lines += _perm_problems()
+    timer = signal_timer_status()
+    if timer:
+        lines.append(timer)
     return lines

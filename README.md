@@ -158,6 +158,9 @@ przerwany. Dozwolone rozmowy to „Notatka do siebie”, grupy trwających konku
 | `house signal groups [--all]` | dozwolone rozmowy, liczba wiadomości |
 | `house signal allow "<nazwa grupy>" --alias krotka` / `deny krotka` | **tylko człowiek w terminalu**: dopisz / usuń grupę |
 | `house signal pull` / `status` / `migrate` | odbierz teraz / stan odbioru i magazynu / przenieś stare pliki |
+| `house signal compact` / `reparse` | sprzątanie: usunięte, znikające, starsze niż `retention_days`; ponowne parsowanie |
+| `house signal archive [czat] [--summarize]` | archiwa (zip + streszczenie dla agentów); grupa bez wiadomości od 180 dni trafia tam sama |
+| `house setup --signal-timer` | timer systemd: odbiór co 5 min bez sesji, raz dziennie `compact` |
 
 Agent nie może sam dodać grupy: `allow` wymaga terminala, a hook blokuje agentowi `house signal allow|deny`,
 każde uruchomienie `signal-cli`, nadpisywanie ścieżek przez `HOUSE_*=…`, odczyt `~/.local/share/signal-cli/` (tam

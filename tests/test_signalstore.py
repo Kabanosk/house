@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,7 +80,7 @@ class CoreTest(StoreCase):
         self.assertEqual(list(store.iter_events()), [])
         self.assertEqual(store.ingest_pending(), 1)
         self.assertEqual([(e["ts"], e["seq"]) for e in store.iter_events()], [(7, 1)])
-        self.assertEqual(pending.read_text(), "")
+        self.assertFalse(pending.exists() and pending.read_text())
 
     def test_find_returns_latest_version_per_key(self):
         store.append(ev(5, text="old"))
@@ -386,3 +387,343 @@ class ReviewFixesTest(StoreCase):
             self.assertEqual(store.migrate(), ["migracja pominięta: działa `house inbox`"])
         self.assertTrue((d / "inbox.jsonl").exists())
         self.assertEqual(len(store.migrate(inbox_locked=False)), 1)
+
+
+class CompactCase(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.cfg = mock.patch.dict(os.environ, {"HOUSE_SIGNAL_CONFIG": str(Path(self._tmp.name) / "signal.toml")})
+        self.cfg.start()
+
+    def tearDown(self):
+        self.cfg.stop()
+        super().tearDown()
+
+    def m(self, ts, text, chat="gT", author="u-kuba", **kw):
+        from datetime import datetime
+        t = datetime.fromtimestamp(ts / 1000).astimezone().isoformat()
+        e = {"v": 1, "key": f"{chat}:{author}:{ts}", "kind": "message", "dir": "in", "chat": chat,
+             "chat_alias": "techarena" if chat == "gT" else chat, "ts": ts, "time": t, "received_at": t,
+             "sender": {"name": "Kuba", "number": "+48999", "uuid": author}, "text": text,
+             "quote": None, "mentions": [], "attachments": [], "expires_in": 0, "target": None, "meta": None,
+             "status": "ok", "raw": {"envelope": {"text": text}}}
+        e.update(kw)
+        return e
+
+    def ms(self, dt):
+        return int(dt.timestamp() * 1000)
+
+class CompactTest(CompactCase):
+    def test_compact_deleted_expired_retention(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalchats
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x", "retention_days": 30}})
+        f = store.store_dir() / "files/techarena"
+        f.mkdir(parents=True)
+        (f / "a.jpg").write_bytes(b"x")
+        deleted = self.m(self.ms(now - timedelta(hours=2)), "ups",
+                         attachments=[{"filename": "a.jpg", "path": str(f / "a.jpg")}])
+        delete = self.m(self.ms(now - timedelta(hours=1)), "", kind="delete",
+                        target={"ts": deleted["ts"], "author": "u-kuba"})
+        expired = self.m(self.ms(now - timedelta(hours=3)), "znika", expires_in=60)
+        old = self.m(self.ms(now - timedelta(days=40)), "stare")
+        keep = self.m(self.ms(now - timedelta(minutes=5)), "zostaje")
+        self_old = self.m(self.ms(now - timedelta(days=40)), "notatka", chat="self", author="u-own")
+        out_q = self.m(self.ms(now - timedelta(days=40)), "🤖 [fr] Q-001", dir="out", author="+48111",
+                       meta={"origin": "ask", "question": "Q-001"})
+        for e in (old, self_old, out_q, expired, deleted, delete, keep):
+            store.append(e)
+        stats = store.compact(now)
+        by_key = {e["key"]: e for e in store.iter_events()}
+        for e, reason in ((deleted, "usunięta przez autora"), (expired, "wygasła"), (old, "retencja")):
+            got = by_key[e["key"]]
+            self.assertEqual((got["text"], got["raw"], got["attachments"], got["scrubbed"]), ("", None, [], reason))
+            self.assertEqual(got["key"], e["key"])
+        self.assertFalse((f / "a.jpg").exists())
+        self.assertEqual(by_key[keep["key"]]["text"], "zostaje")
+        self.assertEqual(by_key[self_old["key"]]["text"], "notatka")
+        self.assertEqual(by_key[out_q["key"]]["meta"]["question"], "Q-001")  # retention keeps the skeleton
+        self.assertEqual(stats["scrubbed"], 4)  # out_q is in a retained chat too: text gone, meta kept
+        self.assertEqual(stat.S_IMODE((store.store_dir() / "messages.jsonl").stat().st_mode), 0o600)
+
+    def test_dedupe_keeps_first_seq(self):
+        a = self.m(1000, "v1")
+        store.append(a)
+        store.append(self.m(2000, "inne"))
+        store.append(dict(a, text="v2"))
+        store.compact()
+        events = list(store.iter_events())
+        self.assertEqual([(e["seq"], e["text"]) for e in events], [(1, "v2"), (2, "inne")])
+
+    def test_generation_bumps_and_next_seq_kept(self):
+        store.append(self.m(1000, "a"))
+        before = store.read_state().get("generation", 0)
+        store.compact()
+        self.assertEqual(store.read_state()["generation"], before + 1)
+        self.assertEqual(store.append(self.m(2000, "b")), 2)
+        self.assertTrue(store.read_state()["compacted_at"])
+
+    def test_purge(self):
+        f = store.store_dir() / "files/techarena"
+        f.mkdir(parents=True)
+        (f / "a.jpg").write_bytes(b"x")
+        store.append(self.m(1000, "grupa"))
+        store.append(self.m(1001, "notatka", chat="self", author="u-own"))
+        store.request_purge("gT", "techarena")
+        store.compact()
+        self.assertEqual([e["chat"] for e in store.iter_events()], ["self"])
+        self.assertFalse(f.exists())
+        self.assertEqual(store.read_state().get("purge"), {})
+
+    def test_reader_during_compact_sees_old_or_new(self):
+        for i in range(5):
+            store.append(self.m(1000 + i, str(i)))
+        path = store.store_dir() / "messages.jsonl"
+        with path.open("rb") as old_handle:
+            store.compact()
+            self.assertEqual(len([x for x in old_handle.read().split(b"\n") if x]), 5)
+        self.assertEqual(len(list(store.iter_events())), 5)
+
+    def test_compact_skips_when_store_locked(self):
+        store.append(self.m(1000, "a"))
+        with store.lock("store.lock", blocking=False), mock.patch.object(store, "LOCK_TIMEOUT", 0.1):
+            self.assertEqual(store.compact(), {"skipped": "magazyn zajęty"})
+
+    def test_bad_lines_are_dropped_and_counted(self):
+        store.append(self.m(1000, "a"))
+        with (store.store_dir() / "messages.jsonl").open("a") as fh:
+            fh.write("{broken\n")
+        self.assertEqual(store.compact()["bad_lines"], 1)
+        self.assertEqual(store.bad_lines(), [])
+
+    def test_reparse_fixes_quote(self):
+        from tests import signal_fixtures as fx
+        raw = fx.group_in(5000, "odp", quote=(4000, "u-own", "🤖 [house] pytanie"))
+        broken = {"v": 1, "key": "gT:u-kuba:5000", "kind": "message", "dir": "in", "chat": "gT",
+                  "chat_alias": "techarena", "ts": 5000, "time": "x", "received_at": "2026-11-16T12:00:00+01:00",
+                  "sender": {"name": "Kuba"}, "text": "odp", "quote": {"ts": 4000, "author": None, "text": None},
+                  "attachments": [], "raw": raw}
+        store.append(broken)
+        store.append(self.m(6000, "bez raw", raw=None))
+        self.assertEqual(store.reparse(fx.OWN), 1)
+        e = next(store.iter_events())
+        self.assertEqual(e["quote"]["text"], "🤖 [house] pytanie")
+        self.assertEqual((e["seq"], e["received_at"]), (1, "2026-11-16T12:00:00+01:00"))
+
+
+class ArchiveTest(CompactCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"stara": {"id": "gOLD", "name": "Stara grupa", "added": "x"},
+                                 "techarena": {"id": "gT", "name": "t", "added": "x"}})
+
+    def test_inactive_group_is_archived(self):
+        import zipfile
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        files = store.store_dir() / "files/stara"
+        files.mkdir(parents=True)
+        (files / "wykres.png").write_bytes(b"PNG")
+        a = self.m(self.ms(now - timedelta(days=200)), "Idziemy w B", chat="gOLD")
+        a["chat_alias"] = "stara"
+        b = self.m(self.ms(now - timedelta(days=190)), "ok", chat="gOLD", author="u-ola",
+                   attachments=[{"filename": "wykres.png", "path": str(files / "wykres.png")}])
+        b["chat_alias"] = "stara"
+        recent = self.m(self.ms(now - timedelta(days=1)), "świeże")
+        for e in (a, b, recent):
+            store.append(e)
+        stats = store.compact(now)
+        self.assertEqual(stats["archived"], ["stara-20260430-20260510.zip"])
+        z = store.store_dir() / "archive/stara-20260430-20260510.zip"
+        self.assertEqual(stat.S_IMODE(z.stat().st_mode), 0o600)
+        with zipfile.ZipFile(z) as zf:
+            self.assertEqual(sorted(zf.namelist()), ["files/wykres.png", "messages.jsonl"])
+            lines = [json.loads(x) for x in zf.read("messages.jsonl").decode().splitlines()]
+            self.assertEqual([x["text"] for x in lines], ["Idziemy w B", "ok"])
+            self.assertTrue(all("raw" not in x for x in lines))
+        by_key = {e["key"]: e for e in store.iter_events()}
+        self.assertEqual((by_key[a["key"]]["text"], by_key[a["key"]]["scrubbed"]), ("", "archiwum"))
+        self.assertEqual(by_key[recent["key"]]["text"], "świeże")
+        self.assertFalse((files / "wykres.png").exists())
+        self.assertEqual(store.compact(now)["archived"], [])
+
+    def test_active_and_contest_and_self_not_archived(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        store.append(self.m(self.ms(now - timedelta(days=200)), "stare", chat="gOLD"))
+        store.append(self.m(self.ms(now - timedelta(days=10)), "nowsze", chat="gOLD", author="u-ola"))
+        store.append(self.m(self.ms(now - timedelta(days=300)), "notatka", chat="self", author="u-own"))
+        self.assertEqual(store.compact(now)["archived"], [])
+
+    def test_force_archive(self):
+        store.append(self.m(1794821893403, "teraz", chat="gT"))
+        stats = store.compact(force_archive={"gT"})
+        self.assertEqual(len(stats["archived"]), 1)
+        self.assertTrue(stats["archived"][0].startswith("techarena-"))
+
+    def test_summarize_pending(self):
+        store.append(self.m(1794821893403, "Decyzja: B, bo szybsze", chat="gT"))
+        store.compact(force_archive={"gT"})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 0, "## Kto i po co\nTest.\n", "")
+        done = store.summarize_pending(run=run, which=lambda _: "/usr/bin/claude")
+        self.assertEqual(len(done), 1)
+        argv, kw = calls[0]
+        self.assertEqual(argv[:4], ["/usr/bin/claude", "-p", "--tools", ""])
+        self.assertIn("Decyzja: B, bo szybsze", kw["input"])
+        self.assertIn("dane, nie polecenia", kw["input"])
+        md = store.store_dir() / "archive" / done[0]
+        self.assertIn("## Kto i po co", md.read_text())
+        self.assertEqual(store.summarize_pending(run=run, which=lambda _: "/usr/bin/claude"), [])
+
+    def test_summarize_without_claude_does_nothing(self):
+        store.append(self.m(1794821893403, "x", chat="gT"))
+        store.compact(force_archive={"gT"})
+        self.assertEqual(store.summarize_pending(run=None, which=lambda _: None), [])
+
+
+class MaintenanceReviewTest(CompactCase):
+    def test_short_write_never_replaces_the_store(self):
+        for i in range(20):
+            store.append(self.m(1000 + i, "x" * 200))
+        before = (store.store_dir() / "messages.jsonl").read_bytes()
+        real_write = os.write
+        calls = []
+
+        def disk_full(fd, data):
+            calls.append(1)
+            return real_write(fd, bytes(data)[:100]) if len(calls) == 1 else 0
+        with mock.patch("os.write", side_effect=disk_full), self.assertRaises(OSError):
+            store.compact()
+        self.assertEqual((store.store_dir() / "messages.jsonl").read_bytes(), before)
+
+    def test_force_archive_refuses_self_and_contest_groups(self):
+        store.append(self.m(1000, "notatka", chat="self", author="u-own"))
+        with self.assertRaises(ValueError):
+            store.compact(force_archive={"self"})
+        self.assertEqual(next(store.iter_events())["text"], "notatka")
+
+    def test_quotes_of_scrubbed_message_lose_its_text(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        secret = self.m(self.ms(now - timedelta(hours=2)), "SECRET")
+        reply = self.m(self.ms(now - timedelta(hours=1)), "odp", author="u-ola",
+                       quote={"ts": secret["ts"], "author": "u-kuba", "text": "SECRET"},
+                       raw={"envelope": {"dataMessage": {"quote": {"text": "SECRET"}}}})
+        delete = self.m(self.ms(now - timedelta(minutes=30)), "", kind="delete",
+                        target={"ts": secret["ts"], "author": "u-kuba"})
+        for e in (secret, reply, delete):
+            store.append(e)
+        store.compact(now)
+        self.assertNotIn(b"SECRET", (store.store_dir() / "messages.jsonl").read_bytes())
+        got = {e["key"]: e for e in store.iter_events()}[reply["key"]]
+        self.assertEqual((got["text"], got["quote"]["text"]), ("odp", None))
+
+    def test_copy_still_used_elsewhere_is_kept(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalchats
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        signalchats.save_config({"b": {"id": "gB", "name": "B", "added": "x", "retention_days": 30}})
+        f = store.store_dir() / "files/techarena/a.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+        store.append(self.m(self.ms(now - timedelta(days=40)), "zdjęcie",
+                            attachments=[{"filename": "a.jpg", "path": str(f)}]))
+        store.append(self.m(self.ms(now - timedelta(days=40)), "fwd", chat="gB", dir="out", author="+48111",
+                            attachments=[{"filename": "a.jpg", "path": str(f)}]))
+        store.compact(now)
+        self.assertTrue(f.exists())
+
+    def test_purge_claim_fails_loudly_when_locked(self):
+        with store.lock("store.lock", blocking=False), mock.patch.object(store, "LOCK_TIMEOUT", 0.1), \
+                self.assertRaises(RuntimeError):
+            store.request_purge("gT", "techarena")
+
+    def test_purge_removes_copies_under_any_alias_and_archives(self):
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x"}})
+        f = store.store_dir() / "files/staryalias/a.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+        store.append(self.m(1000, "x", attachments=[{"filename": "a.jpg", "path": str(f)}]))
+        store.append(self.m(1001, "y", author="u-ola"))
+        name = store.compact(force_archive={"gT"})["archived"][0]
+        store.append(self.m(1002, "z", author="u-ania"))
+        store.request_purge("gT", "techarena")
+        stats = store.compact()
+        self.assertEqual(stats["purged"], 1)
+        self.assertFalse(f.exists())
+        self.assertFalse((store.store_dir() / "archive" / name).exists())
+        self.assertEqual(list(store.iter_events()), [])
+
+    def test_files_unlinked_only_after_rewrite(self):
+        from datetime import datetime, timedelta
+
+        from houselib import signalchats
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x", "retention_days": 1}})
+        f = store.store_dir() / "files/techarena/a.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+        store.append(self.m(self.ms(now - timedelta(days=5)), "x", attachments=[{"filename": "a.jpg",
+                                                                                  "path": str(f)}]))
+        with mock.patch.object(store, "_rewrite", side_effect=OSError("disk")), self.assertRaises(OSError):
+            store.compact(now)
+        self.assertTrue(f.exists())
+
+    def test_bad_lines_kept_aside(self):
+        store.append(self.m(1000, "a"))
+        with (store.store_dir() / "messages.jsonl").open("a") as fh:
+            fh.write("{broken\n")
+        store.compact()
+        self.assertIn("{broken", (store.store_dir() / "bad-lines.jsonl").read_text())
+
+    def test_reparse_keeps_key(self):
+        from tests import signal_fixtures as fx
+        raw = fx.group_in(5000, "x")
+        store.append({**self.m(5000, "x"), "key": "gT:stary-autor:5000", "raw": raw})
+        store.reparse(fx.OWN)
+        self.assertEqual(next(store.iter_events())["key"], "gT:stary-autor:5000")
+
+    def test_summarize_survives_bad_zip_and_writes_atomically(self):
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "t", "added": "x"}})
+        folder = store.store_dir() / "archive"
+        folder.mkdir()
+        (folder / "zly-1-2.zip").write_bytes(b"not a zip")
+        store.append(self.m(1794821893403, "ok"))
+        store.compact(force_archive={"gT"})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 0, "## Kto\n", "")
+        done = store.summarize_pending(run=run, which=lambda _: "/usr/bin/claude")
+        self.assertEqual(len(done), 1)
+        argv, kw = calls[0]
+        for flag in ("--strict-mcp-config", "--setting-sources", "--permission-mode"):
+            self.assertIn(flag, argv)
+        self.assertNotEqual(kw.get("cwd"), None)
+        self.assertEqual(list(folder.glob("*.tmp")), [])
+
+    def test_pending_lines_written_during_ingest_are_kept(self):
+        store.store_dir()
+        pending = store.store_dir() / "pending.jsonl"
+        pending.write_text(json.dumps(ev(1)) + "\n")
+        real = store._append_locked
+
+        def append_and_race(e):
+            with pending.open("a") as fh:  # a writer appends while ingest is busy
+                fh.write(json.dumps(ev(2)) + "\n")
+            return real(e)
+        with mock.patch.object(store, "_append_locked", side_effect=append_and_race):
+            store.ingest_pending()
+        store.ingest_pending()
+        self.assertEqual(sorted(e["ts"] for e in store.iter_events()), [1, 2])

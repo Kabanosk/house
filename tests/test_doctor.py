@@ -67,7 +67,8 @@ class SignalStatusTest(unittest.TestCase):
                                                      "HOUSE_SIGNAL_CONFIG": str(self.tmp / "signal.toml")}),
                         mock.patch("houselib.signal.read_config", return_value={"HOUSE_NOTIFY_CHANNEL": "signal"}),
                         mock.patch("houselib.signal.from_config",
-                                   return_value=type("S", (), {"binary": "/x/signal-cli", "account": "+1"})())]
+                                   return_value=type("S", (), {"binary": "/x/signal-cli", "account": "+1"})()),
+                        mock.patch("houselib.doctor.signal_timer_status", return_value=None)]
         for p in self.patches:
             p.start()
 

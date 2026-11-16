@@ -129,3 +129,66 @@ def hints(tools: dict) -> list[str]:
     out.append("before a video sprint: `npx remotion browser ensure` in the video project "
                "(downloads Remotion's Chrome Headless Shell once, so the first render doesn't)")
     return out
+
+
+TIMER = "house-signal-pull"
+SERVICE_UNIT = """[Unit]
+Description=house: odbiór Signala do magazynu (house signal pull)
+
+[Service]
+Type=oneshot
+Environment=PATH={path}
+ExecStart={root}/bin/house signal pull --timeout 5 --maintenance
+TimeoutStartSec=900
+"""
+TIMER_UNIT = """[Unit]
+Description=house: odbiór Signala co {every}
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec={every}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=subprocess.run,
+                         every: str = "5min", claude: str | None = None) -> list[Path]:
+    """Install and start the systemd user timer that runs `house signal pull --maintenance` periodically.
+
+    Receiving without any open session keeps the store fresh and the linked device active; `--maintenance`
+    also compacts the store once a day. Rewriting the units is idempotent.
+
+    Args:
+        root: House repo root (the unit runs `<root>/bin/house`).
+        home: Home directory. Defaults to `Path.home()`.
+        run: Runner for `systemctl` (signature of `subprocess.run`); replaceable in tests.
+        every: Interval, a systemd time span such as "5min" (S7 uses "1min"). Defaults to "5min".
+        claude: Path of `claude` (its directory goes to the unit's PATH, which systemd keeps minimal otherwise).
+            Defaults to `shutil.which("claude")`.
+
+    Returns:
+        Paths of the service and timer unit files.
+
+    Raises:
+        RuntimeError: `systemctl --user` is missing or fails (no user manager, no D-Bus).
+    """
+    units = (home or Path.home()) / ".config/systemd/user"
+    units.mkdir(parents=True, exist_ok=True)
+    service, timer = units / f"{TIMER}.service", units / f"{TIMER}.timer"
+    claude = claude or shutil.which("claude")
+    path = ":".join(dict.fromkeys([*([str(Path(claude).parent)] if claude else []), "/usr/local/bin", "/usr/bin",
+                                   "/bin"]))
+    service.write_text(SERVICE_UNIT.format(root=Path(root).resolve(), path=path))
+    timer.write_text(TIMER_UNIT.format(every=every))
+    for argv in (["systemctl", "--user", "daemon-reload"],
+                 ["systemctl", "--user", "enable", "--now", f"{TIMER}.timer"]):
+        try:
+            r = run(argv, capture_output=True, text=True, check=False)
+        except OSError as e:
+            raise RuntimeError(f"systemctl --user niedostępny: {e}") from e
+        if r.returncode != 0:
+            raise RuntimeError(f"{' '.join(argv)}: {(r.stderr or '').strip()[:200]}")
+    return [service, timer]

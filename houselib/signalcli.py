@@ -6,7 +6,7 @@ result or Signal not configured for reading commands), 1 failure (Signal not con
 """
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import signalchats, signalread, signalstore
@@ -27,16 +27,86 @@ def _client():
     return signal.from_config()
 
 
+def _compact_line(stats: dict) -> str:
+    if "skipped" in stats:
+        return f"compact pominięty: {stats['skipped']}"
+    line = (f"compact: {stats['events']} zdarzeń, wyczyszczono {stats['scrubbed']}, usunięte rozmowy "
+            f"{stats['purged']}, złe linie {stats['bad_lines']}")
+    if stats.get("archived"):
+        line += "\narchiwum: " + ", ".join(stats["archived"])
+    return line
+
+
 def cmd_pull(args) -> int:
-    """`house signal pull [--timeout 5]`: receive now and store every allowed message; always exit 0."""
+    """`house signal pull [--timeout 5] [--maintenance]`: receive now and store every allowed message; exit 0.
+
+    `--maintenance` (the systemd timer) also runs `compact` when the last one is over 24 h old.
+    """
     res = signalstore.pull(_client(), timeout=args.timeout)
     if res.skipped:
         print(f"pominięto odbiór: {res.skipped}")
-        return 0
-    line = f"odebrano {res.kept}, odrzucono {res.dropped} (spoza dozwolonych)"
-    if res.bad_lines:
-        line += f", złe linie {res.bad_lines}"
-    print(line + (f" · błąd: {res.error}" if res.error else ""))
+    else:
+        line = f"odebrano {res.kept}, odrzucono {res.dropped} (spoza dozwolonych)"
+        if res.bad_lines:
+            line += f", złe linie {res.bad_lines}"
+        print(line + (f" · błąd: {res.error}" if res.error else ""))
+    if args.maintenance:
+        last = signalread.parse_iso(signalstore.read_state().get("compacted_at"))
+        if last is None or datetime.now().astimezone() - last > timedelta(hours=24):
+            stats = signalstore.compact()
+            print(_compact_line(stats))
+            if stats.get("archived"):
+                for name in signalstore.summarize_pending():
+                    print(f"streszczenie: {name}")
+    return 0
+
+
+def cmd_archive(args) -> int:
+    """`house signal archive [ALIAS] [--summarize]`: list archives, archive a chat now, or write summaries.
+
+    Chats of `signal.toml` with no message for 180 days are archived by `compact` on their own (zip of events
+    and files + a summary for agents). Exit 0, 2 for an unknown alias.
+    """
+    if args.alias:
+        try:
+            chat = signalchats.resolve(args.alias)
+        except ValueError as e:
+            return _usage(str(e))
+        try:
+            print(_compact_line(signalstore.compact(force_archive={chat.id})))
+        except ValueError as e:
+            return _usage(str(e))
+    if args.summarize:
+        for name in signalstore.summarize_pending() or ["brak archiwów do streszczenia (albo nie ma `claude`)"]:
+            print(f"streszczenie: {name}" if name.endswith(".md") else name)
+    if not args.alias and not args.summarize:
+        folder = signalstore.store_dir() / "archive"
+        zips = sorted(folder.glob("*.zip")) if folder.is_dir() else []
+        for z in zips:
+            note = "streszczenie: " + z.with_suffix(".md").name if z.with_suffix(".md").exists() \
+                else "bez streszczenia (`house signal archive --summarize`)"
+            print(f"{z.name} · {signalread.fmt_size(z.stat().st_size)} · {note}")
+        if not zips:
+            print("brak archiwów")
+    return 0
+
+
+def cmd_compact(args) -> int:
+    """`house signal compact`: remove deleted, expired and out-of-retention content, apply purges; exit 0."""
+    print(_compact_line(signalstore.compact()))
+    return 0
+
+
+def cmd_reparse(args) -> int:
+    """`house signal reparse`: rebuild stored events from their envelopes with the current parser.
+
+    Exit 0, or 1 when Signal is not configured (the account number is needed to recognise Note to Self).
+    """
+    sig = _client()
+    if sig is None:
+        print("error: Signal nie jest skonfigurowany (potrzebny numer konta)", file=sys.stderr)
+        return 1
+    print(f"reparse: zmienionych zdarzeń {signalstore.reparse(sig.account)}")
     return 0
 
 
@@ -244,7 +314,9 @@ def cmd_allow(args) -> int:
 
 
 def cmd_deny(args) -> int:
-    """`house signal deny ALIAS`: stop keeping a `signal.toml` group (human only); its history stays.
+    """`house signal deny ALIAS [--purge]`: stop keeping a `signal.toml` group (human only).
+
+    Its history stays, unless `--purge` removes all its events and files from the store at once.
 
     Exit 0 removed, 1 declined, 2 no terminal, unknown alias or a contest's group.
     """
@@ -258,12 +330,28 @@ def cmd_deny(args) -> int:
             return _usage(f"`{args.alias}` to grupa konkursu ({chat.source}): zmień notify.signal_group w specu "
                           "albo zakończ konkurs")
         return _usage(f"nie ma `{args.alias}` w signal.toml (lista: house signal groups)")
-    if not _yes(f"Przestać zapisywać `{args.alias}` ({config[args.alias].get('name')})? Historia zostaje. [t/N] "):
+    history = "Historia i pliki tej rozmowy zostaną USUNIĘTE z magazynu." if args.purge else "Historia zostaje."
+    if not _yes(f"Przestać zapisywać `{args.alias}` ({config[args.alias].get('name')})? {history} [t/N] "):
         print("nic nie zmieniono")
         return 1
+    entry = config[args.alias]
+    if args.purge:
+        try:
+            signalstore.request_purge(entry["id"], args.alias)  # first: a failure leaves the config unchanged
+        except RuntimeError as e:
+            print(f"error: nic nie zmieniono: {e}", file=sys.stderr)
+            return 1
     del config[args.alias]
     signalchats.save_config(config)
-    print(f"✓ `{args.alias}` usunięta z dozwolonych; zapisana historia zostaje w magazynie")
+    if not args.purge:
+        print(f"✓ `{args.alias}` usunięta z dozwolonych; zapisana historia zostaje w magazynie")
+        return 0
+    stats = signalstore.compact()
+    if "skipped" in stats or not stats.get("purged"):
+        print(f"✓ `{args.alias}` usunięta z dozwolonych; historii nie usunięto teraz "
+              f"({stats.get('skipped') or 'nic do usunięcia'}), zrobi to najbliższym compact (`house signal compact`)")
+        return 1
+    print(f"✓ `{args.alias}` usunięta z dozwolonych; historia usunięta ({_compact_line(stats)})")
     return 0
 
 
@@ -402,7 +490,16 @@ def register(sub) -> None:
     ss = sg.add_subparsers(dest="signal_command", required=True)
     p = ss.add_parser("pull", help="receive now and store every allowed message")
     p.add_argument("--timeout", type=int, default=5)
+    p.add_argument("--maintenance", action="store_true", help="also compact once a day (used by the timer)")
     p.set_defaults(func=_migrating(cmd_pull))
+    cp = ss.add_parser("compact", help="remove deleted, expired and out-of-retention content; apply --purge")
+    cp.set_defaults(func=_migrating(cmd_compact))
+    rp = ss.add_parser("reparse", help="rebuild stored events from their signal-cli envelopes (after a parser fix)")
+    rp.set_defaults(func=_migrating(cmd_reparse))
+    ar = ss.add_parser("archive", help="archives of inactive chats: list, archive a chat now, --summarize")
+    ar.add_argument("alias", nargs="?")
+    ar.add_argument("--summarize", action="store_true", help="write missing summaries with `claude -p` (no tools)")
+    ar.set_defaults(func=_migrating(cmd_archive))
     m = ss.add_parser("migrate", help="move the old inbox.jsonl / sent.jsonl into the store (idempotent)")
     m.set_defaults(func=cmd_migrate)
     sd = ss.add_parser("send", help="send to an allowed chat (prefix 🤖, logged): send CHAT TEXT [--reply-to TS]")
@@ -422,6 +519,7 @@ def register(sub) -> None:
     al.set_defaults(func=_migrating(cmd_allow))
     dn = ss.add_parser("deny", help="human only (terminal): stop keeping a signal.toml group (history stays)")
     dn.add_argument("alias")
+    dn.add_argument("--purge", action="store_true", help="also delete the chat's history and files from the store")
     dn.set_defaults(func=_migrating(cmd_deny))
     rd = ss.add_parser("read", help="history of a chat (default: all allowed), newest last")
     rd.add_argument("chat", nargs="?", default="all", help="alias, self or all (default)")

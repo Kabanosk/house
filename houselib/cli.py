@@ -510,6 +510,10 @@ def cmd_setup(args) -> int:
     Returns:
         0 always; missing tools and offline skips are reported as hints.
     """
+    if getattr(args, "signal_timer", False):
+        service, timer = setup.install_signal_timer(HOUSE_ROOT)
+        print(f"✓ timer Signala: {timer.name} co 5 min (house signal pull + codzienny compact); {service}")
+        return 0
     if getattr(args, "signal_hook", False):
         path = adapters.write_house_settings(HOUSE_ROOT)
         print(f"✓ hook Signala w repo house: {path} (podsumowanie nowych wiadomości na starcie sesji, "
@@ -668,6 +672,8 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("setup", help="prepare this machine: user skills, tool check, next steps")
     st.add_argument("--signal-hook", action="store_true",
                     help="only: add the Signal session hook to this repo's .claude/settings.local.json")
+    st.add_argument("--signal-timer", action="store_true",
+                    help="only: install the systemd user timer that pulls Signal every 5 minutes")
     st.set_defaults(func=cmd_setup)
 
     ad = sub.add_parser("adopt", help="attach an existing contest repo in place (symlink in contests/, adds .house/)")
