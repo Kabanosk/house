@@ -195,7 +195,8 @@ def route(m: Message, contests: list[Path], by_group: dict[str, list[Path]], sen
 def _reply(sig, contest: Path | None, chat: str, text: str) -> None:
     """Send `text` back into `chat` ("self" or a group id), prefixed for the contest or `🤖 [house]` if None."""
     prefix = notify.prefix(contest) if contest else "🤖 [house]"
-    sig.send(f"{prefix} {text}", group_id=None if chat == "self" else chat)
+    sig.send(f"{prefix} {text}", group_id=None if chat == "self" else chat,
+             meta={"origin": "inbox-reply", "contest": notify.contest_name(contest) if contest else None})
 
 
 def _handle(m: Message, sig, contests, scope, by_group, sent) -> tuple[bool, str | None]:
@@ -315,7 +316,7 @@ def deadlines(contest: Path, sig, now: datetime | None = None) -> list[str]:
         if sig is None:  # explicit: no Signal given → never fall back to the machine's config here
             continue
         sent, _ = notify.send(contest, f"⏳ {q.id} {q.title} czeka na decyzję; domyślnie {q.default} o "
-                              f"{q.deadline:%H:%M}.", question=q.id, sig=sig)
+                              f"{q.deadline:%H:%M}.", question=q.id, sig=sig, origin="deadline")
         if sent:
             questions.mark_reminded(house, q.id)
             log.append(f"reminded {q.id}")
@@ -325,6 +326,6 @@ def deadlines(contest: Path, sig, now: datetime | None = None) -> list[str]:
         if did:
             if sig is not None:
                 notify.send(contest, f"⏱ {q.id}: brak odpowiedzi do {q.deadline:%H:%M}, przyjęto domyślnie "
-                            f"{q.default} ({did}). Można cofnąć decyzją człowieka.", sig=sig)
+                            f"{q.default} ({did}). Można cofnąć decyzją człowieka.", sig=sig, origin="deadline")
             log.append(f"default {q.id} → {q.default} ({did})")
     return log

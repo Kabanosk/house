@@ -99,24 +99,42 @@ class Signal:
         except OSError:
             return None
 
-    def send(self, text: str, group_id: str | None = None) -> int | None:
-        """Send a text message to Note to Self (with a notification) or to a group.
+    def send(self, text: str, group_id: str | None = None, *, attachments=(), quote: tuple[int, str] | None = None,
+             meta: dict | None = None) -> int | None:
+        """Send a message to Note to Self (with a notification) or to a group, and log it in the store.
+
+        Every call, delivered or not, becomes an `out` event in the message store (`signalstore.record_out`), so a
+        later quote-reply can be matched and the conversation history is complete. Logging never breaks a send.
 
         Args:
-            text: Message body, sent verbatim.
+            text: Message body, sent verbatim (house's callers add the `🤖 [..]` prefix).
             group_id: Signal group id (base64, as returned by `list_groups`). When None or empty the message goes
                 to the owner's Note to Self instead. Defaults to None.
+            attachments: Paths of files to attach (`--attachment`, one per file). Defaults to none.
+            quote: (timestamp, author uuid or number) of the message this one quotes. Defaults to None.
+            meta: Stored with the event: `origin` (notify, ask, inbox-reply, deadline, night, cli; "python" when
+                missing), `contest`, `question`. Defaults to None.
 
         Returns:
             Signal's message timestamp (milliseconds since the epoch), which is also the id a quote-reply refers
             to. None when `signal-cli` is missing, exits non-zero, times out or prints no timestamp.
         """
         target = ["-g", group_id] if group_id else ["--note-to-self", "--notify-self"]
-        r = self._call("send", *target, "-m", text)
-        if r is None or r.returncode != 0:
-            return None
-        last = (r.stdout.strip().splitlines() or [""])[-1].strip()
-        return int(last) if last.isdigit() else None
+        extra = [x for path in attachments for x in ("--attachment", str(path))]
+        if quote:
+            extra += ["--quote-timestamp", str(quote[0]), "--quote-author", str(quote[1])]
+        r = self._call("send", *target, "-m", text, *extra)
+        ts = None
+        if r is not None and r.returncode == 0:
+            last = (r.stdout.strip().splitlines() or [""])[-1].strip()
+            ts = int(last) if last.isdigit() else None
+        try:
+            from . import signalstore
+            signalstore.record_out(self.account, group_id or "self", text, ts, attachments=attachments, quote=quote,
+                                   meta={"origin": "python", **(meta or {})})
+        except Exception:  # noqa: BLE001, S110 — the log must never turn a delivered message into a failure
+            pass
+        return ts
 
     def receive(self, handle: Callable[[dict], None], timeout: int = 1, max_messages: int | None = None,
                 should_stop: Callable[[], bool] = lambda: False) -> ReceiveResult:

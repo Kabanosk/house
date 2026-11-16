@@ -381,7 +381,7 @@ def cmd_night(args) -> int:
         print(f"✗ {p}")
     if problems:
         print("night not started")
-        notify.send(target, "🌙 noc nie wystartowała: " + "; ".join(problems)[:600])
+        notify.send(target, "🌙 noc nie wystartowała: " + "; ".join(problems)[:600], origin="night")
         return 1
     if args.dry_run:
         ready = night.pick_ready(target / ".house", set(), 99)

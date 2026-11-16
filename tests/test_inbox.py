@@ -41,6 +41,7 @@ def dm(ts, text):
 class FakeSignal:
     def __init__(self, incoming, groups=None):
         self.account, self.incoming, self.sent, self.groups, self.ts = OWN, incoming, [], groups or [], 5000
+        self.metas = []
 
     attachments_dir = Path("/nonexistent")
 
@@ -51,9 +52,10 @@ class FakeSignal:
             handle(obj)
         return ReceiveResult(objects=len(out))
 
-    def send(self, text, group_id=None):
+    def send(self, text, group_id=None, meta=None, **kw):
         self.ts += 1
         self.sent.append((group_id, text))
+        self.metas.append(meta)
         return self.ts
 
     def list_groups(self):
@@ -101,6 +103,21 @@ class InboxTest(unittest.TestCase):
         self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
         self.assertIn("[open] Finalne", self.qtext(self.fi))
         self.assertEqual(sig.sent, [(None, "🤖 [fr] ✓ Q-001: B (Wojciech Fiołka)")])
+
+    def test_inbox_confirmation_meta(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        sig, _ = self.run_inbox([self_reply(200, "B", quote=100)])
+        self.assertEqual(sig.metas, [{"origin": "inbox-reply", "contest": "fr-2026"}])
+
+    def test_deadline_messages_meta(self):
+        (self.fr / ".house/QUESTIONS.md").write_text(
+            "# Q\n\n## Q-005 [open] Finalne?\n- **Poziom:** krytyczny\n- **Termin:** 2026-11-20 23:50\n"
+            "- **Domyślnie:** B\n- **Odpowiedź:** —\n")
+        (self.fr / ".house/state.json").write_text(json.dumps({"sent_questions": {"Q-005": "2026-11-20T21:50:00"}}))
+        sig = FakeSignal([], self.groups)
+        inbox.deadlines(self.fr, sig, now=datetime(2026, 11, 20, 23, 0))
+        self.assertTrue(sig.metas)
+        self.assertTrue(all(m["origin"] == "deadline" for m in sig.metas), sig.metas)
 
     def test_teammate_answers_in_group_first_wins(self):
         self.sent_question(self.fr, "Q-001", 100, chat="gT")

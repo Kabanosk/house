@@ -554,7 +554,7 @@ def run_night(contest: Path, hours: float = 8, max_tasks: int | None = None,
             from . import notify
             merged = sum(a.outcome == "merged" for a in rep.attempts)
             notify.send(contest, f"🌙 noc: {merged} scalonych, {len(rep.attempts) - merged} nieudanych prób; "
-                        f"koniec: {rep.stopped_because}. Raport: {rep.report_path.name}")
+                        f"koniec: {rep.stopped_because}. Raport: {rep.report_path.name}", origin="night")
         except Exception:  # noqa: BLE001, S110
             pass
     return rep

@@ -16,11 +16,12 @@ QS = ("# Q\n\n## Q-001 [open] Które zgłoszenie finalne?\n- **Opcje:** A) lgbm 
 
 class FakeSignal:
     def __init__(self, groups=None):
-        self.sent, self.groups, self.ts = [], groups or [], 1000
+        self.sent, self.groups, self.ts, self.meta = [], groups or [], 1000, []
 
-    def send(self, text, group_id=None):
+    def send(self, text, group_id=None, meta=None, **kw):
         self.ts += 1
         self.sent.append((group_id, text))
+        self.meta.append(meta)
         return self.ts
 
     def list_groups(self):
@@ -62,6 +63,15 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual([(r["chat"], r["contest"]) for r in self.sent_log()], [("self", "fr-contest"), ("g1", "fr-contest")])
         self.assertEqual(json.loads((notify.data_dir() / "groups.json").read_text()), {"Huawei Poland": "g1"})
+
+    def test_notify_meta(self):
+        self.spec('notify:\n  alias: fr\n  signal_group: "Team"\n')
+        sig = FakeSignal([{"id": "g1", "name": "Team"}])
+        notify.send(self.c, "hello", sig=sig)
+        self.assertEqual(sig.meta, [{"origin": "notify", "contest": "fr-contest", "question": None}] * 2)
+        sig = FakeSignal()
+        notify.ask_new(self.c, sig=sig)
+        self.assertEqual(sig.meta, [{"origin": "ask", "contest": "fr-contest", "question": "Q-001"}] * 2)
 
     def test_unknown_or_ambiguous_group(self):
         self.spec("notify:\n  signal_group: Team\n")

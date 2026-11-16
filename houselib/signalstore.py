@@ -17,6 +17,7 @@ line that is not a JSON object (`bad_lines()` lists them for `house doctor`).
 """
 import fcntl
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -244,6 +245,45 @@ def last_seq() -> int:
     """Seq of the newest event in the store (0 when empty)."""
     nxt = read_state().get("next_seq")
     return int(nxt) - 1 if nxt else _scan_last_seq()
+
+
+# --- sending ---------------------------------------------------------------------------------------------------
+
+def record_out(account: str, chat: str, text: str, ts: int | None, *, attachments=(), quote=None,
+               meta: dict | None = None) -> int | None:
+    """Append an `out` event for a message house sent (or tried to send); called by `Signal.send`.
+
+    Args:
+        account: The account number (sender of the event and author part of its key).
+        chat: "self" or the group id.
+        text: The text as sent.
+        ts: Signal timestamp from signal-cli, or None when sending failed (status "failed").
+        attachments: Paths of attached files (stored with their original path).
+        quote: (timestamp, author) of the quoted message; its text is copied from the store when known.
+        meta: `origin`, `contest`, `question`.
+
+    Returns:
+        The event's seq, or None when it went to `pending.jsonl`.
+    """
+    from . import signalchats
+    now = datetime.now().astimezone()
+    stamp = ts if ts is not None else f"out-failed-{int(now.timestamp() * 1000)}"
+    quoted = None
+    if quote:
+        found = find(chat, int(quote[0]))
+        quoted = {"ts": int(quote[0]), "author": str(quote[1]), "text": found[0].get("text") if found else None}
+    files = []
+    for path in attachments:
+        p = Path(path)
+        files.append({"content_type": mimetypes.guess_type(p.name)[0], "filename": p.name,
+                      "size": p.stat().st_size if p.is_file() else None, "id": None, "path": str(p)})
+    time_ = datetime.fromtimestamp(ts / 1000).astimezone() if ts is not None else now
+    return append({"v": 1, "key": f"{chat}:{account}:{stamp}", "kind": "message", "dir": "out", "chat": chat,
+                   "chat_alias": signalchats.alias_of(chat), "ts": ts, "time": time_.isoformat(timespec="seconds"),
+                   "received_at": now.isoformat(timespec="seconds"),
+                   "sender": {"name": "house", "number": account, "uuid": None}, "text": text, "quote": quoted,
+                   "mentions": [], "attachments": files, "expires_in": 0, "target": None, "meta": meta,
+                   "status": "ok" if ts is not None else "failed", "raw": None})
 
 
 # --- receiving ------------------------------------------------------------------------------------------------

@@ -55,6 +55,63 @@ class FakePopen:
 
 
 class SignalTest(unittest.TestCase):
+    def setUp(self):
+        import os
+        from unittest import mock
+        self._tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"HOUSE_DATA_DIR": str(Path(self._tmp.name) / "data")})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self._tmp.cleanup()
+
+    def out_events(self):
+        from houselib import signalstore
+        return [e for e in signalstore.iter_events() if e["dir"] == "out"]
+
+    def test_send_logs_out_event(self):
+        sig.Signal("+48111", "sc", run=FakeRun("1794571935365\n")).send("🤖 [house] hej", group_id="gT")
+        (e,) = self.out_events()
+        self.assertEqual((e["kind"], e["chat"], e["ts"], e["text"], e["status"]),
+                         ("message", "gT", 1794571935365, "🤖 [house] hej", "ok"))
+        self.assertEqual(e["meta"], {"origin": "python"})
+        self.assertEqual(e["sender"], {"name": "house", "number": "+48111", "uuid": None})
+        self.assertEqual(e["key"], "gT:+48111:1794571935365")
+        self.assertIsNone(e["raw"])
+
+    def test_note_to_self_logged_as_self(self):
+        sig.Signal("+48111", "sc", run=FakeRun("5\n")).send("x", meta={"origin": "ask", "question": "Q-001"})
+        (e,) = self.out_events()
+        self.assertEqual((e["chat"], e["chat_alias"], e["meta"]),
+                         ("self", "self", {"origin": "ask", "question": "Q-001"}))
+
+    def test_failed_send_logged(self):
+        self.assertIsNone(sig.Signal("+48111", "sc", run=FakeRun("", 1)).send("x"))
+        (e,) = self.out_events()
+        self.assertEqual((e["status"], e["ts"]), ("failed", None))
+        self.assertIn(":out-failed-", e["key"])
+
+    def test_send_quote_and_attachments_argv(self):
+        from houselib import signalstore
+        signalstore.append({"v": 1, "key": "gT:u-kuba:50", "kind": "message", "dir": "in", "chat": "gT", "ts": 50,
+                            "text": "Spoko, a jaki wynik?", "sender": {"name": "Kuba Nowak"}})
+        f = Path(self._tmp.name) / "lb.png"
+        f.write_bytes(b"x" * 2048)
+        run = FakeRun("7\n")
+        sig.Signal("+48111", "sc", run=run).send("wykres", group_id="gT", attachments=[str(f)], quote=(50, "u-kuba"))
+        self.assertEqual(run.calls[0], ["sc", "-a", "+48111", "send", "-g", "gT", "-m", "wykres", "--attachment",
+                                        str(f), "--quote-timestamp", "50", "--quote-author", "u-kuba"])
+        (e,) = self.out_events()
+        self.assertEqual(e["quote"], {"ts": 50, "author": "u-kuba", "text": "Spoko, a jaki wynik?"})
+        self.assertEqual(e["attachments"], [{"content_type": "image/png", "filename": "lb.png", "size": 2048,
+                                             "id": None, "path": str(f)}])
+
+    def test_log_failure_never_breaks_send(self):
+        from unittest import mock
+        with mock.patch("houselib.signalstore.record_out", side_effect=OSError("disk")):
+            self.assertEqual(sig.Signal("+1", "sc", run=FakeRun("9\n")).send("x"), 9)
+
     def test_send_note_to_self(self):
         run = FakeRun("1794571935365\n")
         s = sig.Signal("+48111", "/bin/signal-cli", run=run)

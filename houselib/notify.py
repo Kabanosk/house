@@ -110,7 +110,7 @@ def resolve_group(sig, name: str) -> tuple[str | None, str | None]:
 
 
 def send(contest: Path, text: str, question: str | None = None, sig=None,
-         group: bool = True) -> tuple[list[int], list[str]]:
+         group: bool = True, origin: str = "notify") -> tuple[list[int], list[str]]:
     """Send `text` for a contest to the owner's Note to Self and, if configured, to the contest's group.
 
     The body is `prefix(contest) + " " + text`. Each delivered message is logged in `sent.jsonl` so a later
@@ -122,6 +122,7 @@ def send(contest: Path, text: str, question: str | None = None, sig=None,
         question: Question id (e.g. "Q-007") this message asks, stored for reply routing. Defaults to None.
         sig: A `Signal` client. Defaults to None, meaning `from_config()` (the machine's Signal config).
         group: False to skip the team group and write to Note to Self only. Defaults to True.
+        origin: Who sends, stored in the message store (`notify`, `ask`, `deadline`, `night`). Defaults to "notify".
 
     Returns:
         (timestamps, warnings): Signal timestamps of delivered messages (empty if nothing was sent) and
@@ -143,7 +144,8 @@ def send(contest: Path, text: str, question: str | None = None, sig=None,
             warnings.append(warning)
     sent = []
     for chat, gid in targets:
-        ts = sig.send(body, group_id=gid)
+        ts = sig.send(body, group_id=gid,
+                      meta={"origin": origin, "contest": contest_name(contest), "question": question})
         if ts is None:
             warnings.append(f"sending to {chat} failed")
             continue
@@ -183,7 +185,7 @@ def ask(contest: Path, q: questions.Question, sig=None) -> list[int]:
     Returns:
         Signal timestamps of the delivered messages; empty when nothing was sent (state is left untouched).
     """
-    sent, _ = send(contest, question_message(q), question=q.id, sig=sig)
+    sent, _ = send(contest, question_message(q), question=q.id, sig=sig, origin="ask")
     if sent:
         state_path = contest / ".house/state.json"
         try:
