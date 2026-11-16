@@ -293,7 +293,7 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
     hook = f"{root.resolve()}/bin/house-hook"
     return {
         "hooks": {
-            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+            "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep|Glob",
                             "hooks": [{"type": "command", "command": f"{hook} pre-tool"}]}],
             "PostToolUse": [{"matcher": "Edit|Write|MultiEdit|Bash",
                              "hooks": [{"type": "command", "command": f"{hook} post-tool"}]}],

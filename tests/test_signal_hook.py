@@ -141,3 +141,23 @@ class SetupSignalHookTest(unittest.TestCase):
             inst.assert_not_called()
             self.assertTrue((root / ".claude/settings.local.json").exists())
             self.assertIn("settings.local.json", out.getvalue())
+
+
+class PreToolSignalTest(unittest.TestCase):
+    def test_rules_apply_in_house_repo_and_contests(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = make_root(Path(d))
+            c = scaffold.new_contest("c1", None, root=root, detect=lambda: FAKE_TOOLS)
+            for cwd in (root, c, Path(d)):
+                code, msg = hook.pre_tool({"cwd": str(cwd), "tool_name": "Bash",
+                                           "tool_input": {"command": "signal-cli -a +1 receive"}}, {})
+                self.assertEqual(code, 2, cwd)
+                self.assertIn("house signal", msg)
+            code, _ = hook.pre_tool({"cwd": str(root), "tool_name": "Bash",
+                                     "tool_input": {"command": "signal-cli -a +1 receive"}}, {"HOUSE_GUARD": "off"})
+            self.assertEqual(code, 0)
+
+    def test_matcher_includes_read_tools(self):
+        matcher = adapters.claude_settings()["hooks"]["PreToolUse"][0]["matcher"]
+        for tool in ("Read", "Grep", "Glob", "Bash", "Edit", "Write"):
+            self.assertIn(tool, matcher.split("|"))

@@ -30,7 +30,7 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 def pre_tool(event: dict, env: dict) -> tuple[int, str]:
     """Decide whether a tool call may run (PreToolUse hook), applying the guard rules.
 
-    Edit-type tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
+    Signal rules (`guard.check_signal`) apply wherever the hook is installed, also in the house repo. Edit-type tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
     `Bash` with `guard.check_bash` on its `command`. Other tools are always allowed.
 
     Args:
@@ -45,6 +45,10 @@ def pre_tool(event: dict, env: dict) -> tuple[int, str]:
         coordinator or `house check --refreeze --reason`).
     """
     cwd = Path(event.get("cwd") or os.getcwd())
+    if env.get("HOUSE_GUARD") != "off":
+        reason = guard.check_signal(str(event.get("tool_name") or ""), event.get("tool_input") or {}, cwd)
+        if reason:
+            return 2, f"house guard: {reason}."
     contest = guard.contest_root(cwd)
     if contest is None:
         return 0, ""

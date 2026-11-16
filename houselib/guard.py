@@ -453,6 +453,73 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
     return None
 
 
+SIGNAL_CLI_DIR = ".local/share/signal-cli"
+HOUSE_CONFIG_DIR = ".config/house"
+SIGNAL_CLI_REASON = ("bare `signal-cli send/receive` bypasses the Signal store (received messages would be lost, sent "
+                     "ones missing from the history); use `house signal send|pull|read`")
+SIGNAL_FILES_REASON = ("signal-cli's files mix private chats with groups; agents read only the copies from allowed "
+                       "chats in ~/.local/share/house/signal/files/ (`house signal read` shows their paths)")
+CONFIG_REASON = ("house configuration (~/.config/house) is changed only by the human; groups: `house signal "
+                 "allow/deny` in a terminal")
+READ_TOOLS = {"Read", "Grep", "Glob"}
+
+
+def _expand(path: str, base: Path, home: Path) -> Path:
+    """Resolve a tool or shell path: `~`, `$HOME` and `${HOME}` become `home`; relative paths join `base`."""
+    for prefix in ("~", "$HOME", "${HOME}"):
+        if path == prefix or path.startswith(prefix + "/"):
+            path = str(home) + path[len(prefix):]
+            break
+    p = Path(path)
+    return (p if p.is_absolute() else base / p).resolve()
+
+
+def _under(path: Path, root: Path) -> bool:
+    return path == root or path.is_relative_to(root)
+
+
+def check_signal(tool: str, args: dict, cwd: Path, home: Path | None = None) -> str | None:
+    """Signal rules for agents, applied wherever the hook runs (contests and the house repo).
+
+    Refuses: running `signal-cli` with `send` or `receive` (use `house signal …`, which logs and stores); any tool
+    touching signal-cli's data dir (`~/.local/share/signal-cli`, where files from private chats land); writes to
+    `~/.config/house/` (Edit-type tools, or shell writes as `check_bash` understands them). Best effort, like
+    `check_bash`.
+
+    Args:
+        tool: Claude Code tool name (Bash, Read, Grep, Glob, Edit, Write, MultiEdit, NotebookEdit).
+        args: The tool input (`command`, `file_path`, `notebook_path` or `path`).
+        cwd: Directory relative paths are resolved against.
+        home: Home directory. Defaults to `Path.home()`.
+
+    Returns:
+        A reason to refuse, or None.
+    """
+    home = (home or Path.home()).resolve()
+    cli_dir, config_dir = home / SIGNAL_CLI_DIR, home / HOUSE_CONFIG_DIR
+    if tool == "Bash":
+        command = str(args.get("command") or "")
+        if SIGNAL_CLI_DIR in command:
+            return SIGNAL_FILES_REASON
+        for seg in _segments(command):
+            for i, tok in enumerate(seg):
+                if Path(tok).name == "signal-cli" and {"send", "receive"} & set(seg[i + 1:]):
+                    return SIGNAL_CLI_REASON
+            for target, base in _written_paths(seg, cwd):
+                if _under(_expand(target, base, home), config_dir):
+                    return CONFIG_REASON
+        return None
+    path = args.get("file_path") or args.get("notebook_path") or args.get("path")
+    if not path:
+        return None
+    full = _expand(str(path), cwd, home)
+    if _under(full, cli_dir):
+        return SIGNAL_FILES_REASON
+    if tool not in READ_TOOLS and _under(full, config_dir):
+        return CONFIG_REASON
+    return None
+
+
 def _sha(path: Path) -> str | None:
     """Return the SHA-256 hex digest of the file at `path`, or None when it is not a file."""
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
