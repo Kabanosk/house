@@ -359,3 +359,94 @@ class GroupsTest(CliCase):
             _, out, _ = self.run_cli("groups", "--all")
         self.assertIn("Rodzina", out)
         self.assertIn("[dozwolona]", out)
+
+
+class ReadShowTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+        from tests.test_signalread import sample
+        self.events = sample()
+        for e in self.events:
+            signalstore.append(e)
+        self.ts = [e["ts"] for e in self.events]
+        self.noconf = mock.patch("houselib.signal.from_config", return_value=None)
+        self.noconf.start()
+
+    def tearDown(self):
+        self.noconf.stop()
+        super().tearDown()
+
+    def test_read_chat(self):
+        code, out, _ = self.run_cli("read", "techarena", "-n", "2", "--offline")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("techarena · techarena_claude · 2 z 4 · odebrano nigdy"), out)
+        self.assertIn(str(self.ts[4]), out)
+        self.assertNotIn(str(self.ts[1]), out)
+
+    def test_read_json_has_no_raw(self):
+        import json
+        _, out, _ = self.run_cli("read", "techarena", "--json", "--offline", "--from", "kuba")
+        rows = [json.loads(x) for x in out.splitlines()]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("raw", rows[0])
+        self.assertEqual(rows[0]["reactions"], [["👍", "Wojciech Fiołka"]])
+        self.assertEqual(rows[0]["text"], "Spoko, a jaki wynik ma teraz baseline?")
+
+    def test_read_offline_never_pulls(self):
+        with mock.patch("houselib.signalstore.pull") as pull:
+            self.run_cli("read", "--offline")
+        pull.assert_not_called()
+
+    def test_read_without_signal_notes_header(self):
+        code, out, _ = self.run_cli("read")
+        self.assertEqual(code, 0)
+        self.assertIn("Signal wyłączony, pokazuję zapisane", out.splitlines()[0])
+
+    def test_read_pull_error_keeps_exit_0(self):
+        from houselib.signalstore import PullResult
+        with mock.patch("houselib.signal.from_config", return_value=object()), \
+                mock.patch("houselib.signalstore.pull", return_value=PullResult(error="timeout")):
+            code, out, _ = self.run_cli("read")
+        self.assertEqual(code, 0)
+        self.assertIn("błąd odbioru: timeout", out.splitlines()[0])
+
+    def test_read_skips_pull_within_60s(self):
+        from datetime import datetime
+        signalstore.update_state(last_pull_ok=datetime.now().astimezone().isoformat(timespec="seconds"))
+        with mock.patch("houselib.signal.from_config", return_value=object()), \
+                mock.patch("houselib.signalstore.pull") as pull:
+            self.run_cli("read")
+        pull.assert_not_called()
+
+    def test_unknown_chat_exit_2(self):
+        self.assertEqual(self.run_cli("read", "nieznana", "--offline")[0], 2)
+
+    def test_bad_since_exit_2(self):
+        self.assertEqual(self.run_cli("read", "--since", "wczoraj", "--offline")[0], 2)
+
+    def test_show(self):
+        code, out, _ = self.run_cli("show", str(self.ts[2]), "--offline")
+        self.assertEqual(code, 0)
+        self.assertIn("↩ cytuje", out)
+        self.assertIn("odpowiedzi cytatem", out)
+
+    def test_show_unknown_exit_2(self):
+        self.assertEqual(self.run_cli("show", "123", "--offline")[0], 2)
+
+    def test_show_ambiguous(self):
+        from tests.test_signalread import msg
+        e = dict(self.events[2])
+        e.update(key=f"self:u-x:{e['ts']}", chat="self", sender={"name": "Inny", "number": "+1", "uuid": "u-x"})
+        signalstore.append(e)
+        code, _, err = self.run_cli("show", str(self.ts[2]), "--offline")
+        self.assertEqual(code, 2)
+        self.assertIn("--chat", err)
+        self.assertEqual(self.run_cli("show", str(self.ts[2]), "--chat", "techarena", "--offline")[0], 0)
+        self.assertEqual(self.run_cli("show", str(self.ts[2]), "--from", "inny", "--offline")[0], 0)
+        del msg
+
+    def test_show_raw(self):
+        _, out, _ = self.run_cli("show", str(self.ts[2]), "--raw", "--offline")
+        self.assertIn('"kind": "message"', out)

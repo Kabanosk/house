@@ -174,3 +174,111 @@ class SelectTest(unittest.TestCase):
     def test_thread(self):
         self.assertEqual(self.texts(thread=self.c["ts"], n=0), ["Wrzucam dane", "ok", "🤖 [house] dzięki"])
         self.assertEqual(self.texts(thread=self.a["ts"], n=0), ["Rano: baseline gotowy"])
+
+
+def sample(path="/data/signal/files/techarena/2026-11-16_T2_wyniki.csv"):
+    """The spec §8 example as store events (times today 12:02–12:31)."""
+    t1 = msg(at(12, 2), "🤖 [house] Cześć! Jestem Claude Wojtka, będę tu wrzucał wyniki.", dir_="out",
+             author="+48111", name="house", number="+48111")
+    t1["sender"]["uuid"] = None
+    t2 = msg(at(12, 15), "super, to ja wrzucę dane z wczoraj", author="u-ania", name="Ania K.",
+             attachments=[{"content_type": "text/csv", "filename": "wyniki.csv", "size": 4096, "id": "a1",
+                           "path": path}])
+    t3_time = datetime(2026, 11, 16, 12, 18, 3).astimezone()
+    t3 = msg(t3_time, "Spoko, a jaki wynik ma teraz baseline?",
+             received=datetime(2026, 11, 16, 12, 18, 41).astimezone(),
+             quote={"ts": t1["ts"], "author": "u-own", "text": t1["text"]})
+    r = mod("reaction", at(12, 20), t3["ts"], author="u-own", name="Wojciech Fiołka", dir_="own",
+            reaction={"emoji": "👍", "remove": False})
+    t4 = msg(at(12, 31), "🤖 [house] Wrzuciłem nowy baseline, LB 0.806", dir_="out", author="+48111", name="house",
+             number="+48111", quote={"ts": t3["ts"], "author": "u-kuba", "text": t3["text"]})
+    t4["sender"]["uuid"] = None
+    return [t1, t2, t3, r, t4]
+
+
+TECHARENA = ("techarena", "techarena_claude")
+
+
+class RenderTest(unittest.TestCase):
+    def test_read_golden(self):
+        events = sample()
+        t1, t2, t3, _, t4 = (e["ts"] for e in events)
+        view = signalread.View(events, NOW)
+        text = view.render_read(view.msgs, title=TECHARENA, total=4, last_pull=at(12, 31))
+        self.assertEqual(text, (
+            "techarena · techarena_claude · 4 z 4 · odebrano 12:31\n"
+            f"[12:02] {t1} 🤖 house: 🤖 [house] Cześć! Jestem Claude Wojtka, będę tu wrzucał wyniki.\n"
+            f"[12:15] {t2} Ania K.: super, to ja wrzucę dane z wczoraj [📎 wyniki.csv, 4 KB]\n"
+            "        📎 /data/signal/files/techarena/2026-11-16_T2_wyniki.csv\n"
+            f"[12:18] {t3} Kuba Nowak ↩ 🤖 house 12:02 „Cześć! Jestem Claude Wojtka…”:\n"
+            "        Spoko, a jaki wynik ma teraz baseline?\n"
+            "        👍 Wojciech Fiołka\n"
+            f"[12:31] {t4} 🤖 house ↩ Kuba Nowak 12:18 „Spoko, a jaki wynik ma teraz…”:\n"
+            "        🤖 [house] Wrzuciłem nowy baseline, LB 0.806\n"))
+
+    def test_read_all_prefixes_alias_and_note(self):
+        view = signalread.View(sample(), NOW)
+        text = view.render_read(view.msgs[:1], title=None, total=4, last_pull=None, note="Signal wyłączony")
+        self.assertTrue(text.startswith("wszystkie · 1 z 4 · odebrano nigdy · Signal wyłączony\n"), text)
+        self.assertIn("[12:02] techarena ", text)
+
+    def test_failed_out_marked(self):
+        e = msg(at(12, 0), "🤖 [house] x", dir_="out", status="failed", author="+48111", name="house")
+        e["ts"] = None
+        view = signalread.View([e], NOW)
+        text = view.render_read(view.msgs, title=TECHARENA, total=1, last_pull=None)
+        self.assertIn("[12:00] ✗ nie wysłano 🤖 house: 🤖 [house] x", text)
+
+    def test_quote_unknown_before_migration(self):
+        e = msg(at(12, 0), "Pepo smile", quote={"ts": 5, "author": None, "text": None})
+        view = signalread.View([e], NOW)
+        self.assertIn("↩ ? „(treść cytatu nieznana, odebrano przed migracją)”:",
+                      view.render_read(view.msgs, title=TECHARENA, total=1, last_pull=None))
+
+    def test_quote_text_without_target_uses_known_name(self):
+        other = msg(at(11, 0), "coś", author="u-ola", name="Ola")
+        e = msg(at(12, 0), "tak", quote={"ts": 5, "author": "u-ola", "text": "Idziemy w B?"})
+        view = signalread.View([other, e], NOW)
+        text = view.render_read(view.msgs, title=TECHARENA, total=2, last_pull=None)
+        self.assertIn("↩ Ola „Idziemy w B?”:", text)
+
+    def test_attachment_not_downloaded(self):
+        e = msg(at(12, 0), "", attachments=[{"filename": "a.jpg", "size": 10, "path": None, "id": "x"}])
+        view = signalread.View([e], NOW)
+        self.assertIn("Kuba Nowak: [📎 a.jpg, nie pobrano]", view.render_read(view.msgs, title=TECHARENA, total=1,
+                                                                              last_pull=None))
+
+    def test_edited_and_deleted_markers(self):
+        a = msg(at(12, 0), "lit")
+        b = msg(at(12, 1), "ups", author="u-ola", name="Ola")
+        events = [a, b, mod("edit", at(12, 2), a["ts"], author="u-kuba", text="poprawione"),
+                  mod("delete", at(12, 3), b["ts"], author="u-ola")]
+        view = signalread.View(events, NOW)
+        text = view.render_read(view.msgs, title=TECHARENA, total=2, last_pull=None)
+        self.assertIn("Kuba Nowak: poprawione (edytowano)", text)
+        self.assertIn("Ola: [usunięta przez autora]", text)
+
+    def test_multiline_text_indented(self):
+        view = signalread.View([msg(at(12, 0), "a\nb")], NOW)
+        self.assertIn("Kuba Nowak: a\n        b\n", view.render_read(view.msgs, title=TECHARENA, total=1,
+                                                                    last_pull=None))
+
+    def test_show_golden(self):
+        events = sample()
+        t1, _, t3, _, t4 = (e["ts"] for e in events)
+        view = signalread.View(events, NOW)
+        (m,) = view.find(t3)
+        self.assertEqual(view.render_show(m), (
+            "Kuba Nowak · techarena · 2026-11-16 12:18:03 · odebrano 12:18:41\n"
+            f"↩ cytuje {t1} (🤖 house, 12:02): „Cześć! Jestem Claude Wojtka, będę tu wrzucał wyniki.”\n"
+            "Spoko, a jaki wynik ma teraz baseline?\n"
+            f"reakcje: 👍 Wojciech Fiołka · odpowiedzi cytatem: {t4}\n"))
+
+    def test_show_quote_text_without_target_in_store(self):
+        e = msg(at(12, 0), "tak", quote={"ts": 5, "author": "u-own", "text": "🤖 [house] Q-001 Batch size?"})
+        view = signalread.View([e], NOW)
+        self.assertIn("↩ cytuje 5 (u-own): „Q-001 Batch size?”", view.render_show(view.msgs[0]))
+
+    def test_show_attachment_path(self):
+        view = signalread.View(sample(path="/p/w.csv"), NOW)
+        self.assertIn("📎 wyniki.csv, 4 KB → /p/w.csv", view.render_show(view.msgs[1]))

@@ -4,6 +4,7 @@ Subcommands: `pull`, `migrate` (more come with reading and sending). Exit codes:
 result or Signal not configured for reading commands), 1 failure (Signal not configured for sending, failed send),
 2 usage error (unknown alias, bad argument).
 """
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -268,6 +269,67 @@ def cmd_deny(args) -> int:
     return 0
 
 
+def _view(now: datetime):
+    """Fold the whole store for reading; aliases come from the current configuration."""
+    chats = signalchats.allowed(None)
+    return signalread.View(signalstore.iter_events(raw=False), now, {c.id: c.alias for c in chats.values()}), chats
+
+
+def cmd_read(args) -> int:
+    """`house signal read [CHAT] [-n 20] [--since] [--until] [--from] [--grep] [--thread] [--json] [--offline]`.
+
+    Quick receive first (unless --offline or received < 60 s ago), then only the store. Exit 0 (also when empty
+    or when receiving failed: the header says why), 2 unknown chat or bad time.
+    """
+    now = datetime.now().astimezone()
+    try:
+        chat = None if args.chat == "all" else signalchats.resolve(args.chat)
+        since = signalread.parse_when(args.since, now) if args.since else None
+        until = signalread.parse_when(args.until, now) if args.until else None
+    except ValueError as e:
+        return _usage(str(e))
+    note = signalread.maybe_pull(args.offline, now)
+    view, chats = _view(now)
+    pool = [m for m in view.msgs if (m.chat == chat.id if chat else m.chat in chats)]
+    selected = signalread.select(pool, since=since, until=until, sender=args.from_, grep=args.grep,
+                                 thread=args.thread, n=args.n)
+    if args.json:
+        for m in selected:
+            print(json.dumps(view.as_json(m), ensure_ascii=False))
+        return 0
+    last = signalread.parse_iso(signalstore.read_state().get("last_pull_ok"))
+    print(view.render_read(selected, title=(chat.alias, chat.name) if chat else None, total=len(pool),
+                           last_pull=last, note=note), end="")
+    return 0
+
+
+def cmd_show(args) -> int:
+    """`house signal show TS [--chat CHAT] [--from NAME] [--raw]`: one message in full.
+
+    Exit 0 shown, 2 unknown chat, no such message, or several messages with this ts (narrow with --chat/--from).
+    """
+    now = datetime.now().astimezone()
+    try:
+        chat = signalchats.resolve(args.chat) if args.chat else None
+    except ValueError as e:
+        return _usage(str(e))
+    signalread.maybe_pull(args.offline, now)
+    view, chats = _view(now)
+    found = [m for m in view.find(args.ts) if (m.chat == chat.id if chat else m.chat in chats)]
+    if args.from_:
+        found = signalread.select(found, sender=args.from_, n=0)
+    if not found:
+        return _usage(f"nie ma wiadomości {args.ts} w zapisanych rozmowach (house signal read)")
+    if len(found) > 1:
+        listing = "\n".join(view.line(m, all_chats=True)[0] for m in found)
+        return _usage(f"kilka wiadomości o ts {args.ts}:\n{listing}\nzawęź: --chat CHAT albo --from NAZWA")
+    print(view.render_show(found[0]), end="")
+    if args.raw:
+        raw = next((e.get("raw") for e in signalstore.iter_events() if e.get("key") == found[0].ev.get("key")), None)
+        print(json.dumps(raw or found[0].ev, ensure_ascii=False, indent=2))
+    return 0
+
+
 def register(sub) -> None:
     """Add the `signal` command with its subcommands to the top-level subparsers of `house`."""
     sg = sub.add_parser("signal", help="team chats on Signal: read, unread, show, send, groups, allow, pull")
@@ -295,3 +357,21 @@ def register(sub) -> None:
     dn = ss.add_parser("deny", help="human only (terminal): stop keeping a signal.toml group (history stays)")
     dn.add_argument("alias")
     dn.set_defaults(func=cmd_deny)
+    rd = ss.add_parser("read", help="history of a chat (default: all allowed), newest last")
+    rd.add_argument("chat", nargs="?", default="all", help="alias, self or all (default)")
+    rd.add_argument("-n", type=int, default=20, help="last N after filters (0 = all)")
+    rd.add_argument("--since", help="30m, 2h, 1d, 10:00, 2026-11-16, 2026-11-16T10:00")
+    rd.add_argument("--until")
+    rd.add_argument("--from", dest="from_", metavar="NAME", help="part of the sender's name or number, or me")
+    rd.add_argument("--grep", help="text to find (also in the quoted text)")
+    rd.add_argument("--thread", type=int, metavar="TS", help="the message, what it quotes and all replies")
+    rd.add_argument("--json", action="store_true", help="one store event per line (no raw)")
+    rd.add_argument("--offline", action="store_true", help="do not receive first")
+    rd.set_defaults(func=cmd_read)
+    sh = ss.add_parser("show", help="one message in full: quote text, reactions, replies, files")
+    sh.add_argument("ts", type=int)
+    sh.add_argument("--chat")
+    sh.add_argument("--from", dest="from_", metavar="NAME")
+    sh.add_argument("--raw", action="store_true", help="also print the signal-cli envelope")
+    sh.add_argument("--offline", action="store_true", help="do not receive first")
+    sh.set_defaults(func=cmd_show)

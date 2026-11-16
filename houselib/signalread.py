@@ -262,3 +262,168 @@ def select(msgs: list[Msg], *, chat: str | None = None, since: datetime | None =
         g = grep.lower()
         out = [m for m in out if g in m.text.lower() or g in str((m.ev.get("quote") or {}).get("text") or "").lower()]
     return out[-n:] if n else out
+
+
+# --- rendering ------------------------------------------------------------------------------------------------
+
+INDENT = " " * 8
+UNKNOWN_QUOTE = "(treść cytatu nieznana, odebrano przed migracją)"
+
+
+class View:
+    """All stored messages folded once, with lookups needed to render quotes and names.
+
+    Attributes:
+        events: The store events it was built from.
+        msgs: `build(events, now)`.
+        now: Reference time for relative dates and expiry.
+    """
+
+    def __init__(self, events, now: datetime, aliases: dict[str, str] | None = None):
+        """Fold `events`; `aliases` maps chat id → alias for display (defaults to each event's `chat_alias`)."""
+        self.events = list(events)
+        self.now = now
+        self.msgs = build(self.events, now)
+        self.aliases = aliases or {}
+        self._by_key = {(m.chat, m.ts): m for m in self.msgs}
+        self._names: dict[str, str] = {}
+        for e in self.events:
+            if e.get("kind") in ("message", "other") and e.get("dir") != "out":
+                for i in _ids(e):
+                    self._names[i] = str((e.get("sender") or {}).get("name") or i)
+
+    def alias(self, m: Msg) -> str:
+        return self.aliases.get(m.chat) or str(m.ev.get("chat_alias") or m.chat)
+
+    def find(self, ts: int) -> list[Msg]:
+        return [m for m in self.msgs if m.ts == ts]
+
+    def _quoted(self, m: Msg) -> tuple[Msg | None, str, str | None]:
+        """(quoted message if stored, author name, quoted text or None)."""
+        q = m.ev.get("quote") or {}
+        target = self._by_key.get((m.chat, q.get("ts")))
+        if target is not None:
+            return target, display_name(target.ev), q.get("text") or target.text
+        author = q.get("author")
+        return None, self._names.get(str(author), str(author or "?")), q.get("text")
+
+    def quote_ref(self, m: Msg, width: int = 28, with_time: bool = True) -> str:
+        """`↩ <name> [HH:MM] „<snippet>”` for a quote-reply, "" when the message quotes nothing."""
+        if not m.ev.get("quote"):
+            return ""
+        target, name, text = self._quoted(m)
+        when = f" {fmt_time(target.time, self.now)}" if with_time and target is not None and target.time else ""
+        body = snippet(text, width) if text else UNKNOWN_QUOTE
+        return f" ↩ {name}{when} „{body}”"
+
+    def _body(self, m: Msg) -> str:
+        if m.deleted:
+            return "[usunięta przez autora]"
+        return m.text + (" (edytowano)" if m.edited else "")
+
+    @staticmethod
+    def _files_inline(m: Msg) -> str:
+        parts = []
+        for a in m.ev.get("attachments") or []:
+            size = fmt_size(a.get("size")) if a.get("path") else "nie pobrano"
+            parts.append(f"[📎 {a.get('filename') or a.get('id') or 'plik'}, {size}]")
+        return " ".join(parts)
+
+    def _reactions(self, m: Msg) -> str:
+        grouped: dict[str, list[str]] = {}
+        for emoji, name in m.reactions:
+            grouped.setdefault(emoji, []).append(name)
+        return " · ".join(f"{emoji} {', '.join(names)}" for emoji, names in grouped.items())
+
+    def line(self, m: Msg, all_chats: bool = False) -> list[str]:
+        """Lines of one message in `read` (text verbatim, continuation lines indented by 8 spaces)."""
+        head = f"[{fmt_time(m.time, self.now)}] " + (f"{self.alias(m)} " if all_chats else "")
+        head += ("✗ nie wysłano " if m.ev.get("status") == "failed" else f"{m.ts} ") + display_name(m.ev)
+        body = " ".join(x for x in (self._body(m), self._files_inline(m)) if x).split("\n")
+        if m.ev.get("quote"):
+            lines = [f"{head}{self.quote_ref(m)}:", *(INDENT + x for x in body)]
+        else:
+            lines = [f"{head}: {body[0]}", *(INDENT + x for x in body[1:])]
+        lines += [f"{INDENT}📎 {a['path']}" for a in m.ev.get("attachments") or [] if a.get("path")]
+        if m.reactions:
+            lines.append(INDENT + self._reactions(m))
+        return lines
+
+    def render_read(self, selected: list[Msg], *, title: tuple[str, str] | None, total: int,
+                    last_pull: datetime | None, note: str | None = None) -> str:
+        """Text of `house signal read`.
+
+        Args:
+            selected: Messages to show (output of `select`).
+            title: (alias, chat name) for one chat; None for all chats (each line then names its chat).
+            total: Number of messages in the chat(s) before filtering.
+            last_pull: Time of the last successful receive (`state.last_pull_ok`), None if never.
+            note: Why receiving was skipped or failed, shown in the header.
+        """
+        head = [*(title or ("wszystkie",)), f"{len(selected)} z {total}",
+                f"odebrano {fmt_time(last_pull, self.now)}"]
+        if note:
+            head.append(note)
+        lines = [" · ".join(head)]
+        for m in selected:
+            lines += self.line(m, all_chats=title is None)
+        return "\n".join(lines) + "\n"
+
+    def render_show(self, m: Msg) -> str:
+        """Text of `house signal show`: who, where, when, quoted text in full, body, files, reactions, replies."""
+        t, r = m.time, parse_iso(m.ev.get("received_at"))
+        when = f"{t:%Y-%m-%d %H:%M:%S}" if t else "?"
+        head = [display_name(m.ev), self.alias(m), when]
+        if r:
+            head.append(f"odebrano {r:%H:%M:%S}" if t and r.date() == t.date() else f"odebrano {r:%Y-%m-%d %H:%M:%S}")
+        if m.ev.get("status") == "failed":
+            head.append("✗ nie wysłano")
+        lines = [" · ".join(head)]
+        q = m.ev.get("quote")
+        if q:
+            target, name, text = self._quoted(m)
+            meta = f"{name}, {fmt_time(target.time, self.now)}" if target is not None and target.time else name
+            lines.append(f"↩ cytuje {q.get('ts')} ({meta}): „{snippet(text, 500) if text else UNKNOWN_QUOTE}”")
+        lines += self._body(m).split("\n")
+        for a in m.ev.get("attachments") or []:
+            name = a.get("filename") or a.get("id") or "plik"
+            lines.append(f"📎 {name}, {fmt_size(a.get('size'))} → {a['path']}" if a.get("path")
+                         else f"📎 {name}, nie pobrano")
+        tail = []
+        if m.reactions:
+            tail.append(f"reakcje: {self._reactions(m)}")
+        if m.replies:
+            tail.append("odpowiedzi cytatem: " + ", ".join(str(x) for x in m.replies))
+        if tail:
+            lines.append(" · ".join(tail))
+        return "\n".join(lines) + "\n"
+
+    def as_json(self, m: Msg) -> dict:
+        """Store event without `raw`, with the folded text, flags and reactions (for `--json`)."""
+        out = {k: v for k, v in m.ev.items() if k != "raw"}
+        out.update(text=m.text, edited=m.edited, deleted=m.deleted, reactions=[list(r) for r in m.reactions],
+                   replies=m.replies)
+        return out
+
+
+def maybe_pull(offline: bool, now: datetime | None = None) -> str | None:
+    """Quick receive before reading (1 s), unless `offline`, Signal is off, or the last pull was < 60 s ago.
+
+    Returns:
+        A header note when receiving was skipped or failed ("Signal wyłączony, pokazuję zapisane",
+        "inny odbiór trwa", "błąd odbioru: …"); None otherwise. Never raises for Signal problems.
+    """
+    if offline:
+        return None
+    from . import signal, signalstore
+    sig = signal.from_config()
+    if sig is None:
+        return "Signal wyłączony, pokazuję zapisane"
+    now = now or datetime.now().astimezone()
+    last = parse_iso(signalstore.read_state().get("last_pull_ok"))
+    if last and now - last < timedelta(seconds=60):
+        return None
+    res = signalstore.pull(sig, timeout=1)
+    if res.skipped:
+        return res.skipped
+    return f"błąd odbioru: {res.error}" if res.error else None
