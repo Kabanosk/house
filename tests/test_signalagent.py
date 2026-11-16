@@ -84,3 +84,65 @@ class ParseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouteTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.fr, self.fi = self.contest(tmp / "fr-2026", "fr"), self.contest(tmp / "fi-2026", "fi")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def contest(self, path, alias):
+        (path / ".house").mkdir(parents=True)
+        (path / ".house/spec.yaml").write_text(f"notify:\n  alias: {alias}\n")
+        return path
+
+    def chats(self, *contests):
+        from houselib.signalchats import Chat
+        return {"self": Chat("self", "self", "n", "zawsze"),
+                fx.GID: Chat(fx.GID, "team", "Team", "konkurs x", tuple(contests))}
+
+    def req(self, text, chat=fx.GID, quote=None):
+        obj = fx.group_in(1000, text, gid=chat, quote=quote) if chat != "self" else fx.self_note(1000, text)
+        return agent.parse(ev(obj))
+
+    def test_route_single_contest(self):
+        r = agent.route(self.req("@claude zrób X"), self.chats(self.fr), {})
+        self.assertEqual((r.repo, r.contest, r.text, r.asks), (self.fr, self.fr, "zrób X", []))
+
+    def test_route_quote_of_house_message(self):
+        out = {900: {"meta": {"contest": "fi-2026"}}}
+        r = agent.route(self.req("@claude zrób X", quote=(900, "u-own", "🤖 [fi] wynik")),
+                        self.chats(self.fr, self.fi), out)
+        self.assertEqual(r.contest, self.fi)
+
+    def test_route_alias_hint(self):
+        r = agent.route(self.req("@claude fi: zrób X"), self.chats(self.fr, self.fi), {})
+        self.assertEqual((r.contest, r.text), (self.fi, "zrób X"))
+
+    def test_alias_hint_unknown_is_part_of_the_request(self):
+        r = agent.route(self.req("@claude uwaga: zrób X"), self.chats(self.fr), {})
+        self.assertEqual((r.contest, r.text), (self.fr, "uwaga: zrób X"))
+
+    def test_route_ambiguous_asks_each_contest(self):
+        r = agent.route(self.req("@claude zrób X"), self.chats(self.fr, self.fi), {})
+        self.assertIsNone(r.repo)
+        self.assertEqual([c for c, _ in r.asks], [self.fr, self.fi])
+        self.assertTrue(all("odpowiedz cytatem" in t for _, t in r.asks))
+
+    def test_route_self_and_toml_group_to_house(self):
+        from houselib import HOUSE_ROOT
+        r = agent.route(self.req("@claude zrób X", chat="self"), self.chats(), {})
+        self.assertEqual((r.repo, r.contest), (HOUSE_ROOT, None))
+        r = agent.route(self.req("@claude zrób X"), self.chats(), {})
+        self.assertEqual(r.repo, HOUSE_ROOT)
+
+    def test_quote_of_other_contest_not_in_chat_ignored(self):
+        out = {900: {"meta": {"contest": "obcy"}}}
+        r = agent.route(self.req("@claude x", quote=(900, "u-own", "🤖")), self.chats(self.fr), out)
+        self.assertEqual(r.contest, self.fr)

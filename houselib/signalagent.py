@@ -13,7 +13,8 @@ Rules a reader of this module must keep:
 """
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b", re.IGNORECASE)
 ALIAS_HINT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*)\s*:\s*(.+)$", re.DOTALL)
@@ -113,3 +114,55 @@ def parse(event: dict) -> "Request | Command | None":
         text=hint[2].strip() if hint else full, full_text=full, alias_hint=hint[1].lower() if hint else None,
         quote_ts=int(quote_ts) if quote_ts is not None else None,
         received_ms=int(received) if str(received or "").isdigit() else None)
+
+
+# --- routing ----------------------------------------------------------------------------------------------------
+
+@dataclass
+class Route:
+    """Where a request runs.
+
+    Attributes:
+        repo: Repository to work in (a contest checkout or the house repo); None when house must ask first.
+        contest: The contest, when the repo is one.
+        text: The request text to give the agent (alias hint removed only when it named a contest).
+        asks: (contest, message) pairs to send when the contest is ambiguous; nothing starts then.
+    """
+
+    repo: Path | None
+    contest: Path | None
+    text: str
+    asks: list[tuple[Path, str]] = field(default_factory=list)
+
+
+def route(req: Request, chats: dict, out_events: dict[int, dict]) -> Route:
+    """Pick the repo for a request (spec §15 F5).
+
+    Order: a quote of a house message tagged with a contest of this chat → that contest; an alias hint naming a
+    contest of this chat → it; a chat with exactly one contest → it; several → ask in each contest's name (a quote
+    on one of those questions decides later); Note to Self and `signal.toml` groups → the house repo.
+
+    Args:
+        req: The parsed request.
+        chats: Allowed chats (`signalchats.allowed`), giving each group's contests.
+        out_events: House's sent messages by Signal timestamp (their `meta.contest` names the contest).
+    """
+    from . import HOUSE_ROOT, notify
+    chat = chats.get(req.chat)
+    contests = list(chat.contests) if chat is not None else []
+    if not contests:
+        return Route(HOUSE_ROOT, None, req.full_text)
+    by_name = {notify.contest_name(c): c for c in contests}
+    quoted = ((out_events.get(req.quote_ts) or {}).get("meta") or {}).get("contest") if req.quote_ts else None
+    if quoted in by_name:
+        return Route(by_name[quoted], by_name[quoted], req.full_text)
+    if req.alias_hint:
+        named = [c for c in contests if notify.alias(c).lower() == req.alias_hint]
+        if named:
+            return Route(named[0], named[0], req.text)
+    if len(contests) == 1:
+        return Route(contests[0], contests[0], req.full_text)
+    short = " ".join(req.full_text.split())[:60]
+    return Route(None, None, req.full_text,
+                 [(c, f"odpowiedz cytatem na tę wiadomość, jeśli zlecenie „{short}” jest do {notify.alias(c)}")
+                  for c in contests])
