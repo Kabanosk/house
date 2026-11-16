@@ -4,6 +4,7 @@ Used by `house signal read|unread|show|status`, the session hook and `house inbo
 store (`signalstore.iter_events`), never signal-cli. Output is plain text for agents and humans (Polish labels).
 """
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 HOUSE_PREFIX = re.compile(r"^🤖 \[[^\]]*\]\s*")
@@ -65,3 +66,199 @@ def parse_iso(text) -> datetime | None:
         return datetime.fromisoformat(str(text)) if text else None
     except ValueError:
         return None
+
+
+# --- folding --------------------------------------------------------------------------------------------------
+
+@dataclass
+class Msg:
+    """One displayable message with its reactions, edits and deletion folded in.
+
+    Attributes:
+        ev: The latest stored version of the message event (kind `message` or `other`).
+        text: Text after edits; "" when deleted; the label (e.g. `[naklejka]`) for kind `other`.
+        edited: An edit by the author was applied.
+        deleted: The author deleted it (remote delete).
+        reactions: (emoji, sender name) in the order they were given; removals and replaced reactions dropped.
+        replies: Timestamps of messages in the same chat that quote this one.
+    """
+
+    ev: dict
+    text: str
+    edited: bool = False
+    deleted: bool = False
+    reactions: list[tuple[str, str]] = field(default_factory=list)
+    replies: list[int] = field(default_factory=list)
+
+    @property
+    def ts(self) -> int | None:
+        return self.ev.get("ts")
+
+    @property
+    def chat(self) -> str:
+        return str(self.ev.get("chat"))
+
+    @property
+    def time(self) -> datetime | None:
+        return parse_iso(self.ev.get("time"))
+
+
+def _ids(ev: dict) -> set[str]:
+    s = ev.get("sender") or {}
+    return {str(x) for x in (s.get("uuid"), s.get("number")) if x}
+
+
+def _target(index: dict, ev: dict) -> "Msg | None":
+    """The message a reaction/edit/delete points at: same chat and ts, narrowed by author when ambiguous."""
+    t = ev.get("target") or {}
+    found = index.get((ev.get("chat"), t.get("ts")), [])
+    if len(found) > 1:
+        found = [m for m in found if str(t.get("author")) in _ids(m.ev)]
+    return found[0] if len(found) == 1 else None
+
+
+def _expired(ev: dict, now: datetime) -> bool:
+    secs = int(ev.get("expires_in") or 0)
+    start = parse_iso(ev.get("received_at")) or parse_iso(ev.get("time"))
+    return bool(secs and start and start + timedelta(seconds=secs) < now)
+
+
+def _order(ev: dict) -> tuple:
+    t = parse_iso(ev.get("time"))
+    return (ev.get("ts") or (int(t.timestamp() * 1000) if t else 0), int(ev.get("seq") or 0))
+
+
+def build(events, now: datetime) -> list[Msg]:
+    """Turn store events into messages ready to show.
+
+    Deduplicates by `key` (later line wins), folds reactions (one per sender, removal cancels), edits by the
+    author (latest wins) and deletions onto their target, links quote-replies, hides expired disappearing
+    messages, and drops reactions/edits/deletes whose target is not stored. Sorted by Signal time, then seq.
+
+    Args:
+        events: Store events (any order), e.g. `signalstore.iter_events(raw=False)`.
+        now: Current time (aware), for expiry.
+    """
+    from .signalstore import latest
+    evs = sorted(latest(events), key=_order)
+    msgs: list[Msg] = []
+    index: dict[tuple, list[Msg]] = {}
+    for e in evs:
+        if e.get("kind") in ("message", "other") and not _expired(e, now):
+            m = Msg(e, str(e.get("label") or "") if e.get("kind") == "other" else str(e.get("text") or ""))
+            msgs.append(m)
+            index.setdefault((e.get("chat"), e.get("ts")), []).append(m)
+    reacts: dict[int, dict[str, tuple[str, str]]] = {}
+    for e in evs:
+        kind = e.get("kind")
+        if kind not in ("reaction", "edit", "delete"):
+            continue
+        m = _target(index, e)
+        if m is None:
+            continue
+        if kind == "reaction":
+            r = e.get("reaction") or {}
+            who = next(iter(sorted(_ids(e))), "?")
+            mine = reacts.setdefault(id(m), {})
+            if r.get("remove"):
+                if who in mine and mine[who][0] == r.get("emoji"):
+                    del mine[who]
+            else:
+                mine.pop(who, None)
+                mine[who] = (str(r.get("emoji") or ""), str((e.get("sender") or {}).get("name") or "?"))
+        elif not _ids(e) & _ids(m.ev):
+            continue  # only the author edits or deletes a message
+        elif kind == "edit":
+            m.text, m.edited = str(e.get("text") or ""), True
+        else:
+            m.text, m.deleted = "", True
+    for m in msgs:
+        m.reactions = list(reacts.get(id(m), {}).values())
+        q = m.ev.get("quote") or {}
+        for target in index.get((m.ev.get("chat"), q.get("ts")), []) if q.get("ts") is not None else []:
+            target.replies.append(m.ts)
+    return msgs
+
+
+# --- filters --------------------------------------------------------------------------------------------------
+
+WHEN_RE = re.compile(r"^(\d+)([mhd])$")
+
+
+def parse_when(text: str, now: datetime) -> datetime:
+    """Parse `--since`/`--until`: `30m`, `2h`, `1d`, `10:00` (today, or yesterday if still ahead), a date, or
+    `YYYY-MM-DDTHH:MM` / `YYYY-MM-DD HH:MM`, in local time.
+
+    Raises:
+        ValueError: With a Polish hint for anything else.
+    """
+    t = (text or "").strip()
+    m = WHEN_RE.match(t)
+    if m:
+        return now - timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[m[2]]: int(m[1])})
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", t)
+    if m and int(m[1]) < 24 and int(m[2]) < 60:
+        local = now.astimezone()
+        dt = local.replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0)
+        return dt - timedelta(days=1) if dt > local else dt
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([T ]\d{1,2}:\d{2}(:\d{2})?)?", t):
+        return datetime.fromisoformat(t.replace(" ", "T")).astimezone()
+    raise ValueError(f"nie rozumiem czasu `{text}` (np. 30m, 2h, 1d, 10:00, 2026-11-16, 2026-11-16T10:00)")
+
+
+def _matches_sender(m: Msg, who: str) -> bool:
+    if who.lower() == "me":
+        return m.ev.get("dir") in ("own", "out")
+    s = m.ev.get("sender") or {}
+    return who.lower() in str(s.get("name") or "").lower() or who in str(s.get("number") or "")
+
+
+def _thread(msgs: list[Msg], ts: int) -> list[Msg]:
+    """The message `ts`, the chain of messages it quotes (upwards) and every reply below it, in any depth."""
+    by_key = {(m.chat, m.ts): m for m in msgs}
+    keep = {id(m) for m in msgs if m.ts == ts}
+    for m in [m for m in msgs if m.ts == ts]:
+        cur = m
+        while (cur.ev.get("quote") or {}).get("ts") is not None:
+            cur = by_key.get((cur.chat, cur.ev["quote"]["ts"]))
+            if cur is None or id(cur) in keep:
+                break
+            keep.add(id(cur))
+        todo = [m]
+        while todo:
+            node = todo.pop()
+            for r in node.replies:
+                child = by_key.get((node.chat, r))
+                if child is not None and id(child) not in keep:
+                    keep.add(id(child))
+                    todo.append(child)
+    return [m for m in msgs if id(m) in keep]
+
+
+def select(msgs: list[Msg], *, chat: str | None = None, since: datetime | None = None,
+           until: datetime | None = None, sender: str | None = None, grep: str | None = None,
+           thread: int | None = None, n: int = 20) -> list[Msg]:
+    """Filter messages (already sorted by `build`) and keep the last `n`.
+
+    Args:
+        msgs: Output of `build`.
+        chat: Chat id to keep; None keeps all.
+        since: Keep messages at or after this time. until: at or before.
+        sender: "me" (own and house's messages), else a case-insensitive part of the name or part of the number.
+        grep: Case-insensitive text to find in the message or in the text it quotes.
+        thread: Keep only the thread around this timestamp (`_thread`).
+        n: How many of the newest to keep; 0 keeps all. Defaults to 20.
+    """
+    out = [m for m in msgs if chat is None or m.chat == chat]
+    if thread is not None:
+        out = _thread(out, thread)
+    if since is not None:
+        out = [m for m in out if m.time and m.time >= since]
+    if until is not None:
+        out = [m for m in out if m.time and m.time <= until]
+    if sender:
+        out = [m for m in out if _matches_sender(m, sender)]
+    if grep:
+        g = grep.lower()
+        out = [m for m in out if g in m.text.lower() or g in str((m.ev.get("quote") or {}).get("text") or "").lower()]
+    return out[-n:] if n else out
