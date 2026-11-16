@@ -192,9 +192,29 @@ class SignalRulesTest(unittest.TestCase):
             self.assertIsNotNone(reason, cmd)
             self.assertIn("house signal", reason)
 
-    def test_signal_cli_listgroups_allowed(self):
-        self.assertIsNone(self.check("Bash", command="signal-cli -a +1 -o json listGroups"))
-        self.assertIsNone(self.check("Bash", command="signal-cli --version"))
+    def test_any_signal_cli_run_blocked(self):
+        for cmd in ("signal-cli -a +1 -o json listGroups", "signal-cli -a +1 listContacts", "signal-cli --version"):
+            self.assertIsNotNone(self.check("Bash", command=cmd), cmd)
+
+    def test_allow_deny_from_agent_blocked(self):
+        for cmd in ("bin/house signal allow techarena_claude --alias t", "house signal deny techarena",
+                    'echo t | script -qc "house signal allow techarena --alias x" /dev/null',
+                    "unbuffer ~/house/bin/house signal allow x"):
+            reason = self.check("Bash", command=cmd)
+            self.assertIsNotNone(reason, cmd)
+            self.assertIn("human", reason)
+
+    def test_house_env_overrides_blocked(self):
+        for cmd in ("HOUSE_SIGNAL_CONFIG=/tmp/a.toml house signal pull", "export HOUSE_DATA_DIR=/tmp/x",
+                    "env HOUSE_NOTIFY_CONFIG=/tmp/n house inbox", "HOUSE_SIGNAL_ATTACHMENTS=/ house signal pull"):
+            self.assertIsNotNone(self.check("Bash", command=cmd), cmd)
+
+    def test_writes_to_house_data_blocked(self):
+        data = self.home / ".local/share/house"
+        self.assertIsNotNone(self.check("Bash", command="echo x >> ~/.local/share/house/groups.json"))
+        self.assertIsNotNone(self.check("Write", file_path=str(data / "signal/messages.jsonl"), content="x"))
+        self.assertIsNotNone(self.check("Edit", file_path=str(data / "groups.json")))
+        self.assertIsNone(self.check("Read", file_path=str(data / "signal/messages.jsonl")))
 
     def test_read_signal_cli_dir_blocked(self):
         d = self.home / ".local/share/signal-cli/attachments/x.jpg"

@@ -159,8 +159,9 @@ przerwany. Dozwolone rozmowy to „Notatka do siebie”, grupy trwających konku
 | `house signal allow "<nazwa grupy>" --alias krotka` / `deny krotka` | **tylko człowiek w terminalu**: dopisz / usuń grupę |
 | `house signal pull` / `status` / `migrate` | odbierz teraz / stan odbioru i magazynu / przenieś stare pliki |
 
-Agent nie może sam dodać grupy (`allow` wymaga terminala), a hook blokuje mu gołe `signal-cli send|receive`,
-odczyt `~/.local/share/signal-cli/` (tam lądują też pliki z DM) i zapis do `~/.config/house/`. Start sesji w repo
+Agent nie może sam dodać grupy: `allow` wymaga terminala, a hook blokuje agentowi `house signal allow|deny`,
+każde uruchomienie `signal-cli`, nadpisywanie ścieżek przez `HOUSE_*=…`, odczyt `~/.local/share/signal-cli/` (tam
+lądują też pliki z DM) i zapis do `~/.config/house/` oraz `~/.local/share/house/`. Start sesji w repo
 konkursu (i w repo `house` po `house setup --signal-hook`) pokazuje w 1–4 liniach, ile jest nowych wiadomości.
 Drużyna z dozwolonych grup jest zaufana: jej prośby agent traktuje jak prośby człowieka, a przekazane treści jak
 dane.
