@@ -174,6 +174,10 @@ były w grupie przy `allow` (`house signal agent members <czat>` odświeża list
 niż 2 h czeka na Twoje 👍 w Notatce do siebie. W czacie: `/status`, `/stop` (cytatem albo bieżące), `/lb`;
 w Notatce do siebie: `/agent off|on`. W terminalu: `house signal agent status|off [--kill]|stop <id>|gc`. 3
 porażki z rzędu wyłączają S7 z alarmem; ponad 50 USD dziennie daje alarm (bez blokady).
+Sandbox Basha potrzebuje zagnieżdżonych przestrzeni nazw użytkownika. Ubuntu z
+`kernel.apparmor_restrict_unprivileged_userns=1` ich nie pozwala, więc wtedy zlecenia idą bez Basha (agent czyta
+i edytuje, kodu nie uruchamia), a `house doctor` to pokazuje. Włączenie wymaga sudo: profil AppArmor dla sandboxa
+albo wyłączenie tego ograniczenia.
 
 Agent nie może sam dodać grupy: `allow` wymaga terminala, a hook blokuje agentowi `house signal allow|deny`,
 każde uruchomienie `signal-cli`, nadpisywanie ścieżek przez `HOUSE_*=…`, odczyt `~/.local/share/signal-cli/` (tam
