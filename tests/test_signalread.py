@@ -385,6 +385,21 @@ class CursorTest(unittest.TestCase):
         view = signalread.View([], NOW)
         self.assertTrue(signalread.render_unread(view, msgs, since, "house", peek=False).startswith("brak nowych"))
 
+    def test_message_appended_during_unread_is_not_lost(self):
+        from unittest import mock
+
+        from houselib import signalstore
+        self.add(msg(at(12, 0), "first"))
+        original = signalread._new
+
+        def racing(*a, **kw):
+            out = original(*a, **kw)
+            signalstore.append(msg(at(12, 1), "second"))
+            return out
+        with mock.patch.object(signalread, "_new", side_effect=racing):
+            self.assertEqual(self.texts("house"), ["first"])
+        self.assertEqual(self.texts("house"), ["second"])
+
     def test_plural(self):
         self.assertEqual([signalread.nowe(n) for n in (1, 2, 4, 5, 12, 22, 25)],
                          ["1 nowa", "2 nowe", "4 nowe", "5 nowych", "12 nowych", "22 nowe", "25 nowych"])
@@ -405,3 +420,4 @@ class CursorTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(tmp / "wt"), "-b", "x"], check=True)
         self.assertEqual(signalread.reader_name(tmp / "wt"), "house")
         self.assertEqual(signalread.reader_name(tmp), Path(self._tmp.name).name)
+

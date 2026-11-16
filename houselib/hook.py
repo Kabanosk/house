@@ -30,7 +30,8 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 def pre_tool(event: dict, env: dict) -> tuple[int, str]:
     """Decide whether a tool call may run (PreToolUse hook), applying the guard rules.
 
-    Signal rules (`guard.check_signal`) apply wherever the hook is installed, also in the house repo. Edit-type tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
+    Signal rules (`guard.check_signal`) apply wherever the hook is installed, also in the house repo. Edit-type
+    tools (`EDIT_TOOLS`) are checked with `guard.check_edit` on their `file_path` / `notebook_path`;
     `Bash` with `guard.check_bash` on its `command`. Other tools are always allowed.
 
     Args:
@@ -125,11 +126,11 @@ def signal_summary(reader: str, now: datetime | None = None) -> list[str]:
     per_chat = ", ".join(f"{a} {n}" for a, n in sorted(counts.items(), key=lambda kv: -kv[1]))
     lines = [_fit(f"signal: {signalread.nowe(len(msgs))} ({per_chat}) · `house signal unread` · "
                   f"ostatni odbiór {last}")]
-    view = signalread.View([], now)
+    view = signalread.View(signalstore.iter_events(raw=False), now)
     for m in sorted(msgs, key=lambda m: m.ts or 0, reverse=True)[:3]:
         quoted = ""
         if m.ev.get("quote"):
-            quoted = " ↩ " + view.quote_ref(m).split(" ↩ ", 1)[1].split(" „", 1)[0].replace("🤖 ", "")
+            quoted = " ↩ " + view.quote_ref(m, with_time=False).split(" ↩ ", 1)[1].split(" „", 1)[0].replace("🤖 ", "")
         text = " ".join(m.text.split()) or view._files_inline(m)
         lines.append(_fit(f"signal:   {m.ev.get('chat_alias') or m.chat} [{signalread.fmt_time(m.time, now)}] "
                           f"{signalread.display_name(m.ev)}{quoted}: {text}"))

@@ -475,6 +475,8 @@ def _cursor(cursors: dict, name: str, events: list[dict], now: datetime) -> dict
 
 
 def _new(name: str, now: datetime, chat: str | None) -> tuple[list[Msg], dict, dict, list[dict]]:
+    """(unread messages, reader's cursor, all cursors, the events read); the cursor may move only up to the
+    highest seq among these events, so a message appended meanwhile stays unread."""
     from . import signalchats, signalstore
     events = list(signalstore.iter_events(raw=False))
     cursors = signalstore.read_json(signalstore.store_dir() / CURSORS, {})
@@ -503,14 +505,14 @@ def unread(name: str, *, chat: str | None = None, peek: bool = False,
     """
     from . import signalstore
     now = now or datetime.now().astimezone()
-    msgs, cur, _, _ = _new(name, now, chat)
+    msgs, cur, _, events = _new(name, now, chat)
     since = parse_iso(cur.get("at"))
     if not peek:
         with signalstore.lock("store.lock", blocking=True):
             cursors = signalstore.read_json(signalstore.store_dir() / CURSORS, {})
             cursors = cursors if isinstance(cursors, dict) else {}
             fresh = cursors[name] if isinstance(cursors.get(name), dict) and "start" in cursors[name] else cur
-            top = signalstore.last_seq()
+            top = max((int(e.get("seq") or 0) for e in events), default=int(fresh.get("start") or 0))
             if chat is None:
                 fresh = {"start": top, "chats": {}}
             else:

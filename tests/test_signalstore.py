@@ -327,3 +327,62 @@ class MigrateTest(StoreCase):
             f.write("{broken\n" + json.dumps({"chat": "self"}) + "\n")
         store.migrate()
         self.assertEqual(len(list(store.iter_events())), 4)
+
+
+class ReviewFixesTest(StoreCase):
+    def test_failed_attachment_copy_keeps_message_and_later_ones(self):
+        from tests import signal_fixtures as fx
+        src = Path(self._tmp.name) / "att"
+        src.mkdir()
+        (src / "x.jpg").write_bytes(b"J")
+        (src / "x.jpg").chmod(0)
+        try:
+            res = store.pull(FakeSig([fx.group_in(100, "z plikiem", attachments=[fx.attachment("x.jpg")]),
+                                      fx.group_in(101, "po nim")], attachments_dir=src), chats())
+        finally:
+            (src / "x.jpg").chmod(0o600)
+        events = list(store.iter_events())
+        self.assertEqual([e["text"] for e in events], ["z plikiem", "po nim"])
+        self.assertIsNone(events[0]["attachments"][0]["path"])
+        self.assertEqual(res.kept, 2)
+
+    def test_unexpected_parser_error_skips_one_envelope(self):
+        from tests import signal_fixtures as fx
+        with mock.patch("houselib.signalparse.extract", side_effect=[RuntimeError("x"), (None, False)]):
+            res = store.pull(FakeSig([fx.group_in(100, "a"), fx.group_in(101, "b")]), chats())
+        self.assertEqual(res.bad_lines, 1)
+
+    def test_failing_append_records_error_and_raises(self):
+        from tests import signal_fixtures as fx
+        with mock.patch.object(store, "append", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            store.pull(FakeSig([fx.group_in(100, "a")]), chats())
+        self.assertIn("disk full", store.read_state()["last_pull_error"])
+
+    def test_same_filename_twice_in_one_message(self):
+        from tests import signal_fixtures as fx
+        src = Path(self._tmp.name) / "att"
+        src.mkdir()
+        (src / "1.jpg").write_bytes(b"ONE")
+        (src / "2.jpg").write_bytes(b"TWO")
+        store.pull(FakeSig([fx.group_in(100, "x", attachments=[fx.attachment("1.jpg", "image.jpg"),
+                                                                fx.attachment("2.jpg", "image.jpg")])],
+                           attachments_dir=src), chats())
+        paths = [a["path"] for a in next(store.iter_events())["attachments"]]
+        self.assertEqual(len(set(paths)), 2)
+        self.assertEqual(sorted(Path(p).read_bytes() for p in paths), [b"ONE", b"TWO"])
+
+    def test_seq_not_reused_when_state_lags(self):
+        store.append(ev(1))
+        store.append(ev(2))
+        store.update_state(next_seq=2)  # as after a crash between the line and the state write
+        self.assertEqual(store.append(ev(3)), 3)
+
+    def test_migrate_waits_for_inbox_lock(self):
+        from houselib import notify
+        d = notify.data_dir()
+        (d / "inbox.jsonl").write_text('{"ts": 1, "chat": "self", "sender": "W", "text": "x"}\n')
+        with (d / "inbox.lock").open("w") as f, mock.patch.object(store, "LOCK_TIMEOUT", 0.1):
+            fcntl.flock(f, fcntl.LOCK_EX)
+            self.assertEqual(store.migrate(), ["migracja pominięta: działa `house inbox`"])
+        self.assertTrue((d / "inbox.jsonl").exists())
+        self.assertEqual(len(store.migrate(inbox_locked=False)), 1)

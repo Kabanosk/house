@@ -302,7 +302,7 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeo
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return [SKIPPED_LOCKED]
-        log = list(signalstore.ensure_migrated())
+        log = list(signalstore.ensure_migrated(inbox_locked=True))
         chats = signalchats.allowed(sig, contests)
         signalstore.pull(sig, chats, timeout=timeout, max_messages=max_messages)
         by_group = {gid: list(c.contests) for gid, c in chats.items() if c.contests}
@@ -320,11 +320,14 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeo
         reactions, settled = _reactions(events, answering, done)
         for key in settled:
             done[key] = None
+        waiting_edits = []  # edits of originals still pending: marked handled only together with the original
         for e in edits:
             original = f"{_author_prefix(str(e['key']))}:{e['target']['ts']}"
             if original in by_key:
                 by_key[original].text = str(e.get("text") or "")
-            elif done.get(original):
+                waiting_edits.append((str(e["key"]), original))
+                continue
+            if done.get(original):
                 log.append(f"{str(done[original]).split()[-1]}: odpowiedź edytowana po zapisaniu, decyzja bez zmian")
             done[str(e["key"])] = None
         for m in sorted([*msgs, *reactions], key=lambda m: m.ts):
@@ -336,6 +339,9 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeo
                 log.append(line)
             if finished:
                 done[m.key] = answered
+        for edit_key, original in waiting_edits:
+            if original in done:
+                done[edit_key] = None
         signalstore.write_json(done_path, done)
         if reader:
             from . import signalread

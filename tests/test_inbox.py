@@ -191,6 +191,14 @@ class InboxTest(InboxCase):
         self.run_inbox([self_edit(210, 200, "B")])
         self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
 
+    def test_edit_kept_while_original_waits_for_its_contest(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        sig = FakeSignal([self_reply(200, "A", quote=100), self_edit(210, 200, "B")], self.groups)
+        inbox.process([self.fr, self.fi], sig, scope=[self.fi])
+        self.assertIn("[open] Finalne", self.qtext(self.fr))
+        self.run_inbox([])
+        self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+
     def test_edit_after_handling_logged(self):
         self.sent_question(self.fr, "Q-001", 100)
         self.run_inbox([self_reply(200, "A", quote=100)])

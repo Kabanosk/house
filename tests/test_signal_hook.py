@@ -57,6 +57,14 @@ class SignalHookTest(unittest.TestCase):
         self.assertIn("Wojciech Fiołka: fr Q-012: B", lines[2])
         self.assertNotIn("contest", out)
 
+    def test_preview_names_quoted_house_message(self):
+        q_ts = now_ts(30)
+        signalstore.record_out(fx.OWN, fx.GID, "🤖 [house] Cześć", q_ts)
+        self.sig.objs = [fx.group_in(now_ts(1), "Spoko", quote=(q_ts, "u-own", "🤖 [house] Cześć"))]
+        out = self.start(self.root)
+        self.assertIn("Kuba Nowak ↩ house: Spoko", out)
+        self.assertNotIn("u-own", out)
+
     def test_signal_lines_limits(self):
         for line in self.start(self.root).splitlines():
             self.assertLessEqual(len(line), 100, line)

@@ -370,10 +370,12 @@ def cmd_status(args) -> int:
     broken = signalstore.bad_lines()
     print(f"magazyn: {len(events)} zdarzeń · {signalread.fmt_size(path.stat().st_size if path.exists() else 0)} · "
           f"oczekujące: {waiting}" + (f" · uszkodzone linie: {', '.join(map(str, broken[:10]))}" if broken else ""))
+    aliases = {c.id: c.alias for c in signalchats.allowed(None).values()}
     counts: dict[str, int] = {}
     for e in signalstore.latest(events):
         if e.get("kind") in ("message", "other"):
-            alias = str(e.get("chat_alias") or e.get("chat"))
+            chat = str(e.get("chat"))
+            alias = aliases.get(chat) or e.get("chat_alias") or f"{chat[:8]}…"
             counts[alias] = counts.get(alias, 0) + 1
     print("rozmowy: " + (" · ".join(f"{a} {n}" for a, n in counts.items()) or "—"))
     cursors = signalstore.read_json(signalstore.store_dir() / signalread.CURSORS, {})

@@ -18,6 +18,7 @@ Used by `house notify`, `house ask`, `house inbox`, `house deadlines` and the se
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -53,11 +54,21 @@ class ReceiveResult:
     stopped: bool = False
 
 
+PHONE_RE = re.compile(r"\+?\d[\d ]{6,}\d")
+UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+
+
 def _error_line(stderr: str) -> str | None:
-    """First stderr line that is not an INFO message, cut to ERROR_MAX characters; None for empty stderr."""
+    """The line that explains a failure: the first ERROR line, else the first non-INFO line, else the first line.
+
+    Phone numbers and UUIDs are replaced (`+…`, `<uuid>`): a warning may name a sender from a private chat, and
+    nothing from a private chat may be stored, even in an error. Cut to ERROR_MAX characters; None when empty.
+    """
     lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
-    useful = [ln for ln in lines if not ln.startswith("INFO")] or lines
-    return useful[0][:ERROR_MAX] if useful else None
+    useful = [ln for ln in lines if "ERROR" in ln] or [ln for ln in lines if not ln.startswith("INFO")] or lines
+    if not useful:
+        return None
+    return UUID_RE.sub("<uuid>", PHONE_RE.sub("+…", useful[0]))[:ERROR_MAX]
 
 
 class Signal:

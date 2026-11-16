@@ -143,14 +143,32 @@ def _scan_last_seq() -> int:
     return max((int(e.get("seq") or 0) for e in iter_events(raw=False)), default=0)
 
 
+def _tail_seq() -> int:
+    """Seq of the last complete line of the store (reads only the file's end); 0 when there is none."""
+    path = store_dir() / MESSAGES
+    if not path.exists():
+        return 0
+    with path.open("rb") as f:
+        f.seek(max(0, path.stat().st_size - 65536))
+        chunk = f.read()
+    for e, _ in reversed(list(_parse_lines(chunk))):
+        if e is not None and str(e.get("seq", "")).isdigit():
+            return int(e["seq"])
+    return 0
+
+
 def _append_locked(event: dict) -> int:
-    """Append one event with the next seq; the caller holds `store.lock`."""
+    """Append one event with the next seq; the caller holds `store.lock`.
+
+    `next_seq` is saved before the line is written, so a crash in between leaves a gap, never a reused seq; a
+    state that lags behind the file (older crash, restored backup) is corrected from the file's last line.
+    """
     state = read_state()
-    seq = int(state.get("next_seq") or _scan_last_seq() + 1)
-    rest = {k: v for k, v in event.items() if k not in ("v", "seq")}
-    _append_bytes(store_dir() / MESSAGES, _line({"v": event.get("v", 1), "seq": seq, **rest}))
+    seq = max(int(state.get("next_seq") or 0), _tail_seq() + 1)
     state["next_seq"] = seq + 1
     write_json(store_dir() / STATE, state)
+    rest = {k: v for k, v in event.items() if k not in ("v", "seq", "first_seq")}
+    _append_bytes(store_dir() / MESSAGES, _line({"v": event.get("v", 1), "seq": seq, **rest}))
     return seq
 
 
@@ -328,15 +346,20 @@ def _private_dir(path: Path) -> Path:
 
 def _copy_attachments(event: dict, src_dir: Path) -> None:
     """Copy the files signal-cli downloaded for this event into `files/<alias>/` and set each `path`."""
-    for a in event.get("attachments") or []:
+    for i, a in enumerate(event.get("attachments") or []):
         aid = str(a.get("id") or "")
         src = Path(src_dir) / aid
         if not aid or Path(aid).name != aid or not src.is_file():
             continue
-        folder = _private_dir(_private_dir(store_dir() / "files") / _safe(str(event.get("chat_alias") or "chat")))
-        dst = folder / f"{str(event.get('time') or '')[:10]}_{event['ts']}_{_safe(str(a.get('filename') or aid))}"
-        shutil.copyfile(src, dst)
-        dst.chmod(0o600)
+        name = _safe(str(a.get("filename") or aid))
+        stem = f"{str(event.get('time') or '')[:10]}_{event['ts']}" + (f"_{i + 1}" if i else "")
+        try:
+            folder = _private_dir(_private_dir(store_dir() / "files") / _safe(str(event.get("chat_alias") or "chat")))
+            dst = folder / f"{stem}_{name}"
+            shutil.copyfile(src, dst)
+            dst.chmod(0o600)
+        except OSError:
+            continue  # the message itself must still be stored; the file shows as „nie pobrano”
         a["path"] = str(dst)
 
 
@@ -389,7 +412,7 @@ def pull(sig, chats: dict | None = None, timeout: int = 1, max_messages: int | N
         def handle(obj: dict) -> None:
             try:
                 event, dropped = signalparse.extract(obj, sig.account, aliases)
-            except (TypeError, ValueError, AttributeError, KeyError):
+            except Exception:  # noqa: BLE001 — one odd envelope is skipped, never the batch (spec §13)
                 res.bad_lines += 1
                 return
             res.dropped += int(dropped)
@@ -398,8 +421,13 @@ def pull(sig, chats: dict | None = None, timeout: int = 1, max_messages: int | N
                 append(event)
                 res.kept += 1
 
-        with _deferred_signals(stop):
-            r = sig.receive(handle, timeout=timeout, max_messages=max_messages, should_stop=lambda: bool(stop))
+        try:
+            with _deferred_signals(stop):
+                r = sig.receive(handle, timeout=timeout, max_messages=max_messages, should_stop=lambda: bool(stop))
+        except Exception as e:  # a failing append: record why, then let the caller see it
+            update_state(last_pull_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                         last_pull_error=f"zapis do magazynu: {type(e).__name__}: {e}"[:200])
+            raise
         res.bad_lines += r.bad_lines
         res.interrupted = bool(stop)
         res.error = r.error or ("przerwano" if stop else None)
@@ -445,15 +473,44 @@ def _skeleton(chat: str, author: str, ts: int, dir_: str, sender: dict, text: st
             "target": None, "meta": meta, "status": "ok", "raw": None}
 
 
-def migrate(now: datetime | None = None) -> list[str]:
+@contextmanager
+def _inbox_lock(take: bool):
+    """Hold `<data dir>/inbox.lock` (as `house inbox` does) for up to LOCK_TIMEOUT s; yields whether it is held."""
+    if not take:
+        yield True
+        return
+    fd = os.open(notify.data_dir() / "inbox.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    deadline, held = time.monotonic() + LOCK_TIMEOUT, False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+        yield held
+    finally:
+        if held:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def migrate(now: datetime | None = None, inbox_locked: bool = False) -> list[str]:
     """Move the P3 files (`inbox.jsonl`, `inbox_done.json`, `sent.jsonl` in the data dir) into the store.
 
     Idempotent: each old file is renamed to `<name>.migrated-<stamp>` (kept, never deleted) after its lines are
     in the store, and a line whose (chat, ts) is already stored is skipped. So a file that reappears (old code
     still writing `inbox.jsonl`) is migrated again without duplicates.
 
+    Takes `inbox.lock` first (old code appends `inbox.jsonl` under it, and `house inbox` rewrites
+    `signal/inbox_done.json` under it), unless the caller already holds it.
+
     Args:
         now: Time used for the rename stamp and `state.migrated`. Defaults to the current time.
+        inbox_locked: The caller (`inbox.process`) already holds `inbox.lock`. Defaults to False.
 
     Returns:
         Log lines (Polish), one per migrated file; [] when there was nothing to migrate.
@@ -463,7 +520,9 @@ def migrate(now: datetime | None = None) -> list[str]:
     if not any((data / name).exists() for name in OLD_FILES):
         return []
     log = []
-    with lock("store.lock", blocking=True) as held:
+    with _inbox_lock(not inbox_locked) as inbox_held, lock("store.lock", blocking=True) as held:
+        if not inbox_held:
+            return ["migracja pominięta: działa `house inbox`"]
         if not held:
             return ["migracja pominięta: magazyn zajęty"]
         stored = {(e.get("chat"), e.get("ts")) for e in iter_events(raw=False)}
@@ -519,7 +578,7 @@ def migrate(now: datetime | None = None) -> list[str]:
     return log
 
 
-def ensure_migrated() -> list[str]:
+def ensure_migrated(inbox_locked: bool = False) -> list[str]:
     """Run `migrate` when any P3 file is present in the data dir; [] otherwise (cheap: three `exists` calls)."""
     data = notify.data_dir()
-    return migrate() if any((data / name).exists() for name in OLD_FILES) else []
+    return migrate(inbox_locked=inbox_locked) if any((data / name).exists() for name in OLD_FILES) else []

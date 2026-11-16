@@ -229,3 +229,17 @@ class SignalTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ErrorLineTest(unittest.TestCase):
+    def test_error_line_prefers_error_and_redacts(self):
+        err = ("WARN untrusted identity for +48555000111 (u 1b4e28ba-2fa1-11d2-883f-0016d3cca427)\n"
+               "ERROR Failed for +48555000222 / 1b4e28ba-2fa1-11d2-883f-0016d3cca427\n")
+        line = sig._error_line(err)
+        self.assertTrue(line.startswith("ERROR"))
+        self.assertNotIn("555000", line)
+        self.assertNotIn("1b4e28ba", line)
+
+    def test_warn_only_is_redacted(self):
+        line = sig._error_line("WARN something about +48555000111\n")
+        self.assertNotIn("555000111", line)

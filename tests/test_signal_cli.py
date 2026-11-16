@@ -483,6 +483,16 @@ class UnreadStatusTest(CliCase):
         _, out, _ = self.run_cli("unread", "--as", "p", "--json")
         self.assertEqual([json.loads(x)["text"] for x in out.splitlines()], ["m0", "m1", "m2"])
 
+    def test_status_uses_alias_for_migrated_events(self):
+        signalstore.append({"v": 1, "key": "gT:migrated:9", "kind": "message", "dir": "in", "chat": "gT",
+                            "chat_alias": None, "ts": 9, "text": "x"})
+        signalstore.append({"v": 1, "key": "gZZZZZZZZZZ:migrated:9", "kind": "message", "dir": "in",
+                            "chat": "gZZZZZZZZZZ", "chat_alias": None, "ts": 9, "text": "x"})
+        _, out, _ = self.run_cli("status")
+        self.assertIn("techarena 4", out)
+        self.assertIn("gZZZZZZZ…", out)
+        self.assertNotIn("gZZZZZZZZZZ ", out)
+
     def test_status_lines(self):
         signalstore.update_state(last_pull_error="timeout", dropped_last_pull=4)
         code, out, _ = self.run_cli("status")
