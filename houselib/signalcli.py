@@ -492,9 +492,10 @@ def _migrating(func):
 
 
 def cmd_agent(args) -> int:
-    """`house signal agent tick|status|on|off [--kill]|stop ID|members ALIAS|gc`: the @claude agent (S7).
+    """`house signal agent tick|status|on|off [--kill]|stop ID|members ALIAS|gc|image|token`: the @claude agent.
 
-    `on` and `members` need a terminal (they widen what runs or who may ask); `off` works for anyone.
+    `on`, `members` and `token` need a terminal (they widen what runs, who may ask, or whose account pays);
+    `off` works for anyone; `image` builds the job container image and starts the proxy (S7.1).
     Exit 0, 1 Signal not configured (tick, members), 2 no terminal / unknown job or chat.
     """
     from . import setup, signalagent
@@ -506,13 +507,15 @@ def cmd_agent(args) -> int:
         return 0
     if action == "status":
         state = store.state()
-        print(f"S7: {'włączony' if store.enabled() else 'wyłączony'} · porażki z rzędu: {state.get('failures', 0)} · "
+        from . import agentdocker
+        print(f"S7: {'włączony' if store.enabled() else 'wyłączony'} · środowisko: {agentdocker.runtime()} · "
+              f"porażki z rzędu: {state.get('failures', 0)} · "
               f"dziś: {float((state.get('spent') or {}).get(f'{datetime.now():%Y-%m-%d}') or 0):.2f} USD")
         for j in sorted(store.all(), key=lambda j: j.created)[-20:]:
             print(f"{j.id} {j.status:<16} {j.chat_alias:<12} {Path(j.repo).name:<20} {j.created[:16]} "
                   f"„{signalread.snippet(j.text, 40)}”")
         return 0
-    if action in ("on", "members"):
+    if action in ("on", "members", "token"):
         refused = _human_only(f"agent {action}")
         if refused:
             return refused
@@ -554,6 +557,27 @@ def cmd_agent(args) -> int:
         store.set_members(chat.id, ids)
         print(f"✓ {chat.alias}: {len(ids)} osób może zlecać (@claude)")
         return 0
+    if action == "token":
+        import getpass
+
+        from . import agentdocker
+        token = getpass.getpass("Token z `claude setup-token` (subskrypcja; nie zostanie wyświetlony): ").strip()
+        if not token:
+            print("nic nie zmieniono")
+            return 1
+        agentdocker.save_token(token)
+        print(f"✓ token zapisany ({agentdocker.token_path()}, 0600); kontenery zleceń z niego korzystają")
+        return 0
+    if action == "image":
+        from . import agentdocker
+        r = agentdocker.build_image()
+        if r.returncode != 0:
+            print(f"error: budowanie obrazu nie wyszło: {(r.stderr or '').strip()[-400:]}", file=sys.stderr)
+            return 1
+        agentdocker.ensure_networks()
+        agentdocker.ensure_proxy()
+        print(f"✓ obraz {agentdocker.image_name()}, sieć {agentdocker.INTERNAL_NET}, proxy {agentdocker.PROXY}")
+        return 0
     if action == "gc":
         removed = signalagent.gc()
         print(f"usunięte worktree: {len(removed)}")
@@ -578,7 +602,7 @@ def register(sub) -> None:
     ar.add_argument("--summarize", action="store_true", help="write missing summaries with `claude -p` (no tools)")
     ar.set_defaults(func=_migrating(cmd_archive))
     ag = ss.add_parser("agent", help="@claude agent from Signal (S7): tick, status, on, off, stop, members, gc")
-    ag.add_argument("action", choices=["tick", "status", "on", "off", "stop", "members", "gc"])
+    ag.add_argument("action", choices=["tick", "status", "on", "off", "stop", "members", "gc", "image", "token"])
     ag.add_argument("target", nargs="?", help="stop: job id; members: chat alias")
     ag.add_argument("--kill", action="store_true", help="off: also stop running jobs")
     ag.set_defaults(func=_migrating(cmd_agent))

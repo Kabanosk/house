@@ -301,7 +301,8 @@ class JobModeReviewTest(JobModeTest):
 
     def test_allow_agent_bypass_forms_refused(self):
         for cmd in ("house signal agent --kill on", "h=house; $h signal agent on", "house signal agent 'on'",
-                    "house signal 'allow' x", "bin/house signal agent members techarena"):
+                    "house signal 'allow' x", "bin/house signal agent members techarena",
+                    "house signal agent token"):
             self.assertIsNotNone(guard.check_signal("Bash", {"command": cmd}, self.wt, home=self.home), cmd)
         self.assertIsNone(guard.check_signal("Bash", {"command": "house signal agent status"}, self.wt,
                                              home=self.home))
