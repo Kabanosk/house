@@ -114,6 +114,8 @@ class CommandTest(DockerCase):
         self.assertNotIn(".claude:", joined)
         self.assertEqual(argv[-2:], ["claude", "-p"])
         self.assertEqual(argv[argv.index("--name") + 1], "house-agent-x")
+        self.assertIn(f"/home/agent:exec,uid={os.getuid()},gid={os.getgid()},mode=0700", argv)
+        self.assertIn("CLAUDE_CODE_TMPDIR=/home/agent", env_file.read_text())
 
 
 class DoctorTest(DockerCase):

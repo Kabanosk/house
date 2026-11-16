@@ -117,6 +117,7 @@ def write_env_file(job_dir: Path, job_id: str, wt: Path) -> Path:
     lines = {"CLAUDE_CODE_OAUTH_TOKEN": read_token(), "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy,
              "https_proxy": proxy, "http_proxy": proxy, "NO_PROXY": "localhost,127.0.0.1",
              "HOUSE_AGENT_JOB": job_id, "HOUSE_AGENT_WORKTREE": str(wt), "HOME": "/home/agent", "LANG": "C.UTF-8",
+             "CLAUDE_CODE_TMPDIR": "/home/agent",  # owned by the job user; /tmp/claude-<uid> may be a root mount path
              "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
              "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1"}
     path = job_dir / "container.env"
@@ -133,7 +134,8 @@ def container_command(job_id: str, wt: Path, repo: Path, prompt: Path, settings:
     """`docker run` for one job: only the listed mounts, no capabilities, internal network, resource limits."""
     return ["docker", "run", "--rm", "-i", "--init", "--name", f"house-agent-{job_id}",
             "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "--read-only", "--tmpfs", "/tmp:exec", "--tmpfs", "/home/agent", "--memory", MEMORY,
+            "--read-only", "--tmpfs", "/tmp:exec",
+            "--tmpfs", f"/home/agent:exec,uid={os.getuid()},gid={os.getgid()},mode=0700", "--memory", MEMORY,
             "--pids-limit", str(PIDS), "--network", INTERNAL_NET, "--env-file", str(env_file),
             "-v", f"{wt}:{wt}", "-v", f"{repo / '.git'}:{repo / '.git'}:ro", "-v", f"{CODE_ROOT}:/house:ro",
             "-v", f"{prompt}:/job/prompt.md:ro", "-v", f"{settings}:/job/settings.json:ro",
