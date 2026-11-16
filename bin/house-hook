@@ -8,7 +8,8 @@ Contract for agents:
   * `pre-tool`: exit 2 blocks the tool call and the reason on stderr is shown to the model; exit 0 allows it.
   * `session-start`: prints the contest state summary on stdout, exit 0.
   * Fail open: an unknown mode, bad input or any internal error prints one `house-hook: ...` line to stderr and
-    exits 0, so a broken hook never blocks work. Only a guard rule blocks.
+    exits 0, so a broken hook never blocks work. Only a guard rule blocks. Exception: in a job started from Signal
+    (`HOUSE_AGENT_JOB` set) `pre-tool` fails closed (exit 2).
 """
 import json
 import os
@@ -45,7 +46,10 @@ def main() -> int:
             return 0
         print(f"house-hook: unknown mode {mode!r}", file=sys.stderr)
         return 0
-    except Exception as e:  # noqa: BLE001 — a hook must never break the session (fail open)
+    except Exception as e:  # noqa: BLE001 — a hook must never break the session (fail open) …
+        if os.environ.get("HOUSE_AGENT_JOB") and mode == "pre-tool":  # … except in a Signal job: fail closed
+            print(f"house-hook: refused in job mode ({type(e).__name__})", file=sys.stderr)
+            return 2
         print(f"house-hook: skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return 0
 

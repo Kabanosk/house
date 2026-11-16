@@ -558,6 +558,74 @@ def _runs_signal_cli(seg: list[str]) -> bool:
     return any(" " in t and INNER_SIGNAL_CLI_RE.search(t) for t in seg)
 
 
+JOB_BLOCKED_COMMANDS = {"gh", "curl", "wget", "ssh", "scp", "sftp", "nc", "ncat", "netcat", "socat", "rsync",
+                        "house", "signal-cli", "sudo", "su", "doas", "systemctl", "systemd-run", "crontab", "at"}
+JOB_BLOCKED_GIT = {"push", "remote", "config", "fetch", "pull", "clone", "submodule", "commit", "worktree", "gc",
+                   "filter-branch", "update-ref", "symbolic-ref", "hooks"}
+JOB_REASON = ("Signal job: {what}. The job works only inside its worktree, without network, git history changes "
+              "or house commands; house commits and replies when the job ends")
+
+
+def _command_name(seg: list[str]) -> tuple[str, list[str]]:
+    """The program a simple command runs (after `VAR=x` and wrappers such as `timeout 5`) and its arguments."""
+    i = 0
+    while i < len(seg):
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]):
+            i += 1
+        elif Path(seg[i]).name in WRAPPERS - {"sudo"}:
+            i += 1
+            while i < len(seg) and (seg[i].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", seg[i])):
+                i += 1
+        else:
+            break
+    return (Path(seg[i]).name, seg[i + 1:]) if i < len(seg) else ("", [])
+
+
+def check_job(tool: str, args: dict, cwd: Path, worktree: Path, home: Path | None = None) -> str | None:
+    """Extra rules for an agent started from Signal (`HOUSE_AGENT_JOB` set), on top of `check_signal`.
+
+    Refuses network tools, `git` subcommands that change history, remotes or config, house and systemd commands,
+    writes outside the job's worktree, and reads of the home directory outside it. The sandbox enforces the same
+    boundaries; this is the second layer, and the hook fails closed in job mode.
+
+    Returns:
+        A reason to refuse, or None.
+    """
+    home = (home or Path.home()).resolve()
+    wt = Path(worktree).resolve()
+    reason = check_signal(tool, args, cwd, home=home)
+    if reason:
+        return reason
+    if tool == "Bash":
+        for seg in _segments(str(args.get("command") or "")):
+            name, rest = _command_name(seg)
+            if name in JOB_BLOCKED_COMMANDS:
+                return JOB_REASON.format(what=f"`{name}` is not available")
+            if name == "git":
+                sub, _ = _git_parts(seg, cwd)
+                if sub[:1] and sub[0] in JOB_BLOCKED_GIT:
+                    return JOB_REASON.format(what=f"`git {sub[0]}` is not available")
+            for target, base in _written_paths(seg, cwd):
+                if not _under(_expand(target, base, home), wt):
+                    return JOB_REASON.format(what=f"writing {target} outside the worktree")
+            for tok in seg:
+                if tok.startswith(("~", "$HOME", "${HOME}", "/")) and _under(_expand(tok, cwd, home), home) \
+                        and not _under(_expand(tok, cwd, home), wt):
+                    return JOB_REASON.format(what=f"{tok} is outside the worktree")
+        return None
+    path = args.get("file_path") or args.get("notebook_path") or args.get("path")
+    if not path:
+        return None
+    full = _expand(str(path), cwd, home)
+    if tool in READ_TOOLS:
+        if _under(full, home) and not _under(full, wt):
+            return JOB_REASON.format(what=f"reading {path} outside the worktree")
+        return None
+    if not _under(full, wt):
+        return JOB_REASON.format(what=f"writing {path} outside the worktree")
+    return None
+
+
 def _sha(path: Path) -> str | None:
     """Return the SHA-256 hex digest of the file at `path`, or None when it is not a file."""
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None

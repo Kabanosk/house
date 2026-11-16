@@ -46,6 +46,13 @@ def pre_tool(event: dict, env: dict) -> tuple[int, str]:
         coordinator or `house check --refreeze --reason`).
     """
     cwd = Path(event.get("cwd") or os.getcwd())
+    if env.get("HOUSE_AGENT_JOB"):  # a job started from Signal: stricter rules, fail closed, no HOUSE_GUARD=off
+        try:
+            reason = guard.check_job(str(event.get("tool_name") or ""), event.get("tool_input") or {}, cwd,
+                                     Path(env.get("HOUSE_AGENT_WORKTREE") or cwd))
+        except Exception as e:  # noqa: BLE001
+            return 2, f"house guard (job mode): refused, the check failed ({type(e).__name__})."
+        return (2, f"house guard: {reason}.") if reason else (0, "")
     if env.get("HOUSE_GUARD") != "off":
         reason = guard.check_signal(str(event.get("tool_name") or ""), event.get("tool_input") or {}, cwd)
         if reason:

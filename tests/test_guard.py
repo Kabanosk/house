@@ -241,3 +241,40 @@ class SignalRulesTest(unittest.TestCase):
         for cmd in ("bin/house signal read techarena", "house signal send techarena 'hej' --reply-to 5",
                     "house signal pull", "grep -r signal-cli houselib/"):
             self.assertIsNone(self.check("Bash", command=cmd), cmd)
+
+
+class JobModeTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "home"
+        self.wt = self.home / "house/.worktrees/signal-abc"
+        self.wt.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def check(self, tool, **args):
+        return guard.check_job(tool, args, self.wt, self.wt, home=self.home)
+
+    def test_job_mode_blocks_network_git_and_house(self):
+        for cmd in ("git push origin x", "git -C . remote add x y", "git config core.hooksPath x", "git commit -m x",
+                    "git fetch", "gh pr create", "curl https://x", "wget x", "ssh host", "scp a b:", "nc -l 1",
+                    "rsync a b", "house signal send self x", "bin/house exp run x", "python3 x.py && git push",
+                    "timeout 5 curl x", "sudo ls"):
+            self.assertIsNotNone(self.check("Bash", command=cmd), cmd)
+
+    def test_job_mode_allows_work_in_worktree(self):
+        for cmd in ("python3 -m pytest -q", "git status", "git diff", "git log --oneline -3", "ls -la",
+                    "echo x > wynik.txt", "pip install numpy"):
+            self.assertIsNone(self.check("Bash", command=cmd), cmd)
+        self.assertIsNone(self.check("Write", file_path=str(self.wt / "a.py"), content="x"))
+        self.assertIsNone(self.check("Read", file_path=str(self.wt / ".house-job/request.md")))
+        self.assertIsNone(self.check("Read", file_path="/usr/lib/python3/os.py"))
+
+    def test_job_mode_blocks_outside_worktree(self):
+        self.assertIsNotNone(self.check("Write", file_path=str(self.home / "house/houselib/guard.py"), content="x"))
+        self.assertIsNotNone(self.check("Edit", file_path="../../other/x.py"))
+        self.assertIsNotNone(self.check("Read", file_path=str(self.home / ".config/house/signal.toml")))
+        self.assertIsNotNone(self.check("Grep", pattern="x", path=str(self.home)))
+        self.assertIsNotNone(self.check("Bash", command="echo x > ../../evil.sh"))
+        self.assertIsNotNone(self.check("Bash", command="cat ~/.ssh/id_ed25519"))
