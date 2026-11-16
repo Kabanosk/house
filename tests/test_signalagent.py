@@ -359,3 +359,247 @@ class LaunchTest(JobStoreCase):
             return subprocess.CompletedProcess(argv, 1, "", "Failed to start transient service")
         self.assertIsNone(agent.launch(self.job, run=run, claude="/opt/claude/bin/claude"))
         self.assertEqual(self.store.get(self.job.id).status, "failed")
+
+
+class ReplyTest(LaunchTest):
+    def setUp(self):
+        super().setUp()
+        self.wt = agent.prepare(self.job)
+        self.out = self.wt / ".house-job/out"
+
+    def test_reply_filters(self):
+        import os
+        from pathlib import Path
+        home = str(Path.home())
+        token = "sk-ant-" + "a" * 30
+        (self.wt / ".house-job/reply.md").write_text(f"Gotowe, klucz {token} w {home}/projekt/x.py\n" + "z" * 3000)
+        (self.out / "wykres.png").write_bytes(b"PNG")
+        (self.out / "a.csv").write_text("1")
+        (self.out / "b.txt").write_text("2")
+        (self.out / "c.md").write_text("3")
+        (self.out / ".env").write_text("X=1")
+        (self.out / "prog.exe").write_bytes(b"MZ")
+        (self.out / "sekret.txt").write_text(f"token = '{token}'")
+        os.symlink(self.tmp / "att.csv", self.out / "link.csv")
+        with (self.out / "duzy.csv").open("wb") as f:
+            f.truncate(26 * 1024 * 1024)
+        text, files, notes = agent.build_reply(self.job, self.wt)
+        self.assertNotIn(token, text)
+        self.assertIn("[REDACTED]", text)
+        self.assertNotIn(home, text)
+        self.assertIn("~/projekt", text)
+        self.assertLessEqual(len(text), agent.REPLY_MAX + 40)
+        names = [p.name for p in files]
+        self.assertIn("wynik.md", names)
+        self.assertEqual(len([n for n in names if n != "wynik.md"]), 3)
+        for bad in (".env", "prog.exe", "sekret.txt", "link.csv", "duzy.csv"):
+            self.assertNotIn(bad, names)
+            self.assertTrue(any(bad in n for n in notes), (bad, notes))
+        self.assertNotIn(token, next(p for p in files if p.name == "wynik.md").read_text())
+
+    def test_missing_reply(self):
+        text, files, _ = agent.build_reply(self.job, self.wt)
+        self.assertIn("bez odpowiedzi", text)
+        self.assertEqual(files, [])
+
+
+class FakeAgentSig:
+    """Signal stand-in for tick: sends are logged in the store like the real client."""
+
+    def __init__(self, fail=False):
+        self.account, self.sent, self.fail, self.ts = fx.OWN, [], fail, 7_000_000_000_000
+
+    def send(self, text, group_id=None, *, attachments=(), quote=None, meta=None):
+        from houselib import signalstore
+        self.ts += 1
+        ts = None if self.fail else self.ts
+        self.sent.append({"text": text, "group": group_id, "quote": quote, "files": list(attachments),
+                          "meta": meta, "ts": ts})
+        signalstore.record_out(self.account, group_id or "self", text, ts, attachments=attachments, quote=quote,
+                               meta=meta)
+        return ts
+
+
+class FakeSystemd:
+    def __init__(self):
+        self.calls, self.active = [], set()
+
+    def __call__(self, argv, **kw):
+        import subprocess
+        self.calls.append(argv)
+        if argv[0] == "systemd-run":
+            self.active.add(argv[argv.index("--unit") + 1])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            state = "active" if argv[3] in self.active else "inactive"
+            return subprocess.CompletedProcess(argv, 0, f"ActiveState={state}\nSubState=x\n", "")
+        if argv[:3] == ["systemctl", "--user", "stop"]:
+            self.active.discard(argv[3])
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def launches(self):
+        return [c for c in self.calls if c[0] == "systemd-run"]
+
+
+class TickTest(JobStoreCase):
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        from houselib.signalchats import Chat
+        from tests.helpers import git
+        self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "a@b")
+        git(self.repo, "config", "user.name", "a")
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "base")
+        self.chats = {"self": Chat("self", "self", "n", "zawsze"),
+                      fx.GID: Chat(fx.GID, "techarena", "t", "signal.toml")}
+        self.patches = [mock.patch("houselib.signalchats.allowed", return_value=self.chats),
+                        mock.patch("houselib.HOUSE_ROOT", self.repo)]
+        for p in self.patches:
+            p.start()
+        self.sig, self.sd = FakeAgentSig(), FakeSystemd()
+        self.store.set_state(cursor=0)
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        super().tearDown()
+
+    def add(self, obj):
+        from houselib import signalstore
+        obj["envelope"].pop("serverReceivedTimestamp", None)  # fixtures are from 1970: no age check here
+        e, _ = signalparse.extract(obj, fx.OWN, {"self": "self", fx.GID: "techarena"}, now=NOW)
+        signalstore.append(e)
+        return e
+
+    def tick(self):
+        return agent.tick(self.sig, run=self.sd, claude="/opt/claude/bin/claude")
+
+    def finish_unit(self, job, result="success", reply="Zrobione."):
+        import json
+        wt = agent.worktree_of(job)
+        if reply is not None:
+            (wt / ".house-job/reply.md").write_text(reply)
+        (wt / "nowy.py").write_text("print(1)\n")
+        if result:
+            agent.job_files(job)["log"].write_text(json.dumps({"type": "result", "subtype": result,
+                                                               "is_error": result != "success",
+                                                               "total_cost_usd": 0.42}) + "\n")
+        self.sd.active.discard(job.unit)
+
+    def test_first_tick_skips_history(self):
+        self.store.set_state(cursor=None)
+        self.add(fx.self_note(1000, "@claude stare zlecenie"))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        self.assertEqual(self.sd.launches(), [])
+        self.add(fx.self_note(2000, "@claude nowe"))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+
+    def test_tick_accepts_and_starts(self):
+        self.add(fx.self_note(1000, "@claude dopisz test"))
+        self.tick()
+        (job,) = self.store.all()
+        self.assertEqual(job.status, "running")
+        ack = self.sig.sent[0]
+        self.assertTrue(ack["text"].startswith("🤖 [house] przyjąłem"), ack["text"])
+        self.assertEqual((ack["group"], ack["quote"]), (None, (1000, "u-own")))
+        self.assertEqual(len(self.sd.launches()), 1)
+        self.tick()
+        self.assertEqual(len(self.sd.launches()), 1)
+
+    def test_tick_starts_one_per_repo(self):
+        self.add(fx.self_note(1000, "@claude pierwsze"))
+        self.add(fx.self_note(1001, "@claude drugie"))
+        self.tick()
+        statuses = sorted(j.status for j in self.store.all())
+        self.assertEqual(statuses, ["queued", "running"])
+        self.assertTrue(any("kolejka: 1" in s["text"] for s in self.sig.sent), [s["text"] for s in self.sig.sent])
+
+    def test_finish_commits_and_replies(self):
+        from tests.helpers import git
+        self.add(fx.self_note(1000, "@claude dopisz plik"))
+        self.tick()
+        (job,) = self.store.all()
+        self.finish_unit(job)
+        self.tick()
+        job = self.store.get(job.id)
+        self.assertEqual((job.status, job.cost), ("done", 0.42))
+        self.assertIn("nowy.py", git(self.repo, "show", "--stat", f"signal/{job.id}"))
+        reply = self.sig.sent[-1]
+        self.assertIn("Zrobione.", reply["text"])
+        self.assertIn(f"signal/{job.id}", reply["text"])
+        self.assertEqual(reply["quote"], (1000, "u-own"))
+        self.assertNotIn(".house-job", git(self.repo, "show", "--stat", f"signal/{job.id}"))
+
+    def test_reconcile_lost_unit(self):
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        (job,) = self.store.all()
+        self.finish_unit(job, result=None, reply=None)
+        self.tick()
+        job = self.store.get(job.id)
+        self.assertEqual(job.status, "failed")
+        self.assertIn("przerwane", self.sig.sent[-1]["text"])
+
+    def test_next_queued_starts_after_finish(self):
+        self.add(fx.self_note(1000, "@claude a"))
+        self.add(fx.self_note(1001, "@claude b"))
+        self.tick()
+        first = next(j for j in self.store.all() if j.status == "running")
+        self.finish_unit(first)
+        self.tick()
+        self.assertEqual(len(self.sd.launches()), 2)
+
+    def test_parallel_tick_skips(self):
+        with self.store.lock():
+            self.assertEqual(self.tick(), ["agent: inny tick trwa"])
+
+    def test_send_failure_retried_without_rerun(self):
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        (job,) = self.store.all()
+        self.finish_unit(job)
+        self.sig.fail = True
+        self.tick()
+        self.assertTrue(self.store.get(job.id).reply_pending)
+        self.sig.fail = False
+        self.tick()
+        job = self.store.get(job.id)
+        self.assertFalse(job.reply_pending)
+        self.assertIsNotNone(job.reply_ts)
+        self.assertEqual(len(self.sd.launches()), 1)
+
+    def test_waiting_approval_flow(self):
+        self.add(fx.group_in(1000, "@claude zrób", uuid="u-nowy", name="Nowy"))
+        self.tick()
+        (job,) = self.store.all()
+        self.assertEqual(job.status, "waiting-approval")
+        question = next(s for s in self.sig.sent if s["group"] is None)
+        self.assertIn("👍", question["text"])
+        self.assertTrue(any("czekam na zgodę" in s["text"] for s in self.sig.sent if s["group"] == fx.GID))
+        self.add(fx.reaction(2000, "👍", question["ts"], fx.OWN, gid="self"))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "running")
+
+    def test_disabled_refuses(self):
+        self.store.set_enabled(False)
+        self.add(fx.self_note(1000, "@claude x"))
+        self.tick()
+        self.assertIn("wyłączony", self.sig.sent[0]["text"])
+        self.assertEqual(self.sd.launches(), [])
+
+    def test_breaker_alarm(self):
+        for i in range(3):
+            self.add(fx.self_note(1000 + i, f"@claude {i}"))
+        for _ in range(3):
+            self.tick()
+            for job in self.store.running():
+                self.finish_unit(job, result="error_during_execution")
+        self.tick()
+        self.assertFalse(self.store.enabled())
+        self.assertTrue(any("wyłączam S7" in s["text"] for s in self.sig.sent))

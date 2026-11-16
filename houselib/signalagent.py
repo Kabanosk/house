@@ -376,6 +376,7 @@ ALLOWED_DOMAINS = ["pypi.org", "files.pythonhosted.org", "download.pytorch.org"]
 RUNTIME_MAX_S = 7200
 CONTEXT_MESSAGES = 30
 PROMPT_TEMPLATE = "core/templates/signal-agent-prompt.md"
+CODE_ROOT = Path(__file__).resolve().parents[1]  # the house checkout running this code (template, house-hook)
 
 
 def job_files(job: Job) -> dict[str, Path]:
@@ -431,7 +432,6 @@ def job_env(job: Job, wt: Path, claude: str) -> dict[str, str]:
 
 def job_settings(job: Job, wt: Path) -> dict:
     """Claude Code settings for the job: `dontAsk`, no web or MCP tools, sandbox that fails closed, job hook."""
-    from . import HOUSE_ROOT
     return {
         "permissions": {"defaultMode": "dontAsk",
                         "allow": ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
@@ -442,7 +442,7 @@ def job_settings(job: Job, wt: Path) -> dict:
                     "filesystem": {"denyRead": ["~/"], "allowRead": [str(wt)], "allowWrite": [str(wt)]},
                     "network": {"allowedDomains": list(ALLOWED_DOMAINS)}},
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": f"{Path(HOUSE_ROOT).resolve()}/bin/house-hook pre-tool"}]}]},
+            {"type": "command", "command": f"{CODE_ROOT}/bin/house-hook pre-tool"}]}]},
     }
 
 
@@ -462,10 +462,9 @@ def job_command(job: Job, wt: Path, claude: str) -> list[str]:
 
 
 def _prompt(job: Job, wt: Path) -> str:
-    from . import HOUSE_ROOT
     jd = wt / ".house-job"
     files = ", ".join(sorted(p.name for p in (jd / "in").iterdir())) or "brak"
-    return (Path(HOUSE_ROOT) / PROMPT_TEMPLATE).read_text().format(
+    return (CODE_ROOT / PROMPT_TEMPLATE).read_text().format(
         repo=Path(job.repo).name, branch=f"signal/{job.id}", author=job.author_name, request=job.text, files=files,
         quote="")
 
@@ -495,3 +494,306 @@ def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | Non
     store.update(job.id, status="running", unit=unit, branch=f"signal/{job.id}", worktree=str(wt),
                  started=datetime.now().astimezone().isoformat(timespec="seconds"))
     return unit
+
+
+# --- replies --------------------------------------------------------------------------------------------------------
+
+REPLY_MAX = 1500
+REPLY_FILES = 3
+REPLY_FILE_MAX = 25 * 1024 * 1024
+REPLY_TYPES = {".png", ".jpg", ".jpeg", ".pdf", ".csv", ".txt", ".md", ".json", ".log"}
+DAILY_ALARM_USD = 50  # Q5: alarm only, never a block
+
+
+def _redact(text: str) -> str:
+    from .export import SECRET_RES
+    for r in SECRET_RES:
+        text = r.sub("[REDACTED]", text)
+    return text.replace(str(Path.home()), "~")
+
+
+def build_reply(job: Job, wt: Path) -> tuple[str, list[Path], list[str]]:
+    """What goes back to the chat: the agent's `reply.md` (redacted, ≤ 1500 chars, the rest as `wynik.md`) and
+    at most 3 safe files from `.house-job/out/`.
+
+    Files are refused when they are symlinks or leave `out/`, are not of an allowed type, are over 25 MB, look
+    like `.env*`, or contain something that looks like a secret.
+
+    Returns:
+        (text, files to attach, notes about what was left out).
+    """
+    from .export import has_secret
+    jd = wt / ".house-job"
+    reply = jd / "reply.md"
+    text = reply.read_text(errors="replace") if reply.is_file() and not reply.is_symlink() else ""
+    text = _redact(text.strip()) or "zakończone bez odpowiedzi (agent nie zapisał reply.md)"
+    files: list[Path] = []
+    notes: list[str] = []
+    out_dir = (jd / "out").resolve()
+    for p in sorted((jd / "out").iterdir()) if (jd / "out").is_dir() else []:
+        why = None
+        if p.is_symlink() or not p.resolve().is_relative_to(out_dir) or not p.is_file():
+            why = "nie zwykły plik"
+        elif p.name.lower().startswith(".env") or p.suffix.lower() not in REPLY_TYPES:
+            why = "niedozwolony typ"
+        elif p.stat().st_size > REPLY_FILE_MAX:
+            why = "za duży"
+        elif has_secret(p):
+            why = "wygląda na sekret"
+        elif len(files) >= REPLY_FILES:
+            why = f"limit {REPLY_FILES} plików"
+        if why:
+            notes.append(f"pominięto {p.name} ({why})")
+        else:
+            files.append(p)
+    if len(text) > REPLY_MAX:
+        full = job_files(job)["dir"] / "wynik.md"
+        full.write_text(text + "\n")
+        full.chmod(0o600)
+        files.append(full)
+        text = text[:REPLY_MAX].rstrip() + "… (całość w wynik.md)"
+    return text, files, notes
+
+
+# --- dispatch -------------------------------------------------------------------------------------------------------
+
+def _prefix(contest: str | None) -> str:
+    from . import notify
+    return notify.prefix(Path(contest)) if contest else "🤖 [house]"
+
+
+def _say(sig, job_or_chat, text: str, *, contest: str | None = None, quote=None, files=(), meta=None) -> int | None:
+    """Send one message from house to a chat (prefix, logged by `Signal.send`)."""
+    chat = job_or_chat.chat if isinstance(job_or_chat, Job) else job_or_chat
+    contest = job_or_chat.contest if isinstance(job_or_chat, Job) else contest
+    return sig.send(f"{_prefix(contest)} {text}", group_id=None if chat == SELF else chat,
+                    attachments=[str(p) for p in files], quote=quote,
+                    meta={"origin": "agent", "contest": _contest_name(contest), **(meta or {})})
+
+
+def _contest_name(contest: str | None) -> str | None:
+    if not contest:
+        return None
+    from . import notify
+    return notify.contest_name(Path(contest))
+
+
+def _snippet(text: str, width: int = 40) -> str:
+    from .signalread import snippet
+    return snippet(text, width)
+
+
+def unit_active(job: Job, run=subprocess.run) -> bool:
+    """Whether the job's systemd unit is still running."""
+    r = run(["systemctl", "--user", "show", str(job.unit), "-p", "ActiveState", "-p", "SubState"],
+            capture_output=True, text=True, check=False)
+    state = dict(line.split("=", 1) for line in (r.stdout or "").splitlines() if "=" in line)
+    return state.get("ActiveState") in ("active", "activating", "deactivating", "reloading")
+
+
+def _result(job: Job) -> dict | None:
+    """The last `{"type": "result"}` line of the job's stream-json log, or None (killed, timed out, crashed)."""
+    log = job_files(job)["log"]
+    if not log.exists():
+        return None
+    found = None
+    for line in log.read_text(errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            found = obj
+    return found
+
+
+def _commit(job: Job, wt: Path) -> str:
+    """Commit what the agent left in its worktree on the job branch (house does it, never the agent).
+
+    Returns:
+        The diff summary ("2 files changed, …") or "bez zmian w repo".
+    """
+    git = ["git", "-C", str(wt)]
+    subprocess.run([*git, "add", "-A"], capture_output=True, text=True, check=False)
+    if subprocess.run([*git, "diff", "--cached", "--quiet"], check=False).returncode == 0:
+        return "bez zmian w repo"
+    msg = f"signal: {_snippet(job.text, 60)} ({job.author_name})"
+    r = subprocess.run([*git, "commit", "-q", "-m", msg], capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        return f"commit nie wyszedł: {(r.stderr or '').strip()[:120]}"
+    stat = subprocess.run([*git, "diff", "--shortstat", "HEAD~1", "HEAD"], capture_output=True, text=True,
+                          check=False).stdout.strip()
+    return stat or "zmiany zapisane"
+
+
+def _progress(job: Job, line: str) -> None:
+    """One line in the contest's `.house/PROGRESS.md` (contests only; the house repo has none)."""
+    if not job.contest:
+        return
+    path = Path(job.contest) / ".house/PROGRESS.md"
+    if path.parent.is_dir():
+        with path.open("a") as f:
+            f.write(f"- {datetime.now():%Y-%m-%d %H:%M} · signal · {line}\n")
+
+
+def finish(job: Job, sig, store: "JobStore") -> None:
+    """Close a job whose unit has ended: commit, record the outcome and cost, reply to the chat."""
+    wt = Path(job.worktree or worktree_of(job))
+    result = _result(job)
+    ok = bool(result) and result.get("subtype") == "success" and not result.get("is_error")
+    cost = float(result.get("total_cost_usd") or 0) if result else None
+    diff = _commit(job, wt) if wt.exists() else "brak worktree"
+    if result is None:
+        why = "przerwane (limit 2 h, /stop albo awaria)"
+    else:
+        why = None if ok else f"błąd: {result.get('subtype')}"
+    text, files, notes = build_reply(job, wt) if wt.exists() else ("", [], [])
+    head = "✓ gotowe" if ok else f"✗ {why}"
+    body = f"{head}: „{_snippet(job.text)}”\n{text}\n\ngałąź: {job.branch or 'signal/' + job.id} · {diff}"
+    if notes:
+        body += "\n" + "; ".join(notes)
+    store.update(job.id, status="done" if ok else "failed", ended=datetime.now().astimezone().isoformat(
+        timespec="seconds"), cost=cost, result=head, error=why, reply_pending=True)
+    _progress(job, f"zlecenie od {job.author_name}: „{_snippet(job.text)}” → {head}, gałąź {job.branch}")
+    (job_files(job)["dir"] / "reply.txt").write_text(json.dumps({"text": body, "files": [str(p) for p in files]}))
+    if ok:
+        store.record_success()
+    elif store.record_failure():
+        _say(sig, SELF, f"{BREAKER} nieudane zlecenia z rzędu, wyłączam S7. Włączenie: /agent on (tutaj).")
+    if cost:
+        _track_spend(sig, store, cost)
+    _send_reply(store.get(job.id), sig, store)
+
+
+def _send_reply(job: Job, sig, store: "JobStore") -> None:
+    saved = json.loads((job_files(job)["dir"] / "reply.txt").read_text())
+    ts = _say(sig, job, saved["text"], quote=(job.ts, job.author), files=[Path(p) for p in saved["files"]],
+              meta={"job": job.id})
+    if ts is not None:
+        store.update(job.id, reply_pending=False, reply_ts=ts)
+
+
+def _track_spend(sig, store: "JobStore", cost: float) -> None:
+    today = f"{datetime.now():%Y-%m-%d}"
+    state = store.state()
+    spent = {**(state.get("spent") or {})}
+    spent[today] = round(float(spent.get(today) or 0) + cost, 4)
+    store.set_state(spent=spent)
+    if spent[today] > DAILY_ALARM_USD and state.get("alarmed") != today:
+        store.set_state(alarmed=today)
+        _say(sig, SELF, f"S7 wydał dziś już {spent[today]:.2f} USD (próg alarmu {DAILY_ALARM_USD} USD). Nic nie "
+                        "blokuję; wyłączenie: /agent off.")
+
+
+def _accept(req: Request, sig, store: "JobStore", chats: dict, out_events: dict, now: datetime,
+            forced_quote: int | None = None) -> None:
+    """Turn a new request into a job (or a question / refusal) and tell the chat."""
+    if req.chat not in chats or store.by_key(req.key) is not None:
+        return
+    if forced_quote is not None:
+        req.quote_ts = forced_quote
+    where = route(req, chats, out_events)
+    if where.repo is None:
+        from . import notify
+        for contest, text in where.asks:
+            _say(sig, req.chat, text, contest=str(contest), quote=(req.ts, req.author),
+                 meta={"origin": "agent-ask", "contest": notify.contest_name(contest), "request": req.key})
+        return
+    req.text = where.text
+    status, why = admit(req, store, now)
+    job = store.add(req, where.repo, where.contest, status if status != "refused" else "failed")
+    if job is None:
+        return
+    if status == "refused":
+        store.update(job.id, error=why)
+        _say(sig, job, f"nie uruchamiam: {why}", quote=(req.ts, req.author))
+        return
+    if status == "waiting-approval":
+        _say(sig, job, f"czekam na zgodę Wojtka ({why})", quote=(req.ts, req.author))
+        ts = _say(sig, SELF, f"Zlecenie od {req.author_name} w „{req.chat_alias}”: „{_snippet(req.text, 80)}” "
+                             f"({why}). 👍 na tę wiadomość = uruchom.", contest=job.contest,
+                  meta={"approve": job.id})
+        store.update(job.id, approve_ts=ts)
+        return
+    position = len(store.queued(where.repo)) - 1 + len([j for j in store.running() if j.repo == str(where.repo)])
+    ack = f"przyjąłem: „{_snippet(req.text)}” · repo {Path(where.repo).name}"
+    ack += f" · kolejka: {position}" if position else " · zaczynam"
+    store.update(job.id, ack_ts=_say(sig, job, ack, quote=(req.ts, req.author)))
+
+
+def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | None = None) -> list[str]:
+    """One dispatcher round (after every timer pull): read new events, answer, finish ended jobs, start queued ones.
+
+    The first round only sets the cursor (no historical `@claude` is ever executed). Never waits for another
+    tick: a busy `agent.lock` returns at once.
+
+    Args:
+        sig: A `Signal` client (needed to reply); None → nothing happens.
+        now: Reference time. Defaults to now.
+        run: Runner for `systemd-run` / `systemctl` (signature of `subprocess.run`).
+        claude: Path of the `claude` binary. Defaults to `shutil.which("claude")`.
+
+    Returns:
+        Log lines.
+    """
+    from . import signalchats, signalstore
+    if sig is None:
+        return ["agent: Signal wyłączony"]
+    now = now or datetime.now().astimezone()
+    store = JobStore()
+    log: list[str] = []
+    with store.lock() as held:
+        if not held:
+            return ["agent: inny tick trwa"]
+        cursor = store.state().get("cursor")
+        if cursor is None:
+            store.set_state(cursor=signalstore.last_seq())
+            return ["agent: kursor ustawiony, historia pominięta"]
+        events = list(signalstore.iter_events())
+        latest = signalstore.latest(events)
+        out_events = {e["ts"]: e for e in latest if e.get("dir") == "out" and e.get("ts")}
+        by_key = {e["key"]: e for e in latest}
+        chats = signalchats.allowed(None)
+        top = int(cursor)
+        for e in sorted((e for e in latest if int(e.get("first_seq") or 0) > int(cursor)),
+                        key=lambda e: e["first_seq"]):
+            top = max(top, int(e["first_seq"]))
+            approved = approval(e, store)
+            if approved:
+                store.update(approved, status="queued")
+                log.append(f"agent: zatwierdzone {approved}")
+                continue
+            item = parse(e)
+            if isinstance(item, Request):
+                _accept(item, sig, store, chats, out_events, now)
+            elif isinstance(item, Command):
+                log += handle_command(item, sig, store, run=run)
+            elif e.get("kind") == "message" and (e.get("quote") or {}).get("ts") in out_events:
+                meta = out_events[e["quote"]["ts"]].get("meta") or {}
+                original = by_key.get(str(meta.get("request") or ""))
+                if meta.get("origin") == "agent-ask" and original is not None:
+                    first = parse(original)
+                    if isinstance(first, Request):
+                        _accept(first, sig, store, chats, out_events, now, forced_quote=e["quote"]["ts"])
+        store.set_state(cursor=top)
+        for job in store.running():
+            if not unit_active(job, run):
+                finish(job, sig, store)
+                log.append(f"agent: zakończone {job.id}")
+        for job in [j for j in store.all() if j.reply_pending and j.status in ("done", "failed", "stopped")]:
+            _send_reply(job, sig, store)
+        if store.enabled():
+            busy = {j.repo for j in store.running()}
+            for repo in sorted({j.repo for j in store.all() if j.status == "queued"} - busy):
+                job = store.queued(Path(repo))[0]
+                unit = launch(job, run=run, claude=claude)
+                log.append(f"agent: start {job.id}" if unit else f"agent: start {job.id} nieudany")
+                if unit is None:
+                    failed = store.get(job.id)
+                    _say(sig, failed, f"✗ nie udało się uruchomić: {failed.error}", quote=(job.ts, job.author))
+    return log
+
+
+def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run) -> list[str]:
+    """Placeholder until Task 8: commands are acknowledged in the log only."""
+    return [f"agent: komenda {cmd.name}"]
