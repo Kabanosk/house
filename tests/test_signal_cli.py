@@ -490,3 +490,15 @@ class UnreadStatusTest(CliCase):
         for needle in ("Signal wyłączony", "ostatni odbiór", "timeout", "odrzucono w ostatnim odbiorze: 4",
                        "magazyn: 3 zdarzeń", "techarena 3"):
             self.assertIn(needle, out)
+
+
+class AutoMigrateTest(CliCase):
+    def test_reading_command_migrates_first(self):
+        from houselib import notify
+        (notify.data_dir() / "inbox.jsonl").write_text(
+            '{"ts": 1794572848072, "chat": "self", "sender": "W", "text": "stara"}\n')
+        with mock.patch("houselib.signal.from_config", return_value=None):
+            code, out, err = self.run_cli("read", "self", "--offline")
+        self.assertEqual(code, 0)
+        self.assertIn("stara", out)
+        self.assertIn("migracja:", err)

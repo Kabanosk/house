@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from houselib import inbox, notify
+from houselib import inbox, notify, signalstore
 from tests import helpers  # noqa: F401  (never the real Signal account)
 
 OWN = "+48111"
@@ -31,6 +31,12 @@ def group_msg(ts, text, gid, name="Kuba Nowak", quote=None, own=False):
         return {"envelope": {"sourceNumber": OWN, "sourceName": "Wojciech Fiołka", "timestamp": ts,
                              "syncMessage": {"sentMessage": {**m, "destinationNumber": None}}}}
     return {"envelope": {"sourceNumber": "+48999", "sourceName": name, "timestamp": ts, "dataMessage": m}}
+
+
+def self_edit(ts, target_ts, text):
+    return {"envelope": {"sourceNumber": OWN, "sourceName": "Wojciech Fiołka", "timestamp": ts,
+                         "syncMessage": {"sentMessage": {"destinationNumber": OWN, "editMessage": {
+                             "targetSentTimestamp": target_ts, "dataMessage": {"timestamp": ts, "message": text}}}}}}
 
 
 def dm(ts, text):
@@ -89,8 +95,8 @@ class InboxTest(unittest.TestCase):
         return (c / ".house/QUESTIONS.md").read_text()
 
     def sent_question(self, c: Path, qid: str, ts: int, chat="self"):
-        with (notify.data_dir() / "sent.jsonl").open("a") as f:
-            f.write(json.dumps({"ts": ts, "contest": c.name, "question": qid, "chat": chat}) + "\n")
+        signalstore.record_out(OWN, chat, f"🤖 [x] {qid} pytanie", ts,
+                               meta={"origin": "ask", "contest": notify.contest_name(c), "question": qid})
 
     def run_inbox(self, incoming, contests=None):
         sig = FakeSignal(incoming, self.groups)
@@ -141,8 +147,8 @@ class InboxTest(unittest.TestCase):
     def test_private_chats_dropped_and_not_stored(self):
         self.run_inbox([dm(300, "Q-001: A"), group_msg(301, "Q-001: A", "gOther")])
         self.assertIn("[open] Finalne", self.qtext(self.fr))
-        stored = (notify.data_dir() / "inbox.jsonl")
-        self.assertFalse(stored.exists() and "Friend" in stored.read_text())
+        blobs = [p.read_bytes() for p in notify.data_dir().rglob("*") if p.is_file()]
+        self.assertFalse(any(b"Friend" in b or b"gOther" in b for b in blobs))
 
     def test_group_chatter_is_not_an_answer(self):
         sig, _ = self.run_inbox([group_msg(300, "q1 wyniki wyglądają ok", "gT")])
@@ -153,6 +159,63 @@ class InboxTest(unittest.TestCase):
         sig, log = self.run_inbox([self_reply(300, "ok", quote=999), self_reply(301, "just a note")])
         self.assertEqual(sig.sent, [])
         self.assertIn("[open] Finalne", self.qtext(self.fr))
+
+    def test_pull_without_running_contest(self):
+        old = self.contest(Path(self._tmp.name) / "old", "old", "Team", end="2020-01-01")
+        sig = FakeSignal([self_reply(200, "notatka")], self.groups)
+        self.assertEqual(inbox.process([old], sig), [])
+        self.assertEqual(sig.incoming, [])
+        self.assertEqual([e["text"] for e in signalstore.iter_events()], ["notatka"])
+
+    def test_toml_group_stored_not_routed(self):
+        from houselib import signalchats
+        with mock.patch.dict(os.environ, {"HOUSE_SIGNAL_CONFIG": str(Path(self._tmp.name) / "signal.toml")}):
+            signalchats.save_config({"techarena": {"id": "gTA", "name": "techarena_claude", "added": "x"}})
+            sig, log = self.run_inbox([group_msg(300, "Q-001: A", "gTA")])
+        self.assertIn("[open] Finalne", self.qtext(self.fr))
+        self.assertEqual(sig.sent, [])
+        self.assertEqual([e["chat"] for e in signalstore.iter_events() if e["dir"] == "in"], ["gTA"])
+
+    def test_done_key_is_chat_author_ts(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        self.run_inbox([self_reply(200, "B", quote=100), self_reply(201, "zwykła notatka")])
+        done = json.loads((signalstore.store_dir() / "inbox_done.json").read_text())
+        self.assertEqual(done, {f"self:{OWN}:200": "fr-2026 Q-001", f"self:{OWN}:201": None})
+
+    def test_edit_before_handling_uses_new_text(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        sig = FakeSignal([self_reply(200, "A", quote=100)], self.groups)
+        inbox.process([self.fr, self.fi], sig, scope=[self.fi])
+        self.assertIn("[open] Finalne", self.qtext(self.fr))
+        self.run_inbox([self_edit(210, 200, "B")])
+        self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+
+    def test_edit_after_handling_logged(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        self.run_inbox([self_reply(200, "A", quote=100)])
+        sig, log = self.run_inbox([self_edit(210, 200, "B")])
+        self.assertIn("A (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+        self.assertIn("Q-001: odpowiedź edytowana po zapisaniu, decyzja bez zmian", log)
+        self.assertEqual(sig.sent, [])
+        sig, log = self.run_inbox([])
+        self.assertEqual(log, [])
+
+    def test_unread_line(self):
+        from houselib import signalchats
+        with mock.patch.dict(os.environ, {"HOUSE_SIGNAL_CONFIG": str(Path(self._tmp.name) / "signal.toml")}):
+            signalchats.save_config({"techarena": {"id": "gTA", "name": "techarena_claude", "added": "x"}})
+            sig = FakeSignal([group_msg(int(datetime.now().timestamp() * 1000), "cześć", "gTA"),
+                              self_reply(int(datetime.now().timestamp() * 1000) + 1, "notatka")], self.groups)
+            log = inbox.process([self.fr], sig, reader="proj")
+        self.assertIn("signal: 1 nowa w grupach (house signal unread)", log)
+
+    def test_old_inbox_file_is_migrated_and_answered(self):
+        self.sent_question(self.fr, "Q-001", 100)
+        (notify.data_dir() / "inbox.jsonl").write_text(json.dumps(
+            {"ts": 150, "chat": "self", "sender": "Wojciech Fiołka", "text": "B", "quote_ts": 100}) + "\n")
+        self.run_inbox([])
+        self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
+        self.assertFalse((notify.data_dir() / "inbox.jsonl").exists())
 
     def test_ended_contest_skipped(self):
         old = self.contest(Path(self._tmp.name) / "old", "fr", "Team", end="2020-01-01")
@@ -200,9 +263,6 @@ class InboxTest(unittest.TestCase):
             self.assertEqual(notify.contest_name(link), "nice-name")
             self.assertEqual(notify.contest_name(self.fr), "nice-name")
             self.sent_question(link, "Q-001", 100)
-            records = [json.loads(x) for x in (notify.data_dir() / "sent.jsonl").read_text().splitlines()]
-            records[-1]["contest"] = notify.contest_name(link)
-            (notify.data_dir() / "sent.jsonl").write_text(json.dumps(records[-1]) + "\n")
             inbox.process([self.fr.resolve()], FakeSignal([self_reply(200, "B", quote=100)], self.groups))
         self.assertIn("B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
 

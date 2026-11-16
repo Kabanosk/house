@@ -46,9 +46,6 @@ class NotifyTest(unittest.TestCase):
     def spec(self, text: str):
         (self.c / ".house/spec.yaml").write_text(text)
 
-    def sent_log(self):
-        return [json.loads(x) for x in (notify.data_dir() / "sent.jsonl").read_text().splitlines()]
-
     def test_prefix(self):
         self.assertEqual(notify.prefix(self.c), "🤖 [fr-contest]")
         self.spec("notify:\n  alias: fr\n")
@@ -61,7 +58,8 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(sig.sent, [(None, "🤖 [fr] hello"), ("g1", "🤖 [fr] hello")])
         self.assertEqual(len(ts), 2)
         self.assertEqual(warnings, [])
-        self.assertEqual([(r["chat"], r["contest"]) for r in self.sent_log()], [("self", "fr-contest"), ("g1", "fr-contest")])
+        self.assertEqual([(g, m["contest"]) for (g, _), m in zip(sig.sent, sig.meta, strict=True)],
+                         [(None, "fr-contest"), ("g1", "fr-contest")])
         self.assertEqual(json.loads((notify.data_dir() / "groups.json").read_text()), {"Huawei Poland": "g1"})
 
     def test_notify_meta(self):
@@ -98,7 +96,7 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(notify.ask_new(self.c, sig=sig), ["Q-001"])
         self.assertEqual(notify.ask_new(self.c, sig=sig), [])
         self.assertEqual(len(sig.sent), 1)
-        self.assertEqual(self.sent_log()[0]["question"], "Q-001")
+        self.assertEqual(sig.meta[0]["question"], "Q-001")
         self.assertIn("Q-001", json.loads((self.c / ".house/state.json").read_text())["sent_questions"])
 
 

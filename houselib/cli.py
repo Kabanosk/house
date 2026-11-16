@@ -339,7 +339,9 @@ def cmd_inbox(args) -> int:
     scope = [contest_dir(args.name)] if args.name else None
     if scope and scope[0].resolve() not in {c.resolve() for c in everyone}:
         everyone.append(scope[0])
-    for line in inbox.process(everyone, from_config(), scope=scope) or ["no new answers"]:
+    from .signalread import reader_name
+    for line in inbox.process(everyone, from_config(), scope=scope, reader=reader_name(Path.cwd())) or \
+            ["no new answers"]:
         print(line)
     return 0
 

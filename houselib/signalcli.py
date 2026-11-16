@@ -29,8 +29,6 @@ def _client():
 
 def cmd_pull(args) -> int:
     """`house signal pull [--timeout 5]`: receive now and store every allowed message; always exit 0."""
-    for line in signalstore.ensure_migrated():
-        print(line)
     res = signalstore.pull(_client(), timeout=args.timeout)
     if res.skipped:
         print(f"pominięto odbiór: {res.skipped}")
@@ -386,13 +384,23 @@ def cmd_status(args) -> int:
     return 0
 
 
+def _migrating(func):
+    """Run `signalstore.ensure_migrated()` (old P3 files → store, idempotent) before a subcommand."""
+    def run(args) -> int:
+        for line in signalstore.ensure_migrated():
+            print(f"migracja: {line}", file=sys.stderr)
+        return func(args)
+    run.__doc__ = func.__doc__
+    return run
+
+
 def register(sub) -> None:
     """Add the `signal` command with its subcommands to the top-level subparsers of `house`."""
     sg = sub.add_parser("signal", help="team chats on Signal: read, unread, show, send, groups, allow, pull")
     ss = sg.add_subparsers(dest="signal_command", required=True)
     p = ss.add_parser("pull", help="receive now and store every allowed message")
     p.add_argument("--timeout", type=int, default=5)
-    p.set_defaults(func=cmd_pull)
+    p.set_defaults(func=_migrating(cmd_pull))
     m = ss.add_parser("migrate", help="move the old inbox.jsonl / sent.jsonl into the store (idempotent)")
     m.set_defaults(func=cmd_migrate)
     sd = ss.add_parser("send", help="send to an allowed chat (prefix 🤖, logged): send CHAT TEXT [--reply-to TS]")
@@ -401,18 +409,18 @@ def register(sub) -> None:
     sd.add_argument("--reply-to", type=int, metavar="TS", help="quote this message (timestamp from `read`)")
     sd.add_argument("--from", dest="from_", metavar="NAME", help="author of --reply-to when the ts is ambiguous")
     sd.add_argument("--file", action="append", metavar="PATH", help="attach a file (repeatable)")
-    sd.set_defaults(func=cmd_send)
+    sd.set_defaults(func=_migrating(cmd_send))
     gr = ss.add_parser("groups", help="allowed chats (alias, source, counts); --all: other groups of the account")
     gr.add_argument("--all", action="store_true")
-    gr.set_defaults(func=cmd_groups)
+    gr.set_defaults(func=_migrating(cmd_groups))
     al = ss.add_parser("allow", help="human only (terminal): let house keep and agents read a group")
     al.add_argument("name", help="group title as in Signal")
     al.add_argument("--alias", help="short name (default: from the title)")
     al.add_argument("--id", help="group id, when several groups share the title")
-    al.set_defaults(func=cmd_allow)
+    al.set_defaults(func=_migrating(cmd_allow))
     dn = ss.add_parser("deny", help="human only (terminal): stop keeping a signal.toml group (history stays)")
     dn.add_argument("alias")
-    dn.set_defaults(func=cmd_deny)
+    dn.set_defaults(func=_migrating(cmd_deny))
     rd = ss.add_parser("read", help="history of a chat (default: all allowed), newest last")
     rd.add_argument("chat", nargs="?", default="all", help="alias, self or all (default)")
     rd.add_argument("-n", type=int, default=20, help="last N after filters (0 = all)")
@@ -423,20 +431,20 @@ def register(sub) -> None:
     rd.add_argument("--thread", type=int, metavar="TS", help="the message, what it quotes and all replies")
     rd.add_argument("--json", action="store_true", help="one store event per line (no raw)")
     rd.add_argument("--offline", action="store_true", help="do not receive first")
-    rd.set_defaults(func=cmd_read)
+    rd.set_defaults(func=_migrating(cmd_read))
     sh = ss.add_parser("show", help="one message in full: quote text, reactions, replies, files")
     sh.add_argument("ts", type=int)
     sh.add_argument("--chat")
     sh.add_argument("--from", dest="from_", metavar="NAME")
     sh.add_argument("--raw", action="store_true", help="also print the signal-cli envelope")
     sh.add_argument("--offline", action="store_true", help="do not receive first")
-    sh.set_defaults(func=cmd_show)
+    sh.set_defaults(func=_migrating(cmd_show))
     un = ss.add_parser("unread", help="new messages since this project last read them (then marks them read)")
     un.add_argument("chat", nargs="?", help="alias or self (default: all)")
     un.add_argument("--peek", action="store_true", help="do not mark as read")
     un.add_argument("--as", dest="as_", metavar="NAME", help="reader name (default: contest / repo name)")
     un.add_argument("--json", action="store_true")
     un.add_argument("--offline", action="store_true", help="do not receive first")
-    un.set_defaults(func=cmd_unread)
+    un.set_defaults(func=_migrating(cmd_unread))
     st = ss.add_parser("status", help="last receive, errors, dropped count, store size, chats, readers")
-    st.set_defaults(func=cmd_status)
+    st.set_defaults(func=_migrating(cmd_status))

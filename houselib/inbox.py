@@ -1,28 +1,29 @@
 """Answers from Signal: quote-replies (or `Q-007: B`, `fr Q-007: B`) in Note to Self or a contest's group.
 
-Only Note to Self and the groups of running contests are kept; every other conversation of the account is
-dropped before anything is stored. The first answer (earliest Signal timestamp) wins. Receiving consumes
-messages from signal-cli, so everything kept is written to `inbox.jsonl` first and handled from there; a message
-meant for a contest outside the current scope stays there until a run that includes that contest.
+`house inbox` is one reader of the message store (`signalstore`): it receives through `signalstore.pull` (every
+allowed chat, also when no contest is running, so the linked device stays active) and then applies answers from
+the stored events. The first answer (earliest Signal timestamp) wins. A message meant for a contest outside the
+current scope stays unhandled until a run that includes that contest.
 
 Used by `house inbox [contest]` (all running contests, or one), by the session-start hook (scope = the current
-contest) and `house deadlines` (default answers for critical questions). Agents never need to call it; they find
-answers in QUESTIONS.md / DECISIONS.md. Rules:
+contest), `house night` and `house deadlines` (default answers for critical questions). Agents never need to call
+it; they find answers in QUESTIONS.md / DECISIONS.md. Rules:
 
-* Answer forms: quote-reply to a message house sent (the quoted `sent.jsonl` entry names contest and question),
-  or typed `[alias] Q-007: answer` (colon required; `Q7` and `Q-007` are equal; alias needed only when several
+* Answer forms: quote-reply to a message house sent (its `out` event's `meta` names contest and question), or
+  typed `[alias] Q-007: answer` (colon required; `Q7` and `Q-007` are equal; alias needed only when several
   running contests have that question open). A reply without a match is ignored as ordinary chat.
+* Only Note to Self and groups of running contests can answer; groups allowed through `signal.toml` are stored
+  and readable but never routed as answers.
 * First answer wins: messages are handled in order of Signal timestamp and only an `open` question accepts an
-  answer; later answers get a "już rozstrzygnięte" reply.
-* Privacy filter: only Note to Self and groups of running contests are stored; other chats are dropped.
+  answer; later answers get a "już rozstrzygnięte" reply. An edit of a not yet handled answer replaces its text;
+  an edit after it was recorded changes nothing (it is logged).
 * Running contest = spec `timeline.end` empty, unparsable or in the future (a bare date ends at end of that day).
-* Files in the data dir (~/.local/share/house, or $HOUSE_DATA_DIR): `inbox.jsonl` (kept messages),
-  `inbox_done.json` (handled timestamps), `inbox.lock` (one `house inbox` at a time), `sent.jsonl` (see notify).
+* Files: `signal/inbox_done.json` in the data dir (handled event key → "<contest> Q-###" or null) and
+  `inbox.lock` (one `house inbox` at a time).
 """
 import fcntl
-import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -37,7 +38,7 @@ SKIPPED_LOCKED = "another `house inbox` is running; skipped"
 
 @dataclass
 class Message:
-    """A kept Signal message, as stored in `inbox.jsonl`.
+    """A stored Signal message as seen by the answer router.
 
     Attributes:
         ts: Signal timestamp in milliseconds; unique id of the message and the ordering key (earliest wins).
@@ -45,6 +46,7 @@ class Message:
         sender: Display name or number of the author ("?" if unknown).
         text: Message body.
         quote_ts: Timestamp of the message this one quotes (a quote-reply), else None.
+        key: The store key `chat:author:ts` (marks it as handled).
     """
 
     ts: int
@@ -52,6 +54,7 @@ class Message:
     sender: str
     text: str
     quote_ts: int | None = None
+    key: str = ""
 
 
 def _end_of(value) -> datetime | None:
@@ -94,57 +97,6 @@ def all_running() -> list[Path]:
     return running(registry.contests())
 
 
-def _lines(name: str) -> list[dict]:
-    """Read a JSON-lines file of the data dir, skipping unparsable lines; [] if it does not exist."""
-    path = notify.data_dir() / name
-    if not path.exists():
-        return []
-    out = []
-    for line in path.read_text().splitlines():
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
-
-
-def _group_ids(sig, contests: list[Path]) -> dict[str, list[Path]]:
-    """Map Signal group id to the contests using it (spec `notify.signal_group`); unresolved groups are omitted."""
-    by_group: dict[str, list[Path]] = {}
-    for c in contests:
-        name = (specmod.get(specmod.load_spec(c / ".house"), "notify") or {}).get("signal_group")
-        if name:
-            gid, _ = notify.resolve_group(sig, str(name))
-            if gid:
-                by_group.setdefault(gid, []).append(c)
-    return by_group
-
-
-def pull(sig, contests: list[Path]) -> list[Message]:
-    """Receive through the store (`signalstore.pull`) and copy new text messages into `inbox.jsonl`.
-
-    Args:
-        sig: A `Signal` client.
-        contests: Every running contest; their groups (plus Note to Self) are the chats received.
-
-    Returns:
-        The messages added to `inbox.jsonl` in this call.
-    """
-    from . import signalchats, signalstore
-    before = signalstore.last_seq()
-    signalstore.pull(sig, signalchats.allowed(sig, contests))
-    kept = [Message(int(e["ts"]), str(e["chat"]), str((e.get("sender") or {}).get("name") or "?"),
-                    str(e.get("text") or ""), (e.get("quote") or {}).get("ts"))
-            for e in signalstore.iter_events(raw=False)
-            if int(e.get("seq") or 0) > before and e.get("kind") == "message" and e.get("dir") in ("in", "own")]
-    path = notify.data_dir() / "inbox.jsonl"
-    with path.open("a") as f:
-        for m in kept:
-            f.write(json.dumps(asdict(m), ensure_ascii=False) + "\n")
-    path.chmod(0o600)
-    return kept
-
-
 def _open(c: Path, qid: str) -> bool:
     """Tell whether contest `c` has question `qid` with status open."""
     path = c / ".house/QUESTIONS.md"
@@ -163,7 +115,7 @@ def route(m: Message, contests: list[Path], by_group: dict[str, list[Path]], sen
         m: The message to classify.
         contests: Every running contest.
         by_group: Group id to contests, as built from spec `notify.signal_group`.
-        sent: Records of `sent.jsonl` keyed by Signal timestamp (keys "contest" and "question").
+        sent: Questions house sent, keyed by Signal timestamp: {"contest": name, "question": "Q-###"}.
 
     Returns:
         A tuple (contest path, question id such as "Q-007", answer text) for an unambiguous answer; a str with
@@ -199,7 +151,7 @@ def _reply(sig, contest: Path | None, chat: str, text: str) -> None:
              meta={"origin": "inbox-reply", "contest": notify.contest_name(contest) if contest else None})
 
 
-def _handle(m: Message, sig, contests, scope, by_group, sent) -> tuple[bool, str | None]:
+def _handle(m: Message, sig, contests, scope, by_group, sent) -> tuple[bool, str | None, str | None]:
     """Route one message and apply it; return (done, log line).
 
     Args:
@@ -208,52 +160,79 @@ def _handle(m: Message, sig, contests, scope, by_group, sent) -> tuple[bool, str
         contests: Every running contest (for routing).
         scope: Contests in which answers may be applied now.
         by_group: Group id to contests.
-        sent: Records of `sent.jsonl` keyed by timestamp.
+        sent: Questions house sent, keyed by Signal timestamp.
 
     Returns:
-        done is False only when the answer belongs to a contest outside `scope` (kept for a later run);
-        the log line is None when there is nothing to report.
+        (done, log line, answered): done is False only when the answer belongs to a contest outside `scope`
+        (kept for a later run); the log line is None when there is nothing to report; answered is
+        "<contest> Q-###" when this message was recorded as the answer, else None.
     """
     routed = route(m, contests, by_group, sent)
     if routed is None:
-        return True, None
+        return True, None, None
     if isinstance(routed, str):
         _reply(sig, None, m.chat, routed)
-        return True, f"asked to disambiguate a {m.chat} message"
+        return True, f"asked to disambiguate a {m.chat} message", None
     contest, qid, text = routed
     if contest not in scope:
-        return False, None
+        return False, None, None
     did = questions.answer(contest / ".house", qid, text, m.sender, "Signal")
     if did:
         _reply(sig, contest, m.chat, f"✓ {qid}: {questions.clean_answer(text)} ({m.sender})")
-        return True, f"{notify.contest_name(contest)} {qid} answered by {m.sender} → {did}"
+        return True, f"{notify.contest_name(contest)} {qid} answered by {m.sender} → {did}", \
+            f"{notify.contest_name(contest)} {qid}"
     path = contest / ".house/QUESTIONS.md"
     q = next((q for q in questions.parse(path.read_text()) if q.id == qid), None) if path.exists() else None
     if q is not None:
         _reply(sig, contest, m.chat, f"{qid} już rozstrzygnięte: {q.answer}")
-    return True, None
+    return True, None, None
 
 
-def process(contests: list[Path], sig, scope: list[Path] | None = None) -> list[str]:
-    """Pull Signal and apply the answers found in the inbox; the entry point of `house inbox` and the hook.
+def _author_prefix(key: str) -> str:
+    """`chat:author` part of a store key (`chat:author:ts`)."""
+    return key.rsplit(":", 1)[0]
 
-    Takes an exclusive lock (`inbox.lock`) so only one run works at a time. Unhandled messages from earlier runs
-    are processed too, in timestamp order; each handled message is recorded in `inbox_done.json`. A failure on
-    one message is logged and skipped, never raised.
+
+def _pending(events: list[dict], chats: set[str], done: dict) -> tuple[list[Message], list[dict]]:
+    """Unhandled messages and edits from the chats that can answer, oldest first."""
+    from .signalstore import latest
+    msgs, edits = [], []
+    for e in sorted(latest(events), key=lambda e: e.get("ts") or 0):
+        if e.get("chat") not in chats or e.get("dir") not in ("in", "own") or e.get("key") in done:
+            continue
+        if e.get("kind") == "message":
+            msgs.append(Message(int(e["ts"]), str(e["chat"]), str((e.get("sender") or {}).get("name") or "?"),
+                                str(e.get("text") or ""), (e.get("quote") or {}).get("ts"), str(e["key"])))
+        elif e.get("kind") == "edit" and (e.get("target") or {}).get("ts") is not None:
+            edits.append(e)
+    return msgs, edits
+
+
+def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeout: int = 1,
+            max_messages: int | None = None, reader: str | None = None) -> list[str]:
+    """Receive Signal into the store and apply the answers found there; the entry point of `house inbox`.
+
+    Takes an exclusive lock (`inbox.lock`) so only one run works at a time. Receives even when no contest is
+    running. Unhandled messages from earlier runs are processed too, in timestamp order; each handled event is
+    recorded in `signal/inbox_done.json`. A failure on one message is logged and skipped, never raised.
 
     Args:
         contests: Every contest that may receive answers; routing and the group filter need all of them. Ended
             contests are dropped here.
         sig: A `Signal` client, or None for "Signal not configured" (nothing happens).
         scope: Contests in which answers are applied now. Defaults to None, meaning all of `contests`. A message
-            for a running contest outside `scope` stays in the inbox for a later run that includes it.
+            for a running contest outside `scope` stays unhandled for a later run that includes it.
+        timeout: Receive timeout in seconds. Defaults to 1.
+        max_messages: Receive at most this many (the hook uses 200). Defaults to None.
+        reader: When given, a last line tells how many group messages are unread for this reader.
 
     Returns:
-        Human-readable log lines (answers applied, disambiguation asked, skipped messages). Empty when there is
-        nothing to do, `sig` is None or no contest is running; `[SKIPPED_LOCKED]` if another run holds the lock.
+        Human-readable log lines (answers applied, disambiguation asked, edits after recording, migration).
+        Empty when there is nothing to report or `sig` is None; `[SKIPPED_LOCKED]` if another run holds the lock.
     """
+    from . import signalchats, signalstore
     contests = running(contests)
-    if sig is None or not contests:
+    if sig is None:
         return []
     scope_set = {Path(c).resolve() for c in (scope if scope is not None else contests)}
     lock = (notify.data_dir() / "inbox.lock").open("w")
@@ -262,32 +241,42 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None) -> list[
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return [SKIPPED_LOCKED]
-        pull(sig, contests)
-        done_path = notify.data_dir() / "inbox_done.json"
-        try:
-            done = set(json.loads(done_path.read_text()))
-        except (OSError, ValueError):
-            done = set()
-        by_group = _group_ids(sig, contests)
-        sent = {int(r["ts"]): r for r in _lines("sent.jsonl") if str(r.get("ts", "")).isdigit()}
+        log = list(signalstore.ensure_migrated())
+        chats = signalchats.allowed(sig, contests)
+        signalstore.pull(sig, chats, timeout=timeout, max_messages=max_messages)
+        by_group = {gid: list(c.contests) for gid, c in chats.items() if c.contests}
+        done_path = signalstore.store_dir() / "inbox_done.json"
+        done = signalstore.read_json(done_path, {})
+        done = done if isinstance(done, dict) else {}
+        events = list(signalstore.iter_events(raw=False))
+        sent = {int(e["ts"]): {"contest": (e.get("meta") or {}).get("contest"),
+                               "question": (e.get("meta") or {}).get("question")}
+                for e in events if e.get("dir") == "out" and e.get("ts") and (e.get("meta") or {}).get("question")}
         in_scope = [c for c in contests if Path(c).resolve() in scope_set]
-        log = []
-        for raw in sorted(_lines("inbox.jsonl"), key=lambda r: r.get("ts", 0)):
+        msgs, edits = _pending(events, {signalchats.SELF, *by_group}, done)
+        by_key = {m.key: m for m in msgs}
+        for e in edits:
+            original = f"{_author_prefix(str(e['key']))}:{e['target']['ts']}"
+            if original in by_key:
+                by_key[original].text = str(e.get("text") or "")
+            elif done.get(original):
+                log.append(f"{str(done[original]).split()[-1]}: odpowiedź edytowana po zapisaniu, decyzja bez zmian")
+            done[str(e["key"])] = None
+        for m in msgs:
             try:
-                m = Message(**raw)
-            except TypeError:
-                continue
-            if m.ts in done:
-                continue
-            try:
-                finished, line = _handle(m, sig, contests, in_scope, by_group, sent)
+                finished, line, answered = _handle(m, sig, contests, in_scope, by_group, sent)
             except Exception as e:  # noqa: BLE001 — one bad message must never block the inbox
-                finished, line = True, f"skipped a message ({type(e).__name__}: {e})"
+                finished, line, answered = True, f"skipped a message ({type(e).__name__}: {e})", None
             if line:
                 log.append(line)
             if finished:
-                done.add(m.ts)
-                done_path.write_text(json.dumps(sorted(done)) + "\n")
+                done[m.key] = answered
+        signalstore.write_json(done_path, done)
+        if reader:
+            from . import signalread
+            n = sum(c for alias, c in signalread.unread_counts(reader).items() if alias != signalchats.SELF)
+            if n:
+                log.append(f"signal: {signalread.nowe(n)} w grupach (house signal unread)")
         return log
     finally:
         lock.close()
