@@ -17,6 +17,17 @@ Kolejność uzgodniona 2026-11-05/06. Każdy projekt dostaje osobny dokument do 
    `core/protocols/demo-video.md`.
 
 ## Pomysły na później
+- **(priorytet) Czytanie grup Signala**: dziś odczyt grupy wymaga ręcznego skryptu. Braki widoczne 2026-11-16:
+  `house inbox` zatrzymuje tylko grupy trwających konkursów (grupa `techarena_claude` nie jest podpięta pod żaden,
+  więc jej wiadomości zostałyby odrzucone), `inbox.extract` gubi tekst cytowanej wiadomości (trzeba było go szukać
+  w logach sesji), a wiadomość wysłana poza `notify.send` nie trafia do `sent.jsonl`, więc cytatu na nią nie da się
+  dopasować. Kierunek: jeden odbiór zapisujący wszystkie dozwolone grupy (lista w konfiguracji, nie tylko konkursy)
+  razem z tekstem cytatu; komenda do czytania historii grupy (ostatnie N, od godziny, od osoby) bez ponownego
+  `receive`; każda wysłana wiadomość, też ręczna, zapisana w `sent.jsonl`; nowe wiadomości pokazywane na starcie sesji.
+- **(priorytet) Wyszukiwanie lokalne**: szybkie szukanie po logach sesji Claude/Codex (`~/.claude/projects/**/*.jsonl`),
+  repozytoriach konkursów, `.house/` i skrzynce Signala. Dziś `grep` po plikach jsonl pada (limity złożoności ugrep,
+  tekst zapisany jako escapowany unicode). Kierunek: indeks SQLite FTS5 z tekstem wyciągniętym z jsonl,
+  `house search <fraza>` z filtrami (projekt, sesja, czas), wyniki z kontekstem i identyfikatorem sesji.
 - **Kompresja ról (role compression) / fabryka agentów**: zacząć od małego rejestru profili (project-lead, fullstack, ai-engineer,
   qa-demo-critic, researcher), a frontend/DevOps/dane/prezentację traktować jako skille; osobnego specjalistę
   generować dopiero, gdy ten obszar powtarzalnie jest wąskim gardłem (hiring agent).
