@@ -29,7 +29,9 @@ import hashlib
 import os
 import re
 import shlex
+import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -185,9 +187,16 @@ def _locked(contest: Path):
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def next_id(rows: list[dict]) -> str:
-    """Return the next free experiment id (`E-001`, `E-002`, …) after the highest one in rows."""
-    nums = [int(m.group(1)) for r in rows if (m := re.fullmatch(r"E-(\d+)", r.get("id", "")))]
+def next_id(rows: list[dict], taken: set[str] | frozenset = frozenset()) -> str:
+    """Return the next free experiment id (`E-001`, `E-002`, …) after the highest one in rows and in `taken`.
+
+    Args:
+        rows: Experiment rows.
+        taken: Ids used elsewhere (existing `refs/exp/*` and `.worktrees/exp-*`), so an id is never reused even
+            when csv rows were lost.
+    """
+    ids = [r.get("id", "") for r in rows] + list(taken)
+    nums = [int(m.group(1)) for i in ids if (m := re.fullmatch(r"E-(\d+)", i))]
     return f"E-{max(nums, default=0) + 1:03d}"
 
 
@@ -273,21 +282,32 @@ def _requirements(contest: Path) -> tuple[str, str]:
     return sense, scorer
 
 
-def scorer_hash(contest: Path) -> str:
-    """Fingerprint the current local scorer: its command and the content of the files it names.
+def _snapshot(contest: Path) -> dict[str, bytes]:
+    """Read the scorer files (`guard.scorer_files`: tracked files only) from the contest checkout."""
+    return {rel: (contest / rel).read_bytes() for rel in guard.scorer_files(contest) if (contest / rel).is_file()}
 
-    Rows with another fingerprint were scored differently and are not compared (`best`, `stagnation`).
+
+def _fingerprint(command: str, snap: dict[str, bytes]) -> str:
+    """12 hex characters of a sha256 over the scorer command and the snapshot's files."""
+    h = hashlib.sha256(command.encode())
+    for rel in sorted(snap):
+        h.update(b"\0" + rel.encode() + b"\0" + snap[rel])
+    return h.hexdigest()[:12]
+
+
+def scorer_hash(contest: Path) -> str:
+    """Fingerprint the current local scorer: its command and its files (`guard.scorer_files`).
+
+    Rows with another fingerprint were scored differently and are not compared (`best`, `stagnation`). Data and
+    outputs named in the command are not part of it (only files tracked by git are).
 
     Args:
         contest: Contest checkout root.
 
     Returns:
-        12 hex characters of a sha256 over the command and each scorer file (`guard.scorer_files`).
+        12 hex characters.
     """
-    h = hashlib.sha256(str(specmod.get(_spec(contest), "scoring.local_scorer") or "").encode())
-    for rel in sorted(guard.scorer_files(contest)):
-        h.update(b"\0" + rel.encode() + b"\0" + (contest / rel).read_bytes())
-    return h.hexdigest()[:12]
+    return _fingerprint(str(specmod.get(_spec(contest), "scoring.local_scorer") or ""), _snapshot(contest))
 
 
 def _worktree(contest: Path, exp_id: str) -> Path:
@@ -310,13 +330,29 @@ def _commit_of(rows: list[dict], parent: str, contest: Path) -> str:
     return out.stdout.strip()
 
 
+def previous_best(rows: list[dict], scorer: str, sense: str) -> dict | None:
+    """The best keep of the most recent earlier scorer, used after a scorer change until a new keep exists.
+
+    Args:
+        rows: Experiment rows.
+        scorer: Current scorer hash.
+        sense: `"max"` or `"min"`.
+
+    Returns:
+        That row, or None when no earlier scorer has a keep.
+    """
+    older = [r["scorer"] for r in rows if r["status"] in SCORED and r["scorer"] and r["scorer"] != scorer]
+    return best(rows, older[-1], sense) if older else None
+
+
 def _resolve(contest: Path, rows: list[dict], parent: str) -> tuple[str, str]:
-    """Turn `--from` into `(parent label for the csv, commit)`; `best` falls back to HEAD without a keep."""
+    """Turn `--from` into `(parent label for the csv, commit)`. `best` is the best comparable keep; after a scorer
+    change, the previous scorer's best (its child becomes the first keep of the new scorer); else HEAD."""
     if parent == "best":
         sense = direction(_spec(contest))
         if sense is None:
             raise ValueError("set scoring.direction (max or min) in .house/spec.yaml")
-        b = best(rows, scorer_hash(contest), sense)
+        b = best(rows, scorer_hash(contest), sense) or previous_best(rows, scorer_hash(contest), sense)
         if b:
             return b["id"], b["commit"]
         parent = "HEAD"
@@ -367,12 +403,18 @@ def new(contest: Path, parent: str = "best", idea: str = "", note: str = "") -> 
     with _locked(contest):
         rows = load(contest)
         label, commit = _resolve(contest, rows, parent)
-        eid = next_id(rows)
+        refs = _git(contest, "for-each-ref", "--format=%(refname:strip=2)", "refs/exp/").stdout.split()
+        dirs = [p.name.removeprefix("exp-") for p in (contest / ".worktrees").glob("exp-E-*")]
+        eid = next_id(rows, set(refs) | set(dirs))
         wt = _worktree(contest, eid)
         out = _git(contest, "worktree", "add", "--detach", "-q", str(wt), commit)
         if out.returncode != 0:
             raise RuntimeError(f"git worktree add failed: {out.stderr.strip()}")
-        _link_shared(contest, wt)
+        try:
+            _link_shared(contest, wt)
+        except BaseException:
+            _remove_worktree(contest, wt)
+            raise
         rows.append({**dict.fromkeys(COLUMNS, ""), "id": eid, "parent": label, "idea_id": idea, "status": "new",
                      "time": _now(), "note": note})
         _write(contest, rows)
@@ -410,16 +452,94 @@ def _command_text(command: list[str] | str) -> str | list[str]:
     return command
 
 
+class _Interrupted(KeyboardInterrupt):
+    """SIGTERM/SIGHUP during `run` (e.g. the agent's tool timeout), raised like Ctrl+C."""
+
+
+@contextlib.contextmanager
+def _signals_interrupt():
+    """Turn SIGTERM and SIGHUP into `_Interrupted` while running (main thread only; SIGINT already raises)."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum, frame):
+        raise _Interrupted(signum)
+    old = {sig: signal.signal(sig, handler) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for sig, h in old.items():
+            signal.signal(sig, h)
+
+
+def _alive(pid: int) -> bool:
+    """Tell whether a process with this pid exists."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OverflowError):
+        return True
+    return True
+
+
+def _pidfile(contest: Path, exp_id: str) -> Path:
+    """`.house/experiments/E-###.pid`: the process running the experiment."""
+    return _state_dir(contest) / f"{exp_id}.pid"
+
+
+def _claim(contest: Path, exp_id: str) -> dict:
+    """Mark a `new` experiment (or a `running` one whose process is gone) as `running` by this process."""
+    with _locked(contest):
+        rows = load(contest)
+        r = next((r for r in rows if r["id"] == exp_id), None)
+        if r is None:
+            raise ValueError(f"unknown experiment {exp_id}")
+        if r["status"] == "running":
+            try:
+                pid = int(_pidfile(contest, exp_id).read_text().strip())
+            except (OSError, ValueError):
+                pid = None
+            if pid and _alive(pid):
+                raise ValueError(f"{exp_id} is running (pid {pid}); wait for it or start a new one")
+        elif r["status"] != "new":
+            raise ValueError(f"{exp_id} already ran ({r['status']}); start a new one with --from {exp_id}")
+        if not _worktree(contest, exp_id).is_dir():
+            raise ValueError(f"worktree of {exp_id} is missing ({_worktree(contest, exp_id)})")
+        r["status"] = "running"
+        _write(contest, rows)
+        _pidfile(contest, exp_id).write_text(str(os.getpid()))
+        return dict(r)
+
+
+def _record(contest: Path, exp_id: str, commit_csv: bool = True, **fields) -> None:
+    """Update one row under the lock and (by default) commit experiments.csv on the contest checkout."""
+    with _locked(contest):
+        rows = load(contest)
+        for row in rows:
+            if row["id"] == exp_id:
+                row.update(fields)
+        _write(contest, rows)
+        if commit_csv:
+            score = fields.get("score")
+            checks._git_commit(contest / ".house", [_csv_path(contest)],
+                               f"chore(exp): {exp_id} {fields.get('status', '')}" + (f" {score}" if score else ""))
+
+
 def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None = None) -> Result:
     """Run a `new` experiment: commit its change, run the command with the budget, score it, keep or revert.
 
-    Steps: everything in the worktree is committed (`refs/exp/E-###` pins it); a change to a protected file
-    (scorer, frozen acceptance test) against the parent makes it a `crash` ("tampered") without running; the
-    command runs in the worktree in its own process group, killed at the budget (`timeout`); a non-zero exit is a
-    `crash`; the scorer then runs in the worktree with the contest checkout's scorer files, and its score is
-    compared with the parent's: strictly better (or no comparable parent score) → `keep`, else `revert`. The row
-    is updated and `.house/experiments.csv` is committed on the contest checkout; the worktree is kept only for
-    `keep`.
+    Steps: the row is claimed as `running` (a second run of the same id is refused while this process lives);
+    everything in the worktree is committed (`refs/exp/E-###` pins it); a change to a protected file (scorer,
+    its imported helpers, frozen acceptance test; renames included) against the parent makes it a `crash`
+    ("tampered") without running; the scorer files are snapshotted from the contest checkout; the command runs in
+    the worktree in its own process group, killed at the budget (`timeout`); a non-zero exit is a `crash`; the
+    scorer then runs in the worktree with the snapshot (never writing through symlinks), and its score is compared
+    with the parent's: strictly better (or no comparable parent score) → `keep`, else `revert`. If the contest's
+    scorer changed during the run, it is a `crash`. The row is updated and `.house/experiments.csv` committed on
+    the contest checkout; the worktree is kept only for `keep`. SIGINT/SIGTERM/SIGHUP kill the command and
+    record `crash` "interrupted".
 
     Args:
         contest: Contest checkout root.
@@ -431,47 +551,69 @@ def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None
         The `Result`.
 
     Raises:
-        ValueError: Unknown id, an id that already ran, a missing worktree, or the spec lacks
-            `scoring.direction` / `scoring.local_scorer`.
+        ValueError: Unknown id, an id that already ran or is running, a missing worktree, large untracked files,
+            or the spec lacks `scoring.direction` / `scoring.local_scorer`. The row stays runnable.
+        RuntimeError: The experiment's change could not be committed (the command did not run).
+        KeyboardInterrupt: Interrupted; the row was recorded as `crash`.
     """
     sense, scorer_cmd = _requirements(contest)
     spec = _spec(contest)
     if budget is None:
         budget = parse_budget(str(specmod.get(spec, "exp.budget") or DEFAULT_BUDGET))
     scorer_timeout = int(float(specmod.get(spec, "exp.scorer_minutes") or DEFAULT_SCORER_MINUTES) * 60)
-    rows = load(contest)
-    r = next((r for r in rows if r["id"] == exp_id), None)
-    if r is None:
-        raise ValueError(f"unknown experiment {exp_id}")
-    if r["status"] != "new":
-        raise ValueError(f"{exp_id} already ran ({r['status']}); start a new one with --from {exp_id}")
+    r = _claim(contest, exp_id)
     wt = _worktree(contest, exp_id)
-    if not wt.is_dir():
-        raise ValueError(f"worktree of {exp_id} is missing ({wt})")
+    state = {"commit": ""}
+    try:
+        with _signals_interrupt():
+            return _run_claimed(contest, r, wt, command, budget, sense, scorer_cmd, scorer_timeout, state)
+    except KeyboardInterrupt:
+        _record(contest, exp_id, status="crash", commit=state["commit"], budget=str(budget),
+                note="; ".join(x for x in (r["note"], "interrupted") if x))
+        _remove_worktree(contest, wt)
+        raise
+    except BaseException:
+        _record(contest, exp_id, commit_csv=False, status="new")
+        raise
+    finally:
+        _pidfile(contest, exp_id).unlink(missing_ok=True)
+
+
+def _run_claimed(contest: Path, r: dict, wt: Path, command, budget: int, sense: str, scorer_cmd: str,
+                 scorer_timeout: int, state: dict) -> Result:
+    """Body of `run` once the row is claimed; `state["commit"]` is set as soon as the change is committed."""
+    exp_id = r["id"]
+    rows = load(contest)
     parent_commit = _commit_of(rows, r["parent"], contest)
     parent_row = next((p for p in rows if p["id"] == r["parent"]), None)
-
     big = _large_untracked(wt)
     if big:
         raise ValueError(f"{exp_id}: large untracked files would be committed: {', '.join(big)}; "
                          "add them to .gitignore or delete them, then run again")
-    _git(wt, "add", "-A")
+    added = _git(wt, "add", "-A")
+    if added.returncode != 0:
+        raise RuntimeError(f"git add failed in {wt}: {added.stderr.strip()}")
     if _git(wt, "diff", "--cached", "--quiet").returncode != 0:
         msg = f"exp {exp_id}: {r['note'] or r['idea_id'] or 'change'}"
-        _git(wt, "commit", "-q", "--no-verify", "-m", msg)
+        done = _git(wt, "commit", "-q", "--no-verify", "-m", msg)
+        if done.returncode != 0:
+            raise RuntimeError(f"git commit of {exp_id} failed: {(done.stderr or done.stdout).strip()}")
     commit = _git(wt, "rev-parse", "HEAD").stdout.strip()
     _git(contest, "update-ref", f"refs/exp/{exp_id}", commit)
+    state["commit"] = commit
 
-    current = scorer_hash(contest)
+    snap = _snapshot(contest)
+    current = _fingerprint(scorer_cmd, snap)
     env = {"HOUSE_EXP": exp_id, "HOUSE_CONTEST": str(contest)}
     cmd = _command_text(command)
-    log = _state_dir(contest) / f"{exp_id}.log"
     shown = cmd if isinstance(cmd, str) else shlex.join(cmd)
+    log = _state_dir(contest) / f"{exp_id}.log"
     log_parts = [f"$ {shown}", f"budget: {budget} s"]
     score = parent_score = None
     duration = 0.0
-    changed = set(_git(contest, "diff", "--name-only", parent_commit, commit).stdout.split())
-    tampered = sorted(changed & set(guard.protected_paths(contest)))
+    out = _git(contest, "diff", "--name-only", "--no-renames", "-z", parent_commit, commit).stdout
+    changed = set(out.split("\0")) - {""}
+    tampered = sorted(changed & (set(guard.protected_paths(contest)) | set(snap)))
     if tampered:
         status, why = "crash", "tampered: " + ", ".join(tampered) + " (scorer/acceptance tests must not change)"
     else:
@@ -484,7 +626,9 @@ def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None
         elif code != 0:
             status, why = "crash", f"exit {code}"
         else:
-            status, why, score = _score_in(contest, wt, commit, scorer_cmd, scorer_timeout, env, log_parts)
+            status, why, score = _score_in(wt, commit, scorer_cmd, snap, scorer_timeout, env, log_parts)
+            if status is None and scorer_hash(contest) != current:
+                status, why, score = "crash", "scorer changed during the run (contest checkout); not comparable", None
             if status is None:
                 if (parent_row and parent_row["status"] in SCORED and parent_row["scorer"] == current
                         and _score(parent_row) is not None):
@@ -492,37 +636,41 @@ def run(contest: Path, exp_id: str, command: list[str] | str, budget: int | None
                 better = parent_score is None or _better(score, parent_score, sense)
                 status = "keep" if better else "revert"
                 why = "" if better else f"not better than {r['parent']} ({parent_score})"
+    if not snap:
+        why = "; ".join(x for x in (why, "warning: no scorer files protected; list them in scoring.scorer_files")
+                        if x)
     log_parts.append(f"status: {status} {why}".rstrip())
     _write_log(log, log_parts)
     note = "; ".join(x for x in (r["note"], why) if x)
-    with _locked(contest):
-        rows = load(contest)
-        for row in rows:
-            if row["id"] == exp_id:
-                row.update(commit=commit, budget=str(budget), duration=f"{duration:.1f}", status=status,
-                           score="" if score is None else repr(score), scorer=current, note=note, command=shown)
-        _write(contest, rows)
-        checks._git_commit(contest / ".house", [_csv_path(contest)],
-                           f"chore(exp): {exp_id} {status}" + ("" if score is None else f" {score}"))
+    _record(contest, exp_id, commit=commit, budget=str(budget), duration=f"{duration:.1f}", status=status,
+            score="" if score is None else repr(score), scorer=current, note=note, command=shown)
     if status != "keep":
         _remove_worktree(contest, wt)
     return Result(exp_id, status, score, parent_score, note, log)
 
 
-def _score_in(contest: Path, wt: Path, commit: str, scorer_cmd: str, timeout: int, env: dict,
+def _inside(wt: Path, rel: str) -> bool:
+    """Tell whether writing `wt/rel` stays inside the worktree (no symlinked file or directory on the way)."""
+    root = os.path.realpath(wt)
+    return os.path.realpath(wt / rel).startswith(root + os.sep)
+
+
+def _score_in(wt: Path, commit: str, scorer_cmd: str, snap: dict[str, bytes], timeout: int, env: dict,
               log_parts: list[str]) -> tuple[str | None, str, float | None]:
-    """Run the scorer in the worktree with the contest's scorer files; returns (crash status or None, why, score)."""
-    files = guard.scorer_files(contest)
-    for rel in files:
-        (wt / rel).parent.mkdir(parents=True, exist_ok=True)
-        (wt / rel).write_bytes((contest / rel).read_bytes())
+    """Run the scorer in the worktree with the snapshot's files; returns (crash status or None, why, score)."""
+    written = []
     try:
+        for rel, data in snap.items():
+            if _inside(wt, rel):
+                (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+                (wt / rel).write_bytes(data)
+                written.append(rel)
         code, output, _ = checks._run_cmd(scorer_cmd, wt, timeout, extra_env=env)
     finally:
-        for rel in files:
+        for rel in written:
             if _git(wt, "cat-file", "-e", f"{commit}:{rel}").returncode == 0:
                 _git(wt, "checkout", commit, "--", rel)
-            else:
+            elif _inside(wt, rel):
                 (wt / rel).unlink(missing_ok=True)
     log_parts += ["--- scorer ---", f"$ {scorer_cmd}", output]
     if code is None:
@@ -586,7 +734,11 @@ def status(contest: Path, last: int = 10) -> str:
     sense, current = direction(spec), scorer_hash(contest)
     b = best(rows, current, sense) if sense else None
     lines = [f"best: {b['id']} {b['score']} ({b['commit'][:7]})" if b else "best: none"]
-    counts = {k: sum(r["status"] == k for r in rows) for k in ("keep", "revert", "crash", "timeout", "new")}
+    prev = previous_best(rows, current, sense) if sense and not b else None
+    if prev:
+        lines.append(f"previous scorer's best: {prev['id']} {prev['score']} (--from best continues from it)")
+    counts = {k: sum(r["status"] == k for r in rows)
+              for k in ("keep", "revert", "crash", "timeout", "running", "new")}
     lines.append(f"experiments: {len(rows)} (" + ", ".join(f"{k} {n}" for k, n in counts.items()) + ")")
     if sense is None:
         lines.append("direction unknown: set scoring.direction (max or min) in .house/spec.yaml")

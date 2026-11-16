@@ -174,6 +174,8 @@ house exp status <konkurs>                                                     #
   a każdy commit zostaje jako `refs/exp/E-###`. Stagnację liczy `house exp status` z tego pliku.
 - W `spec.yaml` ustaw `scoring.local_scorer` (drukuje `score: <liczba>`) i `scoring.direction: max|min`. Dane
   spoza gita wpisz w `exp.shared` (np. `[data]`), wtedy każdy worktree dostaje do nich link.
+- Sprawdzarka to pliki z gita wymienione w komendzie, moduły, które importują, oraz `scoring.scorer_files`
+  (globy, np. dla skryptu shell). Dane i predykcje z komendy nie są jej częścią.
 - Eksperyment, który zmienia sprawdzarkę albo zamrożony test, kończy się `crash` („tampered”). Ocena zawsze
   używa aktualnej sprawdzarki z konkursu. Po poprawce sprawdzarki starsze wyniki nie są porównywane z nowymi.
 - `house exp prune <konkurs> --keep 3` usuwa worktree słabszych `keep` (commity zostają).

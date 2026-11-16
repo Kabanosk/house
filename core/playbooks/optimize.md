@@ -21,7 +21,12 @@ Every local attempt goes through the experiment loop, so the record is kept by c
    `house exp run <contest> --from best -- <command>`.
 5. `house exp status <contest>` shows the best, the tree and the stagnation counter. Never change the scorer in an
    experiment (that is a `crash`, "tampered"); a scorer fix goes to the contest checkout, after which earlier
-   scores are not compared.
+   scores are not compared. The scorer is: tracked files named in `scoring.local_scorer`, the local modules they
+   import, and `scoring.scorer_files` (set it for shell scorers or scorers run from a subdirectory; a run
+   without any protected scorer file says so in its note).
+5a. `house exp run` blocks for budget + scoring. Give the tool call a timeout above that, or run it in the
+   background; an interrupted run kills the command and is recorded as `crash` "interrupted". Read the tree with
+   `house exp status`, never from the stale `.house/experiments.csv` inside an experiment worktree.
 6. `house exp prune <contest> --keep 3` frees disk (worktrees of weaker keeps; refs stay).
 
 ## 2. Local ↔ leaderboard agreement

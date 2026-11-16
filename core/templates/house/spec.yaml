@@ -17,6 +17,7 @@ scoring:            # build: rubryka; optimize: metryka + sprawdzarka — z regu
   metric: null      # optimize: nazwa metryki i kierunek (max/min)
   direction: null   # optimize: max | min (house exp; bez tego bierze max/min ze słów w metric)
   local_scorer: null   # optimize: komenda lokalnej sprawdzarki; drukuje `score: <liczba>`
+  scorer_files: []     # optimize: dodatkowe pliki sprawdzarki (globy), gdy nie wynikają z komendy (np. [eval/*.sh])
   leaderboard: null    # optimize: czy jest, gdzie, jak często się odświeża
 
 timeline:           # z regulaminu

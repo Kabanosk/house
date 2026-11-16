@@ -15,8 +15,10 @@ What an agent should know:
   * Paths in this module are strings relative to a checkout root (the contest checkout or one of its task
     worktrees) unless a parameter says otherwise.
 """
+import ast
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -99,16 +101,75 @@ def _checks(contest: Path) -> dict[str, dict]:
     return out
 
 
-def scorer_files(contest: Path) -> list[str]:
-    """List existing files named in the spec's `scoring.local_scorer` command (paths relative to the contest)."""
-    scorer = specmod.get(specmod.load_spec(contest / ".house"), "scoring.local_scorer")
-    if not isinstance(scorer, str):
-        return []
+def _tracked(contest: Path, rels: list[str]) -> set[str]:
+    """Return which of the given contest-relative paths are tracked by git (one `git ls-files` call)."""
+    if not rels:
+        return set()
+    r = _git(contest, "ls-files", "-z", "--", *rels)
+    return set(r.stdout.split("\0")) - {""} if r.returncode == 0 else set()
+
+
+def _local_imports(contest: Path, rel: str) -> list[str]:
+    """Contest-relative module files a Python file imports from its own directory (`import m`, `from m import x`,
+    `from pkg.mod import x` → `m.py`, `pkg/mod.py` or `pkg/__init__.py`), whether or not they exist."""
     try:
-        tokens = shlex.split(scorer)
-    except ValueError:
-        tokens = scorer.split()
-    return [t for t in tokens if "/" in t or "." in t if (contest / t).is_file()]
+        tree = ast.parse((contest / rel).read_text(errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return []
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names.append(node.module)
+        elif isinstance(node, ast.ImportFrom) and node.level == 1:
+            names += [f"{node.module}.{a.name}" if node.module else a.name for a in node.names]
+    base = Path(rel).parent
+    out = []
+    for name in names:
+        parts = name.split(".")
+        for i in range(1, len(parts) + 1):
+            stem = base.joinpath(*parts[:i])
+            out += [f"{stem.as_posix()}.py", (stem / "__init__.py").as_posix()]
+    return out
+
+
+def scorer_files(contest: Path) -> list[str]:
+    """List the files the local scorer consists of (protected by the hook, fingerprinted by `house exp`).
+
+    Only files tracked by git count, so data and output paths named in the command (untracked predictions, data
+    shared from outside git) never do. The set is: tracked files named in `scoring.local_scorer`; for Python
+    files, the local modules they import, recursively; and every tracked file matching `scoring.scorer_files`
+    (glob patterns relative to the contest; use it for shell scorers or scorers run from a subdirectory).
+
+    Args:
+        contest: Contest checkout root.
+
+    Returns:
+        Sorted contest-relative paths; [] when the spec names no scorer or nothing matches.
+    """
+    spec = specmod.load_spec(contest / ".house")
+    scorer = specmod.get(spec, "scoring.local_scorer")
+    candidates: list[str] = []
+    if isinstance(scorer, str):
+        try:
+            tokens = shlex.split(scorer)
+        except ValueError:
+            tokens = scorer.split()
+        candidates = [os.path.normpath(t) for t in tokens if ("/" in t or "." in t) and not t.startswith("-")]
+    patterns = specmod.get(spec, "scoring.scorer_files")
+    for pattern in patterns if isinstance(patterns, list) else []:
+        pattern = str(pattern).strip()
+        if pattern and not pattern.startswith("/") and ".." not in Path(pattern).parts:
+            candidates += [p.relative_to(contest).as_posix() for p in contest.glob(pattern) if p.is_file()]
+    candidates = [c for c in candidates if not c.startswith("..") and not os.path.isabs(c)]
+    found = _tracked(contest, candidates)
+    todo = [f for f in found if f.endswith(".py")]
+    while todo:
+        new = [m for m in _tracked(contest, _local_imports(contest, todo.pop())) if m not in found]
+        found.update(new)
+        todo += new
+    return sorted(found)
 
 
 def protected_paths(contest: Path) -> dict[str, str]:

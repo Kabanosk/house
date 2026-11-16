@@ -1,7 +1,10 @@
 """`house exp`: budgeted experiments scored by the local scorer, kept or reverted, recorded as a tree."""
 import io
+import os
 import shlex
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -251,6 +254,137 @@ class RunTest(ContestCase):
         exp.run_new(self.c, "best", "cat data/x.txt > out.txt")
         exp.run_new(self.c, "best", "echo 0.1 > out.txt")  # revert → worktree removed
         self.assertEqual((self.c / "data/x.txt").read_text(), "0.4\n")
+
+
+class ScorerIntegrityTest(ContestCase):
+    def test_shared_truth_and_output_paths_in_scorer_command(self):
+        (self.c / ".house/spec.yaml").write_text(SPEC.replace("python3 score.py", "python3 score.py data/truth.csv preds.txt"))
+        (self.c / "score.py").write_text(
+            "import sys\nassert open(sys.argv[1]).read() == 'T'\nprint(f'score: {float(open(sys.argv[2]).read())}')\n")
+        git(self.c, "commit", "-qam", "scorer reads truth and preds")
+        (self.c / "data").mkdir()
+        (self.c / "data/truth.csv").write_text("T")
+        (self.c / "preds.txt").write_text("0.1")  # stale baseline output in the contest checkout
+        before = exp.scorer_hash(self.c)
+        res = exp.run_new(self.c, "best", "echo 0.9 > preds.txt")
+        self.assertEqual((res.status, res.score), ("keep", 0.9))
+        self.assertEqual((self.c / "data/truth.csv").read_text(), "T")
+        self.assertEqual((self.c / ".worktrees/exp-E-001/preds.txt").read_text().strip(), "0.9")
+        (self.c / "preds.txt").write_text("0.9")  # copying a keep's output for a submission
+        self.assertEqual(exp.scorer_hash(self.c), before)
+
+    def test_imported_helper_is_protected_and_hashed(self):
+        (self.c / "metric.py").write_text("def f(x):\n    return x\n")
+        (self.c / "score.py").write_text("from metric import f\nprint(f'score: {f(float(open(\"out.txt\").read()))}')\n")
+        (self.c / "train.py").write_text("X = 1\n")
+        git(self.c, "add", "-A")
+        git(self.c, "commit", "-qm", "scorer with helper")
+        from houselib import guard
+        self.assertEqual(guard.scorer_files(self.c), ["metric.py", "score.py"])
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt")
+        eid, wt = exp.new(self.c, "best")
+        (wt / "metric.py").write_text("def f(x):\n    return 99.0\n")
+        res = exp.run(self.c, eid, "echo 0.5 > out.txt")
+        self.assertEqual(res.status, "crash")
+        self.assertIn("metric.py", res.note)
+        h = exp.scorer_hash(self.c)
+        (self.c / "metric.py").write_text("def f(x):\n    return x / 2\n")
+        self.assertNotEqual(exp.scorer_hash(self.c), h)
+
+    def test_explicit_scorer_files(self):
+        (self.c / "eval").mkdir()
+        (self.c / "eval/run.sh").write_text("cat ../out.txt | sed 's/^/score: /'\n")
+        (self.c / ".house/spec.yaml").write_text(SPEC.replace(
+            "  local_scorer: python3 score.py\n", "  local_scorer: cd eval && sh run.sh\n  scorer_files: [eval/*.sh]\n"))
+        git(self.c, "add", "-A")
+        git(self.c, "commit", "-qm", "shell scorer")
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt")
+        eid, wt = exp.new(self.c, "best")
+        (wt / "eval/run.sh").write_text("echo 'score: 99'\n")
+        self.assertEqual(exp.run(self.c, eid, "echo 0.5 > out.txt").status, "crash")
+
+    def test_command_rewriting_the_contest_scorer_is_crash(self):
+        res = exp.run_new(self.c, "best", "echo 0.1 > out.txt; echo \"print('score: 42')\" > \"$HOUSE_CONTEST/score.py\"")
+        self.assertEqual(res.status, "crash")
+        self.assertIn("scorer changed during the run", res.note)
+
+    def test_renamed_scorer_is_tampering(self):
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt")
+        eid, wt = exp.new(self.c, "best")
+        git(wt, "mv", "score.py", "other.py")
+        res = exp.run(self.c, eid, "echo 0.9 > out.txt")
+        self.assertEqual(res.status, "crash")
+        self.assertIn("score.py", res.note)
+
+    def test_no_scorer_files_warns(self):
+        (self.c / ".house/spec.yaml").write_text(SPEC.replace("python3 score.py", "echo score: 1"))
+        res = exp.run_new(self.c, "best", "true")
+        self.assertEqual(res.status, "keep")
+        self.assertIn("scorer_files", res.note)
+
+
+class RobustnessTest(ContestCase):
+    def test_interrupted_run_kills_the_command_and_records_crash(self):
+        pidfile = Path(self._tmp.name) / "child.pid"
+        code = (f"import sys; sys.path.insert(0, {os.getcwd()!r}); from houselib import exp; "
+                f"from pathlib import Path; exp.run_new(Path({str(self.c)!r}), 'best', 'echo $$ > {pidfile}; sleep 60')")
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.rows()["E-001"]["status"], "running")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+        child = int(pidfile.read_text())
+        time.sleep(0.2)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+        r = self.rows()["E-001"]
+        self.assertEqual(r["status"], "crash")
+        self.assertIn("interrupted", r["note"])
+        self.assertFalse((self.c / ".worktrees/exp-E-001").exists())
+
+    def test_running_experiment_cannot_run_twice(self):
+        eid, _ = exp.new(self.c, "best")
+        with exp._locked(self.c):
+            rows = exp.load(self.c)
+            rows[0]["status"] = "running"
+            exp._write(self.c, rows)
+        (self.c / ".house/experiments" / f"{eid}.pid").write_text(str(os.getpid()))
+        with self.assertRaises(ValueError) as cm:
+            exp.run(self.c, eid, "echo 1 > out.txt")
+        self.assertIn("running", str(cm.exception))
+        (self.c / ".house/experiments" / f"{eid}.pid").write_text("999999999")  # stale: process is gone
+        self.assertEqual(exp.run(self.c, eid, "echo 1 > out.txt").status, "keep")
+
+    def test_failed_experiment_commit_raises_before_running(self):
+        eid, wt = exp.new(self.c, "best")
+        (wt / "model.py").write_text("X = 1\n")
+        git(self.c, "config", "commit.gpgsign", "true")
+        git(self.c, "config", "gpg.program", "false")
+        with self.assertRaises(RuntimeError):
+            exp.run(self.c, eid, "echo ran > marker; echo 1 > out.txt")
+        self.assertFalse((wt / "marker").exists())
+        self.assertEqual(self.rows()[eid]["status"], "new")
+
+    def test_ids_never_reuse_refs_or_worktrees(self):
+        head = git(self.c, "rev-parse", "HEAD").strip()
+        git(self.c, "update-ref", "refs/exp/E-001", head)
+        (self.c / ".worktrees/exp-E-002").mkdir(parents=True)
+        self.assertEqual(exp.new(self.c, "best")[0], "E-003")
+
+    def test_best_after_scorer_change_continues_from_previous_best(self):
+        exp.run_new(self.c, "best", "echo 0.5 > out.txt")
+        eid, wt = exp.new(self.c, "best")
+        (wt / "model.py").write_text("X = 1\n")
+        exp.run(self.c, eid, "echo 0.7 > out.txt")
+        (self.c / "score.py").write_text("print(f\"score: {float(open('out.txt').read()) / 10}\")\n")
+        git(self.c, "commit", "-qam", "scorer fix")
+        eid, wt = exp.new(self.c, "best")
+        self.assertEqual(self.rows()[eid]["parent"], "E-002")
+        self.assertTrue((wt / "model.py").exists())
+        self.assertIn("previous scorer's best: E-002 0.7", exp.status(self.c))
 
 
 class StatusTest(ContestCase):

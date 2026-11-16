@@ -104,24 +104,29 @@ def _finished_frozen(house: Path) -> tuple[list[str], list[str]]:
     return frozen, legacy
 
 
-def _rollback(contest: Path, pre_head: str) -> str | None:
-    """Undo the merge: revert (keeps history), else reset --keep. Returns an error if both fail."""
-    if _git(contest, "revert", "-m", "1", "--no-edit", "HEAD").returncode == 0:
+def _rollback(contest: Path, pre_head: str, merge_sha: str) -> str | None:
+    """Undo the merge commit `merge_sha`: revert it (keeps history and any commit made on top meanwhile, e.g. a
+    parallel `house exp` csv commit), else reset --keep to pre_head, but only while HEAD is still the merge
+    (a reset would drop the commits on top). Returns an error message if the merge could not be undone."""
+    if _git(contest, "revert", "-m", "1", "--no-edit", merge_sha).returncode == 0:
         return None
     _git(contest, "revert", "--abort")
+    if _git(contest, "rev-parse", "HEAD").stdout.strip() != merge_sha:
+        return f"could not revert merge {merge_sha[:7]} (commits were made on top of it); fix main by hand"
     r = _git(contest, "reset", "--keep", pre_head)
     if r.returncode == 0:
         return None
     return f"could not undo the merge (revert and reset --keep failed: {r.stderr.strip()}); fix main by hand"
 
 
-def _red_before(contest: Path, house: Path, task_ids: list[str]) -> set[str]:
-    """Which of task_ids were already red on main before this merge (checked in a throwaway worktree)."""
+def _red_before(contest: Path, house: Path, task_ids: list[str], base: str) -> set[str]:
+    """Which of task_ids were already red on main before this merge: checked at `base` (the pre-merge HEAD, not
+    HEAD^1, which is wrong once something was committed on top) in a throwaway worktree."""
     if not task_ids:
         return set()
     tmp = contest / ".worktrees" / ".house-baseline"
     _git(contest, "worktree", "remove", "--force", str(tmp))
-    if _git(contest, "worktree", "add", "--detach", str(tmp), "HEAD^1").returncode != 0:
+    if _git(contest, "worktree", "add", "--detach", str(tmp), base).returncode != 0:
         return set()
     try:
         return {t for t in task_ids if not checks.run_checks(house, t, tmp, record=False).green}
@@ -232,24 +237,25 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None,
         _git(contest, "merge", "--abort")
         return MergeOutcome(False, status, f"merge of {branch} failed (conflict?); aborted, main unchanged:\n"
                             + (r.stdout + r.stderr).strip())
+    merge_sha = _git(contest, "rev-parse", "HEAD").stdout.strip()
     try:
         red_after = {}
         for tid in [task_id, *[t for t in frozen_done if t != task_id]]:
             after = checks.run_checks(house, tid, contest)
             if not after.green:
                 red_after[tid] = _failures(after)
-        already_red = _red_before(contest, house, [t for t in red_after if t != task_id])
+        already_red = _red_before(contest, house, [t for t in red_after if t != task_id], pre_head)
         regressions = {t: why for t, why in red_after.items() if t not in already_red}
     except KeyboardInterrupt:  # Ctrl+C during the re-checks: undo the merge, then stop
-        _rollback(contest, pre_head)
+        _rollback(contest, pre_head, merge_sha)
         raise
     except Exception as e:  # noqa: BLE001 — whatever broke, main must not keep an unchecked merge
-        err = _rollback(contest, pre_head)
+        err = _rollback(contest, pre_head, merge_sha)
         return MergeOutcome(False, status, f"checks crashed after merging ({e!r}); merge undone"
                             + (f"\n{err}" if err else ""), reverted=err is None)
 
     if regressions:
-        err = _rollback(contest, pre_head)
+        err = _rollback(contest, pre_head, merge_sha)
         _set_status(checks.load_task(house, task_id), "blocked")
         data = json.loads((house / "checks" / f"{task_id}.json").read_text())
         data["reverted"] = {"base": _git(contest, "merge-base", pre_head, str(branch)).stdout.strip()}

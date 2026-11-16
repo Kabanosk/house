@@ -379,6 +379,10 @@ def _run_cmd(cmd: list[str] | str, workdir: Path, timeout: int, keep_group: bool
             _kill_group(proc.pid)
             proc.wait()
             code = None
+        except BaseException:  # Ctrl+C / SIGTERM handler: never leave the command running
+            _kill_group(proc.pid)
+            proc.wait()
+            raise
         if not keep_group:
             _kill_group(proc.pid)
         out.seek(0)
