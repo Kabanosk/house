@@ -330,6 +330,62 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_unread(args) -> int:
+    """`house signal unread [CHAT] [--peek] [--as NAME] [--json] [--offline]`: what is new for this project.
+
+    The cursor is per reader (contest name, or the repo's main checkout name; `--as` overrides) and per chat;
+    `--peek` does not move it. Exit 0, 2 for an unknown chat.
+    """
+    now = datetime.now().astimezone()
+    try:
+        chat = None if args.chat in (None, "all") else signalchats.resolve(args.chat)
+    except ValueError as e:
+        return _usage(str(e))
+    signalread.maybe_pull(args.offline, now)
+    name = args.as_ or signalread.reader_name(Path.cwd())
+    msgs, since = signalread.unread(name, chat=chat.id if chat else None, peek=args.peek, now=now)
+    view, _ = _view(now)
+    if args.json:
+        for m in msgs:
+            print(json.dumps(view.as_json(m), ensure_ascii=False))
+        return 0
+    print(signalread.render_unread(view, msgs, since, name, args.peek), end="")
+    return 0
+
+
+def cmd_status(args) -> int:
+    """`house signal status`: account, last receive and error, what was dropped, store size, chats, readers."""
+    now = datetime.now().astimezone()
+    sig = _client()
+    state = signalstore.read_state()
+    print(f"signal: konto {sig.account} · signal-cli {sig.binary}" if sig is not None
+          else "signal: Signal wyłączony (~/.config/house/notify.env)")
+    ok = signalread.parse_iso(state.get("last_pull_ok"))
+    print(f"ostatni odbiór: {signalread.fmt_time(ok, now)}" + (f" · błąd: {state['last_pull_error']}"
+                                                              if state.get("last_pull_error") else " (ok)"))
+    print(f"odrzucono w ostatnim odbiorze: {state.get('dropped_last_pull', 0)} (spoza dozwolonych) · "
+          f"złe linie: {state.get('bad_lines', 0)}")
+    path = signalstore.store_dir() / signalstore.MESSAGES
+    events = list(signalstore.iter_events(raw=False))
+    pending = signalstore.store_dir() / signalstore.PENDING
+    waiting = len(pending.read_text().splitlines()) if pending.exists() else 0
+    broken = signalstore.bad_lines()
+    print(f"magazyn: {len(events)} zdarzeń · {signalread.fmt_size(path.stat().st_size if path.exists() else 0)} · "
+          f"oczekujące: {waiting}" + (f" · uszkodzone linie: {', '.join(map(str, broken[:10]))}" if broken else ""))
+    counts: dict[str, int] = {}
+    for e in signalstore.latest(events):
+        if e.get("kind") in ("message", "other"):
+            alias = str(e.get("chat_alias") or e.get("chat"))
+            counts[alias] = counts.get(alias, 0) + 1
+    print("rozmowy: " + (" · ".join(f"{a} {n}" for a, n in counts.items()) or "—"))
+    cursors = signalstore.read_json(signalstore.store_dir() / signalread.CURSORS, {})
+    if isinstance(cursors, dict) and cursors:
+        print("czytelnicy: " + " · ".join(
+            f"{n} ({signalread.fmt_time(signalread.parse_iso(c.get('at')), now)})"
+            for n, c in cursors.items() if isinstance(c, dict)))
+    return 0
+
+
 def register(sub) -> None:
     """Add the `signal` command with its subcommands to the top-level subparsers of `house`."""
     sg = sub.add_parser("signal", help="team chats on Signal: read, unread, show, send, groups, allow, pull")
@@ -375,3 +431,12 @@ def register(sub) -> None:
     sh.add_argument("--raw", action="store_true", help="also print the signal-cli envelope")
     sh.add_argument("--offline", action="store_true", help="do not receive first")
     sh.set_defaults(func=cmd_show)
+    un = ss.add_parser("unread", help="new messages since this project last read them (then marks them read)")
+    un.add_argument("chat", nargs="?", help="alias or self (default: all)")
+    un.add_argument("--peek", action="store_true", help="do not mark as read")
+    un.add_argument("--as", dest="as_", metavar="NAME", help="reader name (default: contest / repo name)")
+    un.add_argument("--json", action="store_true")
+    un.add_argument("--offline", action="store_true", help="do not receive first")
+    un.set_defaults(func=cmd_unread)
+    st = ss.add_parser("status", help="last receive, errors, dropped count, store size, chats, readers")
+    st.set_defaults(func=cmd_status)

@@ -282,3 +282,119 @@ class RenderTest(unittest.TestCase):
     def test_show_attachment_path(self):
         view = signalread.View(sample(path="/p/w.csv"), NOW)
         self.assertIn("📎 wyniki.csv, 4 KB → /p/w.csv", view.render_show(view.msgs[1]))
+
+
+class CursorTest(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        self._tmp = tempfile.TemporaryDirectory()
+        self.env = mock.patch.dict(os.environ, {"HOUSE_DATA_DIR": str(Path(self._tmp.name) / "data"),
+                                                "HOUSE_SIGNAL_CONFIG": str(Path(self._tmp.name) / "signal.toml")})
+        self.env.start()
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+
+    def tearDown(self):
+        self.env.stop()
+        self._tmp.cleanup()
+
+    def add(self, *events):
+        from houselib import signalstore
+        for e in events:
+            signalstore.append(e)
+
+    def texts(self, name, **kw):
+        msgs, _ = signalread.unread(name, now=kw.pop("now", NOW), **kw)
+        return [m.text for m in msgs]
+
+    def test_unread_moves_cursor(self):
+        self.add(msg(at(12, 0), "a"), msg(at(12, 1), "b", chat="self", dir_="own", author="u-own", name="W"))
+        self.assertEqual(self.texts("house"), ["a", "b"])
+        self.assertEqual(self.texts("house"), [])
+        self.add(msg(at(12, 5), "c"))
+        self.assertEqual(self.texts("house"), ["c"])
+
+    def test_unread_peek_keeps_cursor(self):
+        self.add(msg(at(12, 0), "a"))
+        self.assertEqual(self.texts("house", peek=True), ["a"])
+        self.assertEqual(self.texts("house"), ["a"])
+
+    def test_unread_one_chat_leaves_others(self):
+        self.add(msg(at(12, 0), "a"), msg(at(12, 1), "b", chat="self", dir_="own", author="u-own", name="W"))
+        self.assertEqual(self.texts("house", chat="gT"), ["a"])
+        self.assertEqual(self.texts("house"), ["b"])
+
+    def test_two_projects_independent(self):
+        self.add(msg(at(12, 0), "a"))
+        self.assertEqual(self.texts("house"), ["a"])
+        self.assertEqual(self.texts("fr-2026"), ["a"])
+
+    def test_new_reader_starts_24h_back(self):
+        self.add(msg(at(10, 0, day=15), "przedwczoraj"), msg(at(13, 0, day=15), "wczoraj po 12:40"))
+        self.assertEqual(self.texts("house"), ["wczoraj po 12:40"])
+
+    def test_out_and_reactions_not_unread(self):
+        a = msg(at(12, 0), "a")
+        self.add(a)
+        self.texts("house")
+        self.add(msg(at(12, 2), "🤖 [house] x", dir_="out", author="+48111", name="house"),
+                 mod("reaction", at(12, 3), a["ts"], reaction={"emoji": "👍", "remove": False}))
+        self.assertEqual(self.texts("house"), [])
+
+    def test_counts_do_not_move_cursor(self):
+        self.add(msg(at(12, 0), "a"), msg(at(12, 1), "b"))
+        self.assertEqual(signalread.unread_counts("house", NOW), {"techarena": 2})
+        self.assertEqual(self.texts("house"), ["a", "b"])
+
+    def test_not_allowed_chat_not_unread(self):
+        self.add(msg(at(12, 0), "stara grupa", chat="gGONE"))
+        self.assertEqual(self.texts("house"), [])
+
+    def test_unread_golden(self):
+        events = sample()
+        note = msg(at(11, 58), "fr Q-012: B", chat="self", dir_="own", author="u-own", name="Wojciech Fiołka")
+        self.add(*events, note)
+        from houselib import signalstore
+        signalstore.write_json(signalstore.store_dir() / "cursors.json",
+                               {"house": {"start": 0, "at": at(9, 40).isoformat(), "chats": {}}})
+        msgs, since = signalread.unread("house", now=NOW, peek=True)
+        view = signalread.View(signalstore.iter_events(raw=False), NOW)
+        t2, t3 = events[1]["ts"], events[2]["ts"]
+        self.assertEqual(signalread.render_unread(view, msgs, since, "house", peek=False), (
+            "3 nowe od 2026-11-16 09:40 (dla: house)\n"
+            "techarena · 2\n"
+            f"  [12:15] {t2} Ania K.: super, to ja wrzucę dane z wczoraj [📎 wyniki.csv, 4 KB]\n"
+            f"  [12:18] {t3} Kuba Nowak ↩ 🤖 house „Cześć! Jestem…”: "
+            "Spoko, a jaki wynik ma teraz baseline?\n"
+            "self · 1\n"
+            f"  [11:58] {note['ts']} Wojciech Fiołka: fr Q-012: B\n"
+            "(oznaczone jako przeczytane; `--peek` nie oznacza)\n"))
+
+    def test_unread_empty(self):
+        msgs, since = signalread.unread("house", now=NOW)
+        view = signalread.View([], NOW)
+        self.assertTrue(signalread.render_unread(view, msgs, since, "house", peek=False).startswith("brak nowych"))
+
+    def test_plural(self):
+        self.assertEqual([signalread.nowe(n) for n in (1, 2, 4, 5, 12, 22, 25)],
+                         ["1 nowa", "2 nowe", "4 nowe", "5 nowych", "12 nowych", "22 nowe", "25 nowych"])
+
+    def test_reader_name_contest_and_house_worktree(self):
+        import subprocess
+        from pathlib import Path
+        tmp = Path(self._tmp.name)
+        c = tmp / "fr-2026"
+        (c / ".house").mkdir(parents=True)
+        (c / ".git").mkdir()
+        self.assertEqual(signalread.reader_name(c), "fr-2026")
+        repo = tmp / "house"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q",
+                        "--allow-empty", "-m", "x"], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(tmp / "wt"), "-b", "x"], check=True)
+        self.assertEqual(signalread.reader_name(tmp / "wt"), "house")
+        self.assertEqual(signalread.reader_name(tmp), Path(self._tmp.name).name)

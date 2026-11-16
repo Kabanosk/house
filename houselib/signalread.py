@@ -4,8 +4,10 @@ Used by `house signal read|unread|show|status`, the session hook and `house inbo
 store (`signalstore.iter_events`), never signal-cli. Output is plain text for agents and humans (Polish labels).
 """
 import re
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 
 HOUSE_PREFIX = re.compile(r"^🤖 \[[^\]]*\]\s*")
 
@@ -427,3 +429,126 @@ def maybe_pull(offline: bool, now: datetime | None = None) -> str | None:
     if res.skipped:
         return res.skipped
     return f"błąd odbioru: {res.error}" if res.error else None
+
+
+# --- what is new for whom -------------------------------------------------------------------------------------
+
+CURSORS = "cursors.json"
+NEW_READER_WINDOW = timedelta(hours=24)
+
+
+def nowe(n: int) -> str:
+    """`1 nowa`, `2 nowe`, `5 nowych` (Polish plural of „nowa wiadomość”)."""
+    if n == 1:
+        return "1 nowa"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} nowe"
+    return f"{n} nowych"
+
+
+def reader_name(cwd: Path) -> str:
+    """Whose cursor a session uses: the contest name in a contest repo (or its worktrees), else the name of the git
+    main checkout (so every worktree of `house` reads as "house"), else the directory name."""
+    from . import guard, notify
+    contest = guard.contest_root(Path(cwd))
+    if contest is not None:
+        return notify.contest_name(contest)
+    try:
+        r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd,
+                           capture_output=True, text=True, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        r = None
+    if r is not None and r.returncode == 0 and r.stdout.strip():
+        return Path(r.stdout.strip()).parent.name
+    return Path(cwd).resolve().name
+
+
+def _cursor(cursors: dict, name: str, events: list[dict], now: datetime) -> dict:
+    """The reader's cursor `{"start", "at", "chats": {chat id: seq}}`; a new one starts 24 h back."""
+    cur = cursors.get(name)
+    if isinstance(cur, dict) and "start" in cur:
+        return cur
+    since = now - NEW_READER_WINDOW
+    start = max((int(e.get("seq") or 0) for e in events
+                 if (parse_iso(e.get("time")) or now) < since), default=0)
+    return {"start": start, "at": since.isoformat(timespec="seconds"), "chats": {}}
+
+
+def _new(name: str, now: datetime, chat: str | None) -> tuple[list[Msg], dict, dict, list[dict]]:
+    from . import signalchats, signalstore
+    events = list(signalstore.iter_events(raw=False))
+    cursors = signalstore.read_json(signalstore.store_dir() / CURSORS, {})
+    cursors = cursors if isinstance(cursors, dict) else {}
+    cur = _cursor(cursors, name, events, now)
+    allowed = signalchats.allowed(None)
+    msgs = [m for m in build(events, now)
+            if m.ev.get("dir") in ("in", "own") and m.chat in allowed and (chat is None or m.chat == chat)
+            and int(m.ev.get("seq") or 0) > int((cur.get("chats") or {}).get(m.chat, cur["start"]))]
+    return msgs, cur, cursors, events
+
+
+def unread(name: str, *, chat: str | None = None, peek: bool = False,
+           now: datetime | None = None) -> tuple[list[Msg], datetime | None]:
+    """Messages from others and the owner (not house's own) that arrived after the reader's cursor.
+
+    Args:
+        name: Reader (see `reader_name`; `--as` overrides).
+        chat: Only this chat id; the cursors of other chats stay where they are.
+        peek: Do not move the cursor.
+        now: Reference time. Defaults to now.
+
+    Returns:
+        (messages sorted by time, time of the previous read or the 24 h start of a new reader).
+    """
+    from . import signalstore
+    now = now or datetime.now().astimezone()
+    msgs, cur, _, _ = _new(name, now, chat)
+    since = parse_iso(cur.get("at"))
+    if not peek:
+        with signalstore.lock("store.lock", blocking=True):
+            cursors = signalstore.read_json(signalstore.store_dir() / CURSORS, {})
+            cursors = cursors if isinstance(cursors, dict) else {}
+            fresh = cursors[name] if isinstance(cursors.get(name), dict) and "start" in cursors[name] else cur
+            top = signalstore.last_seq()
+            if chat is None:
+                fresh = {"start": top, "chats": {}}
+            else:
+                fresh = {**fresh, "chats": {**(fresh.get("chats") or {}), chat: top}}
+            fresh["at"] = now.isoformat(timespec="seconds")
+            cursors[name] = fresh
+            signalstore.write_json(signalstore.store_dir() / CURSORS, cursors)
+    return msgs, since
+
+
+def unread_counts(name: str, now: datetime | None = None) -> dict[str, int]:
+    """Alias → number of unread messages for the reader, without moving any cursor (hook, inbox)."""
+    msgs, _, _, _ = _new(name, now or datetime.now().astimezone(), None)
+    out: dict[str, int] = {}
+    for m in msgs:
+        alias = str(m.ev.get("chat_alias") or m.chat)
+        out[alias] = out.get(alias, 0) + 1
+    return out
+
+
+def compact_line(view: View, m: Msg, width: int = 16) -> str:
+    """One-line form for `unread`: `[HH:MM] ts name[ ↩ quoted „…”]: text [📎 …]` (newlines shown as ⏎)."""
+    body = " ".join(x for x in (view._body(m), view._files_inline(m)) if x).replace("\n", " ⏎ ")
+    return (f"[{fmt_time(m.time, view.now)}] {m.ts} {display_name(m.ev)}"
+            f"{view.quote_ref(m, width=width, with_time=False)}: {body}")
+
+
+def render_unread(view: View, msgs: list[Msg], since: datetime | None, name: str, peek: bool) -> str:
+    """Text of `house signal unread`: count, per-chat groups of one-line messages, and whether they were marked."""
+    when = f"{since.astimezone():%Y-%m-%d %H:%M}" if since else "początku"
+    if not msgs:
+        return f"brak nowych od {when} (dla: {name})\n"
+    lines = [f"{nowe(len(msgs))} od {when} (dla: {name})"]
+    groups: dict[str, list[Msg]] = {}
+    for m in msgs:
+        groups.setdefault(view.alias(m), []).append(m)
+    for alias, items in sorted(groups.items(), key=lambda kv: -max(_order(m.ev)[0] for m in kv[1])):
+        lines.append(f"{alias} · {len(items)}")
+        lines += [f"  {compact_line(view, m)}" for m in items]
+    lines.append("(podgląd: nic nie oznaczono jako przeczytane)" if peek
+                 else "(oznaczone jako przeczytane; `--peek` nie oznacza)")
+    return "\n".join(lines) + "\n"

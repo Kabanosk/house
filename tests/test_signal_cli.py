@@ -450,3 +450,43 @@ class ReadShowTest(CliCase):
     def test_show_raw(self):
         _, out, _ = self.run_cli("show", str(self.ts[2]), "--raw", "--offline")
         self.assertIn('"kind": "message"', out)
+
+
+class UnreadStatusTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"techarena": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+        from datetime import datetime, timedelta
+
+        from tests.test_signalread import msg
+        now = datetime.now().astimezone()
+        for i in range(3):
+            signalstore.append(msg(now - timedelta(minutes=10 - i), f"m{i}"))
+        self.noconf = mock.patch("houselib.signal.from_config", return_value=None)
+        self.noconf.start()
+
+    def tearDown(self):
+        self.noconf.stop()
+        super().tearDown()
+
+    def test_unread_as_and_peek(self):
+        code, out, _ = self.run_cli("unread", "--as", "proj", "--peek")
+        self.assertEqual(code, 0)
+        self.assertIn("3 nowe", out)
+        self.assertIn("(dla: proj)", out)
+        self.assertIn("3 nowe", self.run_cli("unread", "--as", "proj")[1])
+        self.assertIn("brak nowych", self.run_cli("unread", "--as", "proj")[1])
+
+    def test_unread_json(self):
+        import json
+        _, out, _ = self.run_cli("unread", "--as", "p", "--json")
+        self.assertEqual([json.loads(x)["text"] for x in out.splitlines()], ["m0", "m1", "m2"])
+
+    def test_status_lines(self):
+        signalstore.update_state(last_pull_error="timeout", dropped_last_pull=4)
+        code, out, _ = self.run_cli("status")
+        self.assertEqual(code, 0)
+        for needle in ("Signal wyłączony", "ostatni odbiór", "timeout", "odrzucono w ostatnim odbiorze: 4",
+                       "magazyn: 3 zdarzeń", "techarena 3"):
+            self.assertIn(needle, out)
