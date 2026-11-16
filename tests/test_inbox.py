@@ -42,9 +42,14 @@ class FakeSignal:
     def __init__(self, incoming, groups=None):
         self.account, self.incoming, self.sent, self.groups, self.ts = OWN, incoming, [], groups or [], 5000
 
-    def receive(self, timeout=1):
+    attachments_dir = Path("/nonexistent")
+
+    def receive(self, handle, timeout=1, max_messages=None, should_stop=lambda: False):
+        from houselib.signal import ReceiveResult
         out, self.incoming = self.incoming, []
-        return out
+        for obj in out:
+            handle(obj)
+        return ReceiveResult(objects=len(out))
 
     def send(self, text, group_id=None):
         self.ts += 1

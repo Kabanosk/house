@@ -18,12 +18,18 @@ line that is not a JSON object (`bad_lines()` lists them for `house doctor`).
 import fcntl
 import json
 import os
+import re
+import shutil
+import signal as sigmod
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
-from . import notify
+from . import notify, signalparse
 
 LOCK_TIMEOUT = 5.0
 MESSAGES = "messages.jsonl"
@@ -238,3 +244,126 @@ def last_seq() -> int:
     """Seq of the newest event in the store (0 when empty)."""
     nxt = read_state().get("next_seq")
     return int(nxt) - 1 if nxt else _scan_last_seq()
+
+
+# --- receiving ------------------------------------------------------------------------------------------------
+
+@dataclass
+class PullResult:
+    """Outcome of one `pull`.
+
+    Attributes:
+        kept: Events written to the store.
+        dropped: Messages from DMs or non-allowed groups that were discarded (only this number is recorded).
+        bad_lines: Non-JSON stdout lines plus envelopes the parser could not handle (content never stored).
+        error: signal-cli problem ("timeout", "signal-cli not found", first stderr line, …) or None.
+        skipped: Why nothing was received: "Signal wyłączony" or "inny odbiór trwa"; None when a receive ran.
+        interrupted: SIGTERM/SIGINT arrived; the lines already printed were stored, then the signal was re-raised.
+    """
+
+    kept: int = 0
+    dropped: int = 0
+    bad_lines: int = 0
+    error: str | None = None
+    skipped: str | None = None
+    interrupted: bool = False
+
+
+def _safe(name: str) -> str:
+    """File-name-safe version of an attachment or alias name (letters, digits, `.`, `-`, `_`; ≤ 100 chars)."""
+    return re.sub(r"[^\w.\-]+", "_", name).strip("._")[:100] or "plik"
+
+
+def _private_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
+def _copy_attachments(event: dict, src_dir: Path) -> None:
+    """Copy the files signal-cli downloaded for this event into `files/<alias>/` and set each `path`."""
+    for a in event.get("attachments") or []:
+        aid = str(a.get("id") or "")
+        src = Path(src_dir) / aid
+        if not aid or Path(aid).name != aid or not src.is_file():
+            continue
+        folder = _private_dir(_private_dir(store_dir() / "files") / _safe(str(event.get("chat_alias") or "chat")))
+        dst = folder / f"{str(event.get('time') or '')[:10]}_{event['ts']}_{_safe(str(a.get('filename') or aid))}"
+        shutil.copyfile(src, dst)
+        dst.chmod(0o600)
+        a["path"] = str(dst)
+
+
+@contextmanager
+def _deferred_signals(stop: list):
+    """Turn SIGTERM/SIGINT into a stop request while receiving; re-raise the first one afterwards."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    old = {s: sigmod.signal(s, lambda n, f: stop.append(n)) for s in (sigmod.SIGTERM, sigmod.SIGINT)}
+    try:
+        yield
+    finally:
+        for s, handler in old.items():
+            sigmod.signal(s, handler)
+
+
+def pull(sig, chats: dict | None = None, timeout: int = 1, max_messages: int | None = None) -> PullResult:
+    """Receive pending Signal messages and append each allowed one to the store before reading the next.
+
+    This is the only caller of `Signal.receive`. It never blocks on another receive: when `receive.lock` is busy
+    it returns at once. SIGTERM/SIGINT during the receive stop it after the current line (signal-cli is
+    terminated and what it already printed is still stored), then the signal is re-raised to the old handler.
+
+    Args:
+        sig: A `Signal` client, or None (Signal not configured: nothing happens).
+        chats: Allowed chats (chat id → `signalchats.Chat`). Defaults to None, meaning `signalchats.allowed(sig)`.
+        timeout: Seconds signal-cli waits for new messages. Defaults to 1 (hook, reading commands); 5 for
+            `house signal pull` and the timer.
+        max_messages: Upper bound per call (the hook uses 200; the rest waits on the server). Defaults to None.
+
+    Returns:
+        A `PullResult`. State (`last_pull_ok`, `last_pull_error`, `dropped_last_pull`, `bad_lines`) is updated.
+    """
+    res = PullResult()
+    if sig is None:
+        res.skipped = "Signal wyłączony"
+        return res
+    stop: list = []
+    with lock("receive.lock", blocking=False) as held:
+        if not held:
+            res.skipped = "inny odbiór trwa"
+            return res
+        ingest_pending()
+        if chats is None:
+            from . import signalchats
+            chats = signalchats.allowed(sig)
+        aliases = {cid: c.alias for cid, c in chats.items()}
+
+        def handle(obj: dict) -> None:
+            try:
+                event, dropped = signalparse.extract(obj, sig.account, aliases)
+            except (TypeError, ValueError, AttributeError, KeyError):
+                res.bad_lines += 1
+                return
+            res.dropped += int(dropped)
+            if event is not None:
+                _copy_attachments(event, sig.attachments_dir)
+                append(event)
+                res.kept += 1
+
+        with _deferred_signals(stop):
+            r = sig.receive(handle, timeout=timeout, max_messages=max_messages, should_stop=lambda: bool(stop))
+        res.bad_lines += r.bad_lines
+        res.interrupted = bool(stop)
+        res.error = r.error or ("przerwano" if stop else None)
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        state = read_state()
+        changes = {"last_pull_at": now, "last_pull_error": res.error, "dropped_last_pull": res.dropped,
+                   "bad_lines": int(state.get("bad_lines") or 0) + res.bad_lines}
+        if res.error is None:
+            changes["last_pull_ok"] = now
+        update_state(**changes)
+    if stop:
+        os.kill(os.getpid(), stop[0])
+    return res

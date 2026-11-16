@@ -44,7 +44,8 @@ class ExtractTest(unittest.TestCase):
 
     def test_note_to_self_is_own(self):
         ev, _ = ex(fx.self_note(1000, "fr Q-012: B"))
-        self.assertEqual((ev["chat"], ev["chat_alias"], ev["dir"], ev["key"]), ("self", "self", "own", "self:u-own:1000"))
+        self.assertEqual((ev["chat"], ev["chat_alias"], ev["dir"], ev["key"]),
+                         ("self", "self", "own", "self:u-own:1000"))
         self.assertEqual(ev["sender"]["name"], fx.OWN_NAME)
 
     def test_own_message_in_group_is_own(self):

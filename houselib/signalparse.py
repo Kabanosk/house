@@ -85,7 +85,8 @@ def _chat(env: dict, msg: dict, own_flag: bool, own: str) -> str | None:
 def _text(msg: dict) -> tuple[str, list[dict]]:
     """Message text with each mention placeholder replaced by `@name`, and the mentions in text order."""
     text = str(msg.get("message") or "")
-    mentions = sorted((m for m in msg.get("mentions") or [] if isinstance(m, dict)), key=lambda m: int(m.get("start") or 0))
+    mentions = sorted((m for m in msg.get("mentions") or [] if isinstance(m, dict)),
+                      key=lambda m: int(m.get("start") or 0))
     out = [{"name": m.get("name"), "number": m.get("number"), "uuid": m.get("uuid"),
             "start": m.get("start"), "length": m.get("length")} for m in mentions]
     for m in out:

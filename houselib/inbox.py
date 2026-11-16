@@ -94,45 +94,6 @@ def all_running() -> list[Path]:
     return running(registry.contests())
 
 
-def extract(obj: dict, own: str, groups: set[str]) -> Message | None:
-    """Turn one signal-cli JSON object into a `Message`, applying the privacy filter.
-
-    Kept: text messages of the groups in `groups`, and messages the owner sent to their own number (Note to Self,
-    seen as a sync message from the linked device). Private conversations and other groups yield None. A sync
-    message is preferred over a data message when both carry text.
-
-    Args:
-        obj: One parsed line of `signal-cli -o json receive` (with an "envelope" key).
-        own: The account's own number (`Signal.account`), used to recognise Note to Self.
-        groups: Ids of the groups to keep (those of the running contests).
-
-    Returns:
-        A `Message`, or None when the object is not a kept text message.
-
-    Raises:
-        TypeError, ValueError, AttributeError: On malformed field types; `pull` catches and skips those.
-    """
-    env = obj.get("envelope") or {}
-    sent = (env.get("syncMessage") or {}).get("sentMessage") or {}
-    data = env.get("dataMessage") or {}
-    msg = sent if sent.get("message") else data if data.get("message") else None
-    if not msg:
-        return None
-    gid = (msg.get("groupInfo") or {}).get("groupId")
-    if gid:
-        if gid not in groups:
-            return None
-        chat = gid
-    elif msg is sent and (sent.get("destinationNumber") == own or sent.get("destination") == own):
-        chat = "self"
-    else:
-        return None  # private conversations are none of house's business
-    sender = env.get("sourceName") or env.get("sourceNumber") or "?"
-    quote = (msg.get("quote") or {}).get("id")
-    return Message(int(msg.get("timestamp") or env.get("timestamp") or 0), chat, str(sender), str(msg["message"]),
-                   int(quote) if quote is not None and str(quote).isdigit() else None)
-
-
 def _lines(name: str) -> list[dict]:
     """Read a JSON-lines file of the data dir, skipping unparsable lines; [] if it does not exist."""
     path = notify.data_dir() / name
@@ -160,26 +121,22 @@ def _group_ids(sig, contests: list[Path]) -> dict[str, list[Path]]:
 
 
 def pull(sig, contests: list[Path]) -> list[Message]:
-    """Receive new Signal messages and append the ones that pass the privacy filter to `inbox.jsonl`.
-
-    Receiving consumes messages in signal-cli, so call this only when the result gets persisted (it does that).
+    """Receive through the store (`signalstore.pull`) and copy new text messages into `inbox.jsonl`.
 
     Args:
         sig: A `Signal` client.
-        contests: Every running contest; their groups define which group chats are kept.
+        contests: Every running contest; their groups (plus Note to Self) are the chats received.
 
     Returns:
-        The messages kept in this call (not those already in the file).
+        The messages added to `inbox.jsonl` in this call.
     """
-    groups = set(_group_ids(sig, contests))
-    kept = []
-    for obj in sig.receive(timeout=1):
-        try:
-            m = extract(obj, sig.account, groups)
-        except (TypeError, ValueError, AttributeError):
-            continue
-        if m:
-            kept.append(m)
+    from . import signalchats, signalstore
+    before = signalstore.last_seq()
+    signalstore.pull(sig, signalchats.allowed(sig, contests))
+    kept = [Message(int(e["ts"]), str(e["chat"]), str((e.get("sender") or {}).get("name") or "?"),
+                    str(e.get("text") or ""), (e.get("quote") or {}).get("ts"))
+            for e in signalstore.iter_events(raw=False)
+            if int(e.get("seq") or 0) > before and e.get("kind") == "message" and e.get("dir") in ("in", "own")]
     path = notify.data_dir() / "inbox.jsonl"
     with path.open("a") as f:
         for m in kept:
