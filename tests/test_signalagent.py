@@ -466,7 +466,7 @@ class TickTest(JobStoreCase):
         for p in self.patches:
             p.start()
         self.sig, self.sd = FakeAgentSig(), FakeSystemd()
-        self.store.set_state(cursor=0)
+        self.store.set_state(cursor=0, greeted=[fx.GID])
 
     def tearDown(self):
         for p in reversed(self.patches):
@@ -736,3 +736,39 @@ class AgentCliTest(TickTest):
         code, _, _ = self.run_cli("gc")
         self.assertEqual(code, 0)
         self.assertFalse(agent.worktree_of(job).exists())
+
+
+class GreetingDoctorTest(TickTest):
+    def test_greeting_once_per_group_when_enabled(self):
+        self.store.set_state(greeted=[])
+        self.tick()
+        self.tick()
+        hellos = [s for s in self.sig.sent if "@claude" in s["text"] and "Cześć" in s["text"]]
+        self.assertEqual([h["group"] for h in hellos], [fx.GID])
+        self.assertTrue(hellos[0]["text"].startswith("🤖 [techarena]") or hellos[0]["text"].startswith("🤖 [house]"))
+        self.add(fx.group_in(5000, "ok", quote=(hellos[0]["ts"], fx.OWN, hellos[0]["text"])))
+        self.tick()
+        self.assertEqual(self.store.all(), [])  # quoting the greeting does not start anything
+
+    def test_no_greeting_when_disabled(self):
+        self.store.set_state(greeted=[])
+        self.store.set_enabled(False)
+        self.tick()
+        self.assertEqual(self.sig.sent, [])
+
+    def test_doctor_lines(self):
+        import subprocess
+
+        def run(argv, **kw):
+            rc = 0 if argv[0] in ("bwrap", "systemd-run") else 1
+            return subprocess.CompletedProcess(argv, rc, "bubblewrap 0.11.1\n", "")
+        lines = agent.doctor_lines(run=run, which=lambda name: f"/usr/bin/{name}")
+        self.assertTrue(any(line.startswith("✓ S7: włączony") for line in lines), lines)
+        self.assertTrue(any("bwrap" in line and line.startswith("✓") for line in lines), lines)
+
+        def broken(argv, **kw):
+            return subprocess.CompletedProcess(argv, 1, "", "setting up uid map: Permission denied")
+        lines = agent.doctor_lines(run=broken, which=lambda name: f"/usr/bin/{name}")
+        self.assertTrue(any(line.startswith("✗") and "bwrap" in line for line in lines), lines)
+        self.store.set_enabled(False)
+        self.assertEqual(agent.doctor_lines(run=run, which=lambda n: None), ["- S7: wyłączony"])

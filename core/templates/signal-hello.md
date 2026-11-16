@@ -1,0 +1,1 @@
+Cześć, tu Claude Wojtka. Napisz `@claude` + zadanie, a wezmę się do pracy i odpiszę tutaj (pracuję w osobnej gałęzi, scala Wojtek). `/status` co robię, `/stop` przerwij, `/lb` wyniki. Odpowiedź na moje pytanie: cytat, 👍/👎 tak/nie, ❤ domyślna.

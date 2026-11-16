@@ -783,6 +783,7 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
         for job in [j for j in store.all() if j.reply_pending and j.status in ("done", "failed", "stopped")]:
             _send_reply(job, sig, store)
         if store.enabled():
+            _greet(sig, store, chats)
             busy = {j.repo for j in store.running()}
             for repo in sorted({j.repo for j in store.all() if j.status == "queued"} - busy):
                 job = store.queued(Path(repo))[0]
@@ -889,3 +890,40 @@ def gc(now: datetime | None = None) -> list[str]:
             if not wt.exists():
                 removed.append(job.id)
     return removed
+
+
+HELLO_TEMPLATE = "core/templates/signal-hello.md"
+
+
+def _greet(sig, store: "JobStore", chats: dict) -> None:
+    """Send the S7 greeting once to every allowed group (never Note to Self) while S7 is on."""
+    greeted = set(store.state().get("greeted") or [])
+    text = (CODE_ROOT / HELLO_TEMPLATE).read_text().strip()
+    for chat in chats.values():
+        if chat.id == SELF or chat.id in greeted:
+            continue
+        contest = str(chat.contests[0]) if len(chat.contests) == 1 else None
+        if _say(sig, chat.id, text, contest=contest, meta={"origin": "agent-hello"}) is not None:
+            greeted.add(chat.id)
+            store.set_state(greeted=sorted(greeted))
+
+
+def doctor_lines(run=subprocess.run, which=shutil.which) -> list[str]:
+    """`house doctor` lines about S7: on/off, sandbox (bubblewrap usable), systemd-run, jobs, breaker."""
+    store = JobStore()
+    if not store.enabled():
+        return ["- S7: wyłączony"]
+    running = len(store.running())
+    lines = [f"✓ S7: włączony · w toku: {running} · porażki z rzędu: {store.state().get('failures', 0)}"]
+    if not which("bwrap"):
+        lines.append("✗ S7: brak bwrap (sandbox Claude Code); `sudo apt install bubblewrap`")
+    else:
+        r = run(["bwrap", "--ro-bind", "/", "/", "--unshare-net", "true"], capture_output=True, text=True,
+                check=False, timeout=10)
+        lines.append("✓ S7: bwrap działa" if r.returncode == 0 else
+                     f"✗ S7: bwrap nie działa ({(r.stderr or '').strip()[:120]}); sprawdź AppArmor userns")
+    if not which("systemd-run"):
+        lines.append("✗ S7: brak systemd-run")
+    if not which("claude"):
+        lines.append("✗ S7: brak `claude`")
+    return lines
