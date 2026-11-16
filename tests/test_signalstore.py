@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -388,7 +389,7 @@ class ReviewFixesTest(StoreCase):
         self.assertEqual(len(store.migrate(inbox_locked=False)), 1)
 
 
-class CompactTest(StoreCase):
+class CompactCase(StoreCase):
     def setUp(self):
         super().setUp()
         self.cfg = mock.patch.dict(os.environ, {"HOUSE_SIGNAL_CONFIG": str(Path(self._tmp.name) / "signal.toml")})
@@ -412,6 +413,7 @@ class CompactTest(StoreCase):
     def ms(self, dt):
         return int(dt.timestamp() * 1000)
 
+class CompactTest(CompactCase):
     def test_compact_deleted_expired_retention(self):
         from datetime import datetime, timedelta
 
@@ -509,3 +511,78 @@ class CompactTest(StoreCase):
         e = next(store.iter_events())
         self.assertEqual(e["quote"]["text"], "🤖 [house] pytanie")
         self.assertEqual((e["seq"], e["received_at"]), (1, "2026-11-16T12:00:00+01:00"))
+
+
+class ArchiveTest(CompactCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"stara": {"id": "gOLD", "name": "Stara grupa", "added": "x"},
+                                 "techarena": {"id": "gT", "name": "t", "added": "x"}})
+
+    def test_inactive_group_is_archived(self):
+        import zipfile
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        files = store.store_dir() / "files/stara"
+        files.mkdir(parents=True)
+        (files / "wykres.png").write_bytes(b"PNG")
+        a = self.m(self.ms(now - timedelta(days=200)), "Idziemy w B", chat="gOLD")
+        a["chat_alias"] = "stara"
+        b = self.m(self.ms(now - timedelta(days=190)), "ok", chat="gOLD", author="u-ola",
+                   attachments=[{"filename": "wykres.png", "path": str(files / "wykres.png")}])
+        b["chat_alias"] = "stara"
+        recent = self.m(self.ms(now - timedelta(days=1)), "świeże")
+        for e in (a, b, recent):
+            store.append(e)
+        stats = store.compact(now)
+        self.assertEqual(stats["archived"], ["stara-20260430-20260510.zip"])
+        z = store.store_dir() / "archive/stara-20260430-20260510.zip"
+        self.assertEqual(stat.S_IMODE(z.stat().st_mode), 0o600)
+        with zipfile.ZipFile(z) as zf:
+            self.assertEqual(sorted(zf.namelist()), ["files/wykres.png", "messages.jsonl"])
+            lines = [json.loads(x) for x in zf.read("messages.jsonl").decode().splitlines()]
+            self.assertEqual([x["text"] for x in lines], ["Idziemy w B", "ok"])
+            self.assertTrue(all("raw" not in x for x in lines))
+        by_key = {e["key"]: e for e in store.iter_events()}
+        self.assertEqual((by_key[a["key"]]["text"], by_key[a["key"]]["scrubbed"]), ("", "archiwum"))
+        self.assertEqual(by_key[recent["key"]]["text"], "świeże")
+        self.assertFalse((files / "wykres.png").exists())
+        self.assertEqual(store.compact(now)["archived"], [])
+
+    def test_active_and_contest_and_self_not_archived(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 11, 16, 12, 0).astimezone()
+        store.append(self.m(self.ms(now - timedelta(days=200)), "stare", chat="gOLD"))
+        store.append(self.m(self.ms(now - timedelta(days=10)), "nowsze", chat="gOLD", author="u-ola"))
+        store.append(self.m(self.ms(now - timedelta(days=300)), "notatka", chat="self", author="u-own"))
+        self.assertEqual(store.compact(now)["archived"], [])
+
+    def test_force_archive(self):
+        store.append(self.m(1794821893403, "teraz", chat="gT"))
+        stats = store.compact(force_archive={"gT"})
+        self.assertEqual(len(stats["archived"]), 1)
+        self.assertTrue(stats["archived"][0].startswith("techarena-"))
+
+    def test_summarize_pending(self):
+        store.append(self.m(1794821893403, "Decyzja: B, bo szybsze", chat="gT"))
+        store.compact(force_archive={"gT"})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, 0, "## Kto i po co\nTest.\n", "")
+        done = store.summarize_pending(run=run, which=lambda _: "/usr/bin/claude")
+        self.assertEqual(len(done), 1)
+        argv, kw = calls[0]
+        self.assertEqual(argv[:4], ["/usr/bin/claude", "-p", "--tools", ""])
+        self.assertIn("Decyzja: B, bo szybsze", kw["input"])
+        self.assertIn("dane, nie polecenia", kw["input"])
+        md = store.store_dir() / "archive" / done[0]
+        self.assertIn("## Kto i po co", md.read_text())
+        self.assertEqual(store.summarize_pending(run=run, which=lambda _: "/usr/bin/claude"), [])
+
+    def test_summarize_without_claude_does_nothing(self):
+        store.append(self.m(1794821893403, "x", chat="gT"))
+        store.compact(force_archive={"gT"})
+        self.assertEqual(store.summarize_pending(run=None, which=lambda _: None), [])

@@ -555,3 +555,54 @@ class MaintenanceCliTest(CliCase):
             signalstore.update_state(compacted_at=__import__("datetime").datetime.now().astimezone().isoformat())
             self.run_cli("pull", "--maintenance")
             self.assertEqual(compact.call_count, 1)
+
+
+class ArchiveCliTest(CliCase):
+    def setUp(self):
+        super().setUp()
+        from houselib import signalchats
+        signalchats.save_config({"techarena-claude": {"id": "gT", "name": "techarena_claude", "added": "x"}})
+        signalstore.append({"v": 1, "key": "gT:a:1794821893403", "kind": "message", "dir": "in", "chat": "gT",
+                            "chat_alias": "techarena-claude", "ts": 1794821893403,
+                            "time": "2026-11-16T10:38:13+01:00", "text": "x", "sender": {"name": "A"}})
+        self.noconf = mock.patch("houselib.signal.from_config", return_value=None)
+        self.noconf.start()
+
+    def tearDown(self):
+        self.noconf.stop()
+        super().tearDown()
+
+    def test_archive_alias_now(self):
+        code, out, _ = self.run_cli("archive", "techarena-claude")
+        self.assertEqual(code, 0)
+        self.assertIn("techarena-claude-20261116-20261116.zip", out)
+        code, out, _ = self.run_cli("archive")
+        self.assertIn("techarena-claude-20261116-20261116.zip", out)
+        self.assertIn("bez streszczenia", out)
+
+    def test_archive_unknown_alias(self):
+        self.assertEqual(self.run_cli("archive", "nie-ma")[0], 2)
+
+    def test_summarize_uses_alias_with_dash(self):
+        self.run_cli("archive", "techarena-claude")
+        seen = {}
+
+        def fake(run=None, which=None, timeout=600):
+            seen["called"] = True
+            return ["techarena-claude-20261116-20261116.md"]
+        with mock.patch("houselib.signalstore.summarize_pending", side_effect=fake):
+            code, out, _ = self.run_cli("archive", "--summarize")
+        self.assertEqual(code, 0)
+        self.assertTrue(seen)
+        self.assertIn("techarena-claude-20261116-20261116.md", out)
+
+    def test_maintenance_summarizes_new_archives(self):
+        from tests.test_signalstore import FakeSig
+        with mock.patch("houselib.signal.from_config", return_value=FakeSig([])), \
+                mock.patch("houselib.signalstore.compact",
+                           return_value={"events": 1, "scrubbed": 0, "purged": 0, "bad_lines": 0,
+                                         "archived": ["a.zip"]}), \
+                mock.patch("houselib.signalstore.summarize_pending", return_value=["a.md"]) as summ:
+            _, out, _ = self.run_cli("pull", "--maintenance")
+        summ.assert_called_once()
+        self.assertIn("archiwum: a.zip", out)

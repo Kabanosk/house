@@ -30,8 +30,11 @@ def _client():
 def _compact_line(stats: dict) -> str:
     if "skipped" in stats:
         return f"compact pominięty: {stats['skipped']}"
-    return (f"compact: {stats['events']} zdarzeń, wyczyszczono {stats['scrubbed']}, usunięte rozmowy "
+    line = (f"compact: {stats['events']} zdarzeń, wyczyszczono {stats['scrubbed']}, usunięte rozmowy "
             f"{stats['purged']}, złe linie {stats['bad_lines']}")
+    if stats.get("archived"):
+        line += "\narchiwum: " + ", ".join(stats["archived"])
+    return line
 
 
 def cmd_pull(args) -> int:
@@ -50,7 +53,38 @@ def cmd_pull(args) -> int:
     if args.maintenance:
         last = signalread.parse_iso(signalstore.read_state().get("compacted_at"))
         if last is None or datetime.now().astimezone() - last > timedelta(hours=24):
-            print(_compact_line(signalstore.compact()))
+            stats = signalstore.compact()
+            print(_compact_line(stats))
+            if stats.get("archived"):
+                for name in signalstore.summarize_pending():
+                    print(f"streszczenie: {name}")
+    return 0
+
+
+def cmd_archive(args) -> int:
+    """`house signal archive [ALIAS] [--summarize]`: list archives, archive a chat now, or write summaries.
+
+    Chats of `signal.toml` with no message for 180 days are archived by `compact` on their own (zip of events
+    and files + a summary for agents). Exit 0, 2 for an unknown alias.
+    """
+    if args.alias:
+        try:
+            chat = signalchats.resolve(args.alias)
+        except ValueError as e:
+            return _usage(str(e))
+        print(_compact_line(signalstore.compact(force_archive={chat.id})))
+    if args.summarize:
+        for name in signalstore.summarize_pending() or ["brak archiwów do streszczenia (albo nie ma `claude`)"]:
+            print(f"streszczenie: {name}" if name.endswith(".md") else name)
+    if not args.alias and not args.summarize:
+        folder = signalstore.store_dir() / "archive"
+        zips = sorted(folder.glob("*.zip")) if folder.is_dir() else []
+        for z in zips:
+            note = "streszczenie: " + z.with_suffix(".md").name if z.with_suffix(".md").exists() \
+                else "bez streszczenia (`house signal archive --summarize`)"
+            print(f"{z.name} · {signalread.fmt_size(z.stat().st_size)} · {note}")
+        if not zips:
+            print("brak archiwów")
     return 0
 
 
@@ -449,6 +483,10 @@ def register(sub) -> None:
     cp.set_defaults(func=_migrating(cmd_compact))
     rp = ss.add_parser("reparse", help="rebuild stored events from their signal-cli envelopes (after a parser fix)")
     rp.set_defaults(func=_migrating(cmd_reparse))
+    ar = ss.add_parser("archive", help="archives of inactive chats: list, archive a chat now, --summarize")
+    ar.add_argument("alias", nargs="?")
+    ar.add_argument("--summarize", action="store_true", help="write missing summaries with `claude -p` (no tools)")
+    ar.set_defaults(func=_migrating(cmd_archive))
     m = ss.add_parser("migrate", help="move the old inbox.jsonl / sent.jsonl into the store (idempotent)")
     m.set_defaults(func=cmd_migrate)
     sd = ss.add_parser("send", help="send to an allowed chat (prefix 🤖, logged): send CHAT TEXT [--reply-to TS]")
