@@ -15,6 +15,26 @@ Powiązane: [Signal](signal.md), [Ochrona](guard.md).
 Plany: [`signal-agent`](../plans/2026-11-16-signal-agent.md),
 [`signal-agent-docker`](../plans/2026-11-16-signal-agent-docker.md).
 
+## Ranking (`/lb`)
+
+Timer `house-lb` (`house setup --lb-timer`) co 5 min uruchamia `house lb poll`, który dla konkursów z
+`leaderboard.cmd` w `.house/spec.yaml` (co `leaderboard.every`, domyślnie 15min) pobiera oficjalny ranking i dopisuje
+zmiany do `.house/leaderboard.jsonl`. Sam nic nie wysyła. `/lb` niczego nie pobiera: odpowiada, co się zmieniło od
+poprzedniego `/lb` w tej rozmowie (cytując je), albo tabelą `miejsce | team | wynik` (top 10 + my) przy pierwszym
+pytaniu, > 3 zmianach lub po > 8 h. Komenda ma wypisać JSON `[{"team", "score"}]` w kolejności rankingu, i to z pełną
+ścieżką do programów (PATH timera jest minimalny). Dla Agorize (techareny) gotowe jest
+`house lb agorize <url strony leaderboardu> [--sort max|min]`:
+
+```yaml
+leaderboard:
+  cmd: "/ścieżka/do/house/bin/house lb agorize https://huawei.agorize.com/en/challenges/<konkurs>/pages/leaderboard?lang=en --sort max"
+  every: 15min
+  team: UwUr2
+```
+
+`house lb show <konkurs>` pokazuje tabelę w terminalu, `house lb poll --force [konkurs]` pobiera od razu.
+Spec: [`leaderboard-tracking`](../specs/2026-11-17-leaderboard-tracking-design.md).
+
 ## Kontener (S7.1, zalecane)
 
 `house signal agent image` buduje obraz (przypięty Claude Code) i uruchamia proxy, a `claude setup-token` +

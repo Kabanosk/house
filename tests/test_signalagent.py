@@ -688,17 +688,56 @@ class CommandTest(TickTest):
         self.tick()
         self.assertIn("brak konkursu", self.sig.sent[-1]["text"])
 
-    def test_lb_with_contest(self):
-        from unittest import mock
-
-        from houselib.signalchats import Chat
-        contest = self.tmp / "fr-2026"
+    def lb_contest(self, name, rows, spec="leaderboard:\n  cmd: x\n  team: UwUr2\n"):
+        import json
+        contest = self.tmp / name
         (contest / ".house").mkdir(parents=True)
-        self.chats[fx.GID] = Chat(fx.GID, "fr", "Team", "konkurs fr", (contest,))
-        with mock.patch("houselib.exp.summary_line", return_value="exp: best 0.81 (E-004)"):
-            self.add(fx.group_in(2000, "/lb"))
-            self.tick()
-        self.assertIn("best 0.81", self.sig.sent[-1]["text"])
+        (contest / ".house/spec.yaml").write_text(spec)
+        if rows is not None:
+            self.lb_snap(contest, rows, "2026-11-17T12:00:00+01:00")
+        return contest
+
+    def lb_snap(self, contest, rows, at):
+        import json
+        with open(contest / ".house/leaderboard.jsonl", "a") as f:
+            f.write(json.dumps({"at": at, "rows": [{"team": t, "score": v} for t, v in rows]}) + "\n")
+
+    def lb_chat(self, *contests):
+        from houselib.signalchats import Chat
+        self.chats[fx.GID] = Chat(fx.GID, "fr", "Team", "konkurs fr", tuple(contests))
+
+    def test_lb_first_then_sentences_quote_previous(self):
+        contest = self.lb_contest("fr-2026", [("A", .54), ("UwUr2", .53)])
+        self.lb_chat(contest)
+        self.add(fx.group_in(2000, "/lb"))
+        self.tick()
+        first = self.sig.sent[-1]
+        self.assertIn("1 | A | 0.54", first["text"])
+        self.assertEqual(first["quote"][0], 2000)
+        self.lb_snap(contest, [("B", .55), ("A", .54), ("UwUr2", .53)], "2026-11-17T13:00:00+01:00")
+        self.add(fx.group_in(3000, "/lb"))
+        self.tick()
+        second = self.sig.sent[-1]
+        self.assertIn("B wszedł z 0.55 na #1", second["text"])
+        self.assertEqual(second["quote"], (first["ts"], fx.OWN))
+        seen = self.store.state()["lb_seen"][f"{fx.GID}|{contest}"]
+        self.assertEqual((seen["at"], seen["ts"]), ("2026-11-17T13:00:00+01:00", second["ts"]))
+
+    def test_lb_no_config(self):
+        self.lb_chat(self.lb_contest("fr-2026", None, spec=""))
+        self.add(fx.group_in(2000, "/lb"))
+        self.tick()
+        self.assertIn("brak konfiguracji rankingu (spec.yaml: leaderboard.cmd)", self.sig.sent[-1]["text"])
+
+    def test_lb_two_contests_separate_memory(self):
+        a, b = self.lb_contest("a-2026", [("A", .5)]), self.lb_contest("b-2026", [("B", .7)])
+        self.lb_chat(a, b)
+        self.add(fx.group_in(2000, "/lb"))
+        self.tick()
+        texts = [m["text"] for m in self.sig.sent[-2:]]
+        self.assertIn("1 | A | 0.5", texts[0])
+        self.assertIn("1 | B | 0.7", texts[1])
+        self.assertEqual(set(self.store.state()["lb_seen"]), {f"{fx.GID}|{a}", f"{fx.GID}|{b}"})
 
 
 class AgentCliTest(TickTest):

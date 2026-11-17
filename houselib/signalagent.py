@@ -1021,6 +1021,35 @@ def _elapsed(job: Job, now: datetime) -> str:
     return f"{int((now - start).total_seconds() // 60)} min" if start else "?"
 
 
+def _leaderboard(cmd: Command, sig, store: "JobStore", chats: dict | None, now: datetime, quote) -> list[str]:
+    """`/lb`: per contest of the chat, changes since this chat's previous `/lb` (state `lb_seen`), never a fetch."""
+    from . import leaderboard
+    from .signalread import parse_iso
+    contests = list((chats or {}).get(cmd.chat).contests) if (chats or {}).get(cmd.chat) else []
+    if not contests:
+        _say(sig, cmd.chat, "brak konkursu dla tej rozmowy", quote=quote)
+        return []
+    for c in contests:
+        key = f"{cmd.chat}|{c}"
+        try:
+            if leaderboard.config(c) is None:
+                _say(sig, cmd.chat, "brak konfiguracji rankingu (spec.yaml: leaderboard.cmd)", contest=str(c),
+                     quote=quote)
+                continue
+            prev = (store.state().get("lb_seen") or {}).get(key) or {}
+            answer = leaderboard.summary(c, prev.get("at"), parse_iso(prev.get("asked")), now)
+        except Exception as e:  # noqa: BLE001 — a broken leaderboard file must not break the dispatcher
+            _say(sig, cmd.chat, f"błąd odczytu rankingu: {e}"[:300], contest=str(c), quote=quote)
+            continue
+        own = (prev["ts"], sig.account) if answer.sentences and prev.get("ts") else quote
+        ts = _say(sig, cmd.chat, answer.text, contest=str(c), quote=own)
+        if ts is not None and answer.at:
+            seen = dict(store.state().get("lb_seen") or {})
+            seen[key] = {"at": answer.at, "ts": ts, "asked": now.isoformat()}
+            store.set_state(lb_seen=seen)
+    return []
+
+
 def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, chats: dict | None = None,
                    now: datetime | None = None) -> list[str]:
     """Answer a chat command without a model: /status, /lb, /stop (this chat's jobs only), /agent off|on (owner)."""
@@ -1051,19 +1080,7 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
         _say(sig, cmd.chat, "\n".join(lines), contest=contest, quote=quote)
         return []
     if cmd.name == "lb":
-        from . import exp
-        contests = list((chats or {}).get(cmd.chat).contests) if (chats or {}).get(cmd.chat) else []
-        if not contests:
-            _say(sig, cmd.chat, "brak konkursu dla tej rozmowy", quote=quote)
-            return []
-        for c in contests:
-            line = None
-            try:
-                line = exp.summary_line(c)
-            except Exception:  # noqa: BLE001 — a broken experiments file must not break the dispatcher
-                line = None
-            _say(sig, cmd.chat, line or "brak wyników eksperymentów", contest=str(c), quote=quote)
-        return []
+        return _leaderboard(cmd, sig, store, chats, now, quote)
     if cmd.name == "stop":
         target = None
         if cmd.quote_ts is not None:

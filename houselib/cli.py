@@ -501,6 +501,39 @@ def cmd_yc(args) -> int:
     return 0
 
 
+def cmd_lb(args) -> int:
+    """Implement `house lb poll [--force] [name]`, `house lb show <name>`, `house lb agorize <url> [--sort]`.
+
+    `poll` fetches every due contest with `leaderboard.cmd` (or just `name`) and prints one line per fetch;
+    `show` prints the latest stored board as a table; `agorize` prints an Agorize board as contract JSON.
+
+    Returns:
+        0; `poll` gives 1 when any fetch failed, `agorize` raises ValueError (→ 1) on a page without the API.
+    """
+    import json
+    from datetime import datetime
+    from . import leaderboard
+    if not args.target and args.action != "poll":
+        raise ValueError(f"podaj {'URL strony' if args.action == 'agorize' else 'konkurs'}: house lb {args.action} …")
+    if args.action == "agorize":
+        print(json.dumps(leaderboard.agorize_board(args.target, sort=args.sort), ensure_ascii=False))
+        return 0
+    if args.action == "show":
+        print(leaderboard.summary(contest_dir(args.target), None, None, datetime.now().astimezone()).text)
+        return 0
+    contests = [contest_dir(args.target)] if args.target else _all_contests()
+    now, failed = datetime.now().astimezone(), False
+    for c in contests:
+        try:
+            line = leaderboard.poll(c, now, force=args.force)
+        except Exception as e:  # noqa: BLE001 — one broken contest must not stop the others
+            line = f"lb {c.name}: błąd: {e}"
+        if line:
+            print(line)
+            failed = failed or ": błąd:" in line
+    return 1 if failed else 0
+
+
 def cmd_setup(args) -> int:
     """Implement `house setup`: install user-level skills, fetch the Remotion skill, check tools, print next steps.
 
@@ -513,6 +546,10 @@ def cmd_setup(args) -> int:
     if getattr(args, "signal_timer", False):
         service, timer = setup.install_signal_timer(HOUSE_ROOT)
         print(f"✓ timer Signala: {timer.name} co 5 min (house signal pull + codzienny compact); {service}")
+        return 0
+    if getattr(args, "lb_timer", False):
+        service, timer = setup.install_lb_timer(HOUSE_ROOT)
+        print(f"✓ timer rankingów: {timer.name} co 5 min (house lb poll); {service}")
         return 0
     if getattr(args, "signal_hook", False):
         path = adapters.write_house_settings(HOUSE_ROOT)
@@ -674,7 +711,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only: add the Signal session hook to this repo's .claude/settings.local.json")
     st.add_argument("--signal-timer", action="store_true",
                     help="only: install the systemd user timer that pulls Signal every 5 minutes")
+    st.add_argument("--lb-timer", action="store_true",
+                    help="only: install the systemd user timer that runs `house lb poll` every 5 minutes")
     st.set_defaults(func=cmd_setup)
+
+    lbp = sub.add_parser("lb", help="official leaderboards: poll (background timer), show, agorize fetcher")
+    lbp.add_argument("action", choices=["poll", "show", "agorize"])
+    lbp.add_argument("target", nargs="?", help="contest name (poll/show) or the leaderboard page URL (agorize)")
+    lbp.add_argument("--force", action="store_true", help="poll: ignore leaderboard.every")
+    lbp.add_argument("--sort", choices=["max", "min"], help="agorize: sort by score (default: API order)")
+    lbp.set_defaults(func=cmd_lb)
 
     ad = sub.add_parser("adopt", help="attach an existing contest repo in place (symlink in contests/, adds .house/)")
     ad.add_argument("name")
