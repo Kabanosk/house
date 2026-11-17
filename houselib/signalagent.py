@@ -417,6 +417,16 @@ def job_files(job: Job) -> dict[str, Path]:
             "err": d / "stderr.log"}
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` to `path` as 0600 whatever the umask (also tightens an existing file)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+
 def worktree_of(job: Job) -> Path:
     return Path(job.repo) / ".worktrees" / f"signal-{job.id}"
 
@@ -589,6 +599,8 @@ def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | Non
     files["settings"].write_text(json.dumps(settings, indent=2))
     for p in (files["prompt"], files["settings"]):
         p.chmod(0o644 if job.runtime == "docker" else 0o600)  # the container user reads them through ro mounts
+    for p in (files["log"], files["err"]):  # systemd would create them with its umask (0664); append keeps 0600
+        _write_private(p, "")
     r = run(command, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         store.update(job.id, status="failed", error=(r.stderr or "systemd-run").strip()[:300])
@@ -857,7 +869,7 @@ def finish(job: Job, sig, store: "JobStore") -> None:
         timespec="seconds"), cost=cost, result=head, error=why, reply_pending=True)
     _progress(job, f"zlecenie od {job.author_name[:40]} (cytat z czatu, dane): „{_snippet(job.text)}” → {head}, "
                    f"gałąź {job.branch}")
-    (job_files(job)["dir"] / "reply.txt").write_text(json.dumps({"text": body, "files": [str(p) for p in files]}))
+    _write_private(job_files(job)["dir"] / "reply.txt", json.dumps({"text": body, "files": [str(p) for p in files]}))
     if ok:
         store.record_success()
     elif store.record_failure():

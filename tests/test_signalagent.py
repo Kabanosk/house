@@ -555,6 +555,23 @@ class TickTest(JobStoreCase):
         self.assertEqual(statuses, ["queued", "running"])
         self.assertTrue(any("kolejka: 1" in s["text"] for s in self.sig.sent), [s["text"] for s in self.sig.sent])
 
+    def test_job_files_are_private(self):
+        # systemd's user manager opens StandardOutput=append: files with its umask (0002 → 0664)
+        import os
+        old = os.umask(0o002)
+        try:
+            self.add(fx.self_note(1000, "@claude dopisz plik"))
+            self.tick()
+            (job,) = self.store.all()
+            files = agent.job_files(job)
+            for key in ("log", "err"):
+                self.assertEqual(oct(files[key].stat().st_mode & 0o777), "0o600", key)
+            self.finish_unit(job)
+            self.tick()
+            self.assertEqual(oct((files["dir"] / "reply.txt").stat().st_mode & 0o777), "0o600")
+        finally:
+            os.umask(old)
+
     def test_finish_commits_and_replies(self):
         from tests.helpers import git
         self.add(fx.self_note(1000, "@claude dopisz plik"))
