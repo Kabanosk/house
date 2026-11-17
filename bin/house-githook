@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Git hook entry point: `house-githook pre-commit` / `house-githook pre-push <remote> <url>`.
+
+Called by the two wrapper scripts that `house adapt` writes into a contest repo's hooks directory; the logic lives in
+`houselib.githook`. In a task worktree it refuses commits with secrets, `.house/` files or protected files, and
+pushes to a remote outside spec `guard.push_allow` or a force push to the main branch. Everywhere else it allows.
+
+Exit codes: 1 refuses (the reasons go to stderr and the agent reads them); 0 allows. Fail open: any internal error
+prints one `house-githook: skipped ...` line to stderr and exits 0.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def main() -> int:
+    """Run the hook named by `sys.argv[1]` and return its exit code."""
+    try:
+        from houselib import githook
+    except Exception as e:  # noqa: BLE001 — a broken checkout must not block commits
+        print(f"house-githook: skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        return 0
+    return githook.main(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -200,10 +200,49 @@ def _in_checks(rel: str) -> bool:
     return rel == ".house/checks" or rel.startswith(".house/checks/")
 
 
+def _git_internal(rel: str) -> bool:
+    """Tell whether `rel` is a file that can switch the git hooks off: `.git/hooks/**`, `.git/config` or a
+    `config.worktree` (where `core.hooksPath` can be set per worktree)."""
+    return rel == ".git/config" or rel.startswith(".git/hooks/") or rel.endswith("/config.worktree")
+
+
+HOOKS_REASON = ("git hooks (pre-commit, pre-push) enforce the guard rules inside task worktrees; "
+                "`--no-verify`, `core.hooksPath` and edits of `.git/hooks` or `.git/config` are for the human")
+HOOKSPATH_RE = re.compile(r"core\.hookspath", re.IGNORECASE)
+CONFIG_READ_RE = re.compile(r"--get\b|--get-all\b|--get-regexp\b|--list\b")
+
+
+def pinned_sha(contest: Path, owner: str, rel: str) -> str | None:
+    """The SHA-256 that `house check --freeze` pinned for protected file `rel` of task `owner` (None: not pinned)."""
+    return (_checks(contest).get(owner, {}).get("frozen", {}).get("protected") or {}).get(rel)
+
+
+def protected_violation(contest: Path, rel: str, content: bytes | None, protected: dict[str, str] | None = None) -> str | None:
+    """Say why changing the protected file `rel` to `content` (None = deleted) is refused, else None.
+
+    Same rule as `diff_violations`: any change to the local scorer counts; a frozen acceptance test may be
+    changed only back to its pinned content.
+
+    Args:
+        contest: Contest checkout root.
+        rel: Path relative to the checkout.
+        content: New content of the file, or None when it is deleted.
+        protected: Result of `protected_paths(contest)` when the caller already has it.
+    """
+    owner = (protected if protected is not None else protected_paths(contest)).get(rel)
+    if not owner:
+        return None
+    if owner != "local_scorer" and content is not None \
+            and hashlib.sha256(content).hexdigest() == pinned_sha(contest, owner, rel):
+        return None
+    return f"{rel} is protected ({owner}) and was changed"
+
+
 def check_edit(rel: str, contest: Path) -> str | None:
     """Decide whether a worker may write the file `rel`.
 
-    Refuses `.house/checks/**` (written only by `house check`) and every file in `protected_paths`.
+    Refuses `.house/checks/**` (written only by `house check`), every file in `protected_paths`, and the files that
+    configure git hooks (`.git/hooks/**`, `.git/config`).
 
     Args:
         rel: File path relative to its checkout, as returned by `repo_relative`.
@@ -214,6 +253,8 @@ def check_edit(rel: str, contest: Path) -> str | None:
     """
     if _in_checks(rel):
         return f"{rel} is written only by `house check` (frozen acceptance criteria)"
+    if _git_internal(rel):
+        return f"{rel}: {HOOKS_REASON}"
     owner = protected_paths(contest).get(rel)
     if owner:
         return f"{rel} is protected ({owner}); acceptance tests and the scorer must not be changed by workers"
@@ -319,6 +360,18 @@ def _written_paths(seg: list[str], cwd: Path) -> list[tuple[str, Path]]:
 MAX_SCAN_BYTES = 1_000_000
 
 
+def looks_secret(name: str, data: bytes) -> bool:
+    """Tell whether a file with this base name and content looks like a secret (`.env*` except `.env.example`, or a
+    key/token pattern in the first `MAX_SCAN_BYTES`; binary data never matches by content)."""
+    if name.startswith(".env") and name != ".env.example":
+        return True
+    head = data[:MAX_SCAN_BYTES]
+    if b"\0" in head[:8192]:
+        return False  # binary (data, model weights)
+    text = head.decode(errors="ignore")
+    return any(r.search(text) for r in SECRET_RES)
+
+
 def _secret_file(path: Path) -> bool:
     """Tell whether `path` is a regular text file that looks like a secret (`.env*` or a key/token pattern)."""
     if path.is_symlink() or not path.is_file():
@@ -331,10 +384,7 @@ def _secret_file(path: Path) -> bool:
             head = f.read(MAX_SCAN_BYTES)
     except OSError:
         return False
-    if b"\0" in head[:8192]:
-        return False  # binary (data, model weights)
-    text = head.decode(errors="ignore")
-    return any(r.search(text) for r in SECRET_RES)
+    return looks_secret(name, head)
 
 
 def _status(cwd: Path) -> list[tuple[str, str]]:
@@ -421,7 +471,11 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
       * `git add` / `git commit -a` that would stage a file that looks like a secret (`.env*` except
         `.env.example`, or a key/token pattern);
       * `git push` to a remote not listed in spec `guard.push_allow` (default `["origin"]`) or a force push
-        (`--force`, `--force-with-lease`, `-f`, `+ref`) to the contest's main branch.
+        (`--force`, `--force-with-lease`, `-f`, `+ref`) to the contest's main branch;
+      * switching the git hooks off: `--no-verify` (also `git commit -n`), any mention of `core.hooksPath` other than
+        a read (`--get`, `--list`), writes to `.git/hooks/**` or `.git/config`. The hooks themselves (`githook.py`)
+        are the real enforcement of the secret, push and protected-file rules inside task worktrees; this check
+        only keeps the agent from removing them.
     Best effort: it understands `git -C dir` and `-c k=v`, but not variables, subshell expansion or scripts.
 
     Args:
@@ -433,15 +487,20 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
         A reason string shown to the agent, or None when the command is allowed.
     """
     protected = protected_paths(contest)
+    if HOOKSPATH_RE.search(_normalize(command)) and not CONFIG_READ_RE.search(command):
+        return HOOKS_REASON
     for seg in _segments(command):
         for target, base in _written_paths(seg, cwd):
             rel = repo_relative(target, base, contest)
-            if rel and (rel in protected or _in_checks(rel)):
+            if rel and (rel in protected or _in_checks(rel) or _git_internal(rel)):
                 reason = check_edit(rel, contest)
                 if reason:
                     return reason
         if seg[0] == "git":
             sub, gcwd = _git_parts(seg, cwd)
+            if "--no-verify" in sub or (sub[:1] == ["commit"] and any(
+                    a.startswith("-") and not a.startswith("--") and "n" in a for a in sub[1:])):
+                return HOOKS_REASON
             if sub[:1] in (["add"], ["commit"]):
                 bad = [p for p in _staging_candidates(sub, gcwd) if _secret_file(gcwd / p)]
                 if bad:
@@ -728,11 +787,8 @@ def _secrets_in_history(repo: Path, base: str) -> list[str]:
                 found.add(rel)
                 continue
             blob = subprocess.run(["git", "show", f"{commit}:{rel}"], cwd=repo, capture_output=True, check=False)
-            head = blob.stdout[:MAX_SCAN_BYTES]
-            if blob.returncode == 0 and b"\0" not in head[:8192]:
-                text = head.decode(errors="ignore")
-                if any(r.search(text) for r in SECRET_RES):
-                    found.add(rel)
+            if blob.returncode == 0 and looks_secret(name, blob.stdout):
+                found.add(rel)
     return sorted(found)
 
 
