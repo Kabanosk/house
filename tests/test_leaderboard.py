@@ -62,8 +62,7 @@ class ConfigTest(ContestCase):
     def test_parse_rows(self):
         rows = lb.parse_rows('[{"team": "A", "score": "0.53", "id": 7}]')
         self.assertEqual(rows, [{"team": "A", "score": 0.53, "id": 7}])
-        self.assertEqual(lb.parse_rows("[]"), [])
-        for bad in ("{}", "<html>", '[{"score": 1}]', '[{"team": "A", "score": "x"}]'):
+        for bad in ("[]", "{}", "<html>", '[{"score": 1}]', '[{"team": "A", "score": "x"}]'):
             with self.assertRaises(ValueError, msg=bad):
                 lb.parse_rows(bad)
 
@@ -121,6 +120,10 @@ class ChangesTest(unittest.TestCase):
         new = board(("A", .54), ("D", .535), ("C", .53), ("B", .53))
         self.assertEqual(lb.changes(old, new, None),
                          [lb.Change("D", .535, None, 2, None), lb.Change("C", .53, .52, 3, 3)])
+
+    def test_dropped_team_is_a_change(self):
+        old = board(("A", .54), ("B", .53), ("C", .52))
+        self.assertEqual(lb.changes(old, board(("A", .54), ("C", .52)), None), [lb.Change("B", .53, .53, None, 2)])
 
     def test_tie_swap_is_not_a_change(self):
         self.assertEqual(lb.changes(board(("A", .5), ("B", .5)), board(("B", .5), ("A", .5)), None), [])
@@ -182,6 +185,13 @@ class SummaryTest(ContestCase):
         s = lb.summary(self.contest, T0.isoformat(), T0, T0 + timedelta(hours=2))
         self.assertIn("A zmienił na 0.52 (było 0.54), z #1 na #2", s.text)
         self.assertIn("my: #3 (0.5)", s.text)
+
+    def test_summary_dropped_sentence(self):
+        self.snap(board(("A", .54), ("B", .53), (US, .5)), T0)
+        self.snap(board(("A", .54), (US, .5)), T0 + timedelta(hours=1))
+        s = lb.summary(self.contest, T0.isoformat(), T0, T0 + timedelta(hours=2))
+        self.assertIn("B wypadł z rankingu (był #2)", s.text)
+        self.assertIn("my: #2 (0.5), było #3", s.text)
 
     def test_summary_many_changes_table(self):
         self.snap(board(("A", .5), ("B", .5), ("C", .5), ("D", .5), (US, .4)), T0)
@@ -266,6 +276,13 @@ class AgorizeTest(unittest.TestCase):
         self.assertEqual([r["team"] for r in lb.agorize_board("https://huawei.agorize.com/x", fetch=fetch,
                                                               sort="min")], ["B", "A"])
 
+    def test_agorize_bad_api_body(self):
+        for body in ({"detail": "token expired"}, {"data": []}, {"data": {"x": 1}}, []):
+            fetch, _ = self.fake(None)
+            with self.assertRaises(ValueError, msg=body):
+                lb.agorize_board("https://huawei.agorize.com/x",
+                                 fetch=lambda u, h, b=body: PAGE if "agorize" in u else json.dumps(b))
+
     def test_agorize_missing_token(self):
         with self.assertRaises(ValueError):
             lb.agorize_board("https://huawei.agorize.com/x", fetch=lambda u, h: "<html>login</html>")
@@ -297,6 +314,22 @@ class CliTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             code = self.cli.main(list(argv))
         return code, out.getvalue()
+
+    def test_cli_poll_one_contest_crash_does_not_stop_others(self):
+        from unittest import mock
+        real = lb.poll
+
+        def poll(c, now, **kw):
+            if c.name == "a-2026":
+                raise OSError("disk full")
+            return real(c, now, **kw)
+        (self.root / "contests/b-2026/.house/spec.yaml").write_text(
+            (self.root / "contests/a-2026/.house/spec.yaml").read_text())
+        with mock.patch.object(lb, "poll", poll):
+            code, out = self.run_cli("lb", "poll")
+        self.assertEqual(code, 1)
+        self.assertIn("lb a-2026: błąd: disk full", out)
+        self.assertIn("lb b-2026: 1 drużyn", out)
 
     def test_cli_poll_all_contests(self):
         code, out = self.run_cli("lb", "poll")

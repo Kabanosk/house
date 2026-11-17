@@ -53,7 +53,7 @@ def parse_rows(stdout: str) -> list[dict]:
     """Validate the command's JSON: a list of objects with `team` and a numeric `score` (extra keys kept).
 
     Raises:
-        ValueError: Not JSON, not a list, or a row without team / numeric score.
+        ValueError: Not JSON, not a list, empty, or a row without team / numeric score.
     """
     try:
         data = json.loads(stdout)
@@ -70,6 +70,8 @@ def parse_rows(stdout: str) -> list[dict]:
         except (TypeError, ValueError) as e:
             raise ValueError(f"wynik nie jest liczbą: {str(r)[:80]}") from e
         rows.append({**r, "team": str(r["team"]), "score": score})
+    if not rows:
+        raise ValueError("pusty ranking")
     return rows
 
 
@@ -160,12 +162,12 @@ def poll(contest: Path, now: datetime, run=subprocess.run, force: bool = False) 
 
 @dataclass
 class Change:
-    """A team that is new or changed its score (rank shifts caused by others are not changes)."""
+    """A team that is new, changed its score or left the board (`rank` None); rank shifts alone are not changes."""
 
     team: str
     score: float
     old_score: float | None
-    rank: int
+    rank: int | None
     old_rank: int | None
 
 
@@ -183,8 +185,9 @@ def _rank(rows: list[dict], team: str | None) -> int | None:
 
 
 def changes(old: list[dict], new: list[dict], team: str | None) -> list[Change]:
-    """Teams in the new top 10 or within ±2 of our rank that are new or changed their score (not us)."""
-    ours = _rank(new, team)
+    """Teams in the top 10 or within ±2 of our rank that are new, changed their score or left the board (not us)."""
+    ours, ours_before = _rank(new, team), _rank(old, team)
+    present = {r["team"] for r in new}
     before = {r["team"]: (i, r["score"]) for i, r in enumerate(old, 1)}
     out = []
     for i, r in enumerate(new, 1):
@@ -195,6 +198,10 @@ def changes(old: list[dict], new: list[dict], team: str | None) -> list[Change]:
             out.append(Change(r["team"], r["score"], None, i, None))
         elif prev[1] != r["score"]:
             out.append(Change(r["team"], r["score"], prev[1], i, prev[0]))
+    for i, r in enumerate(old, 1):
+        if r["team"] not in present and r["team"] != team and (
+                i <= TOP or (ours_before and abs(i - ours_before) <= NEAR)):
+            out.append(Change(r["team"], r["score"], r["score"], None, i))
     return out
 
 
@@ -216,6 +223,8 @@ def table(rows: list[dict], team: str | None) -> str:
 
 
 def _sentence(c: Change) -> str:
+    if c.rank is None:
+        return f"{c.team} wypadł z rankingu (był #{c.old_rank})"
     if c.old_score is None:
         return f"{c.team} wszedł z {_num(c.score)} na #{c.rank}"
     verb = "poprawił" if c.score > c.old_score else "zmienił"
@@ -310,10 +319,12 @@ def agorize_board(page_url: str, fetch=None, sort: str | None = None) -> list[di
     if not url or not token:
         raise ValueError("strona nie zawiera adresu API rankingu albo tokenu")
     data = json.loads(fetch(url.group(1), {"Authorization": f"Bearer {token.group(1)}"}))
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise ValueError(f"nieoczekiwana odpowiedź API: {json.dumps(data)[:120]}")
     rows = parse_rows(json.dumps([
         {"team": r.get("team__name"), "score": r.get("score"),
          **{k: r[k] for k in ("id", "filename", "created_at") if k in r}}
-        for r in (data.get("data") if isinstance(data, dict) else None) or []]))
+        for r in data["data"] if isinstance(r, dict)]))
     if sort in ("max", "min"):
         rows.sort(key=lambda r: r["score"], reverse=sort == "max")
     return rows

@@ -524,7 +524,10 @@ def cmd_lb(args) -> int:
     contests = [contest_dir(args.target)] if args.target else _all_contests()
     now, failed = datetime.now().astimezone(), False
     for c in contests:
-        line = leaderboard.poll(c, now, force=args.force)
+        try:
+            line = leaderboard.poll(c, now, force=args.force)
+        except Exception as e:  # noqa: BLE001 — one broken contest must not stop the others
+            line = f"lb {c.name}: błąd: {e}"
         if line:
             print(line)
             failed = failed or ": błąd:" in line
