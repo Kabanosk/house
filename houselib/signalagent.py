@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b", re.IGNORECASE)
+TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b(?:@([A-Za-z0-9-]+))?", re.IGNORECASE)  # `@claude@dom`: host
 ALIAS_HINT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*)\s*:\s*(.+)$", re.DOTALL)
 COMMANDS = {"/status": "status", "/lb": "lb", "/stop": "stop"}
 SELF = "self"
@@ -48,6 +48,7 @@ class Request:
         alias_hint: `fr` for `@claude fr: …`, lower-case, else None; routing decides whether it names a contest.
         quote_ts: Timestamp of the quoted message, if any.
         received_ms: `serverReceivedTimestamp` of the envelope (age check), None when unknown.
+        host: Host named with `@claude@<host>` (lower case), else None (see `signalhost`).
     """
 
     key: str
@@ -62,11 +63,15 @@ class Request:
     alias_hint: str | None
     quote_ts: int | None
     received_ms: int | None
+    host: str | None = None
 
 
 @dataclass
 class Command:
-    """A chat command handled by house without a model: status, lb, stop, agent-off, agent-on."""
+    """A chat command handled by house without a model: status, lb, stop, agent-off, agent-on.
+
+    `host` is the host named with `/status@<host>` or `/agent@<host> on`, else None (see `signalhost`).
+    """
 
     name: str
     key: str
@@ -74,6 +79,7 @@ class Command:
     author: str
     own: bool
     quote_ts: int | None
+    host: str | None = None
 
 
 def _sent_text(event: dict) -> str:
@@ -107,16 +113,19 @@ def parse(event: dict) -> "Request | Command | None":
     chat = str(event.get("chat"))
     quote_ts = (event.get("quote") or {}).get("ts")
     words = sent.strip().lower().split()
-    if words and words[0] in COMMANDS:
-        return Command(COMMANDS[words[0]], str(event["key"]), chat, author, own, quote_ts)
-    if words[:1] == ["/agent"] and words[1:2] in (["off"], ["on"]):
+    head, _, cmd_host = (words[0] if words else "").partition("@")
+    cmd_host = cmd_host or None
+    if head in COMMANDS:
+        return Command(COMMANDS[head], str(event["key"]), chat, author, own, quote_ts, cmd_host)
+    if head == "/agent" and words[1:2] in (["off"], ["on"]):
         if own and chat == SELF:
-            return Command(f"agent-{words[1]}", str(event["key"]), chat, author, own, quote_ts)
+            return Command(f"agent-{words[1]}", str(event["key"]), chat, author, own, quote_ts, cmd_host)
         return None
-    if not TRIGGER_RE.search(sent):
+    trigger = TRIGGER_RE.search(sent)
+    if not trigger:
         return None
     shown = str(event.get("text") or sent)
-    full = " ".join(TRIGGER_RE.sub(" ", shown, count=1).split()).strip(" ,:")
+    full = " ".join(TRIGGER_RE.sub(" ", shown, count=1).split()).strip(" ,:@")
     hint = ALIAS_HINT_RE.match(full)
     env = (event.get("raw") or {}).get("envelope") or {}
     received = env.get("serverReceivedTimestamp")
@@ -125,7 +134,8 @@ def parse(event: dict) -> "Request | Command | None":
         author=author, author_name=str(sender.get("name") or author), own=own,
         text=hint[2].strip() if hint else full, full_text=full, alias_hint=hint[1].lower() if hint else None,
         quote_ts=int(quote_ts) if quote_ts is not None else None,
-        received_ms=int(received) if str(received or "").isdigit() else None)
+        received_ms=int(received) if str(received or "").isdigit() else None,
+        host=trigger[1].lower() if trigger[1] else None)
 
 
 # --- routing ----------------------------------------------------------------------------------------------------
@@ -962,6 +972,8 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
                 log.append(f"agent: zatwierdzone {approved}")
                 continue
             item = parse(e)
+            if isinstance(item, (Request, Command)) and _elsewhere(item, e, sig, chats, latest, now):
+                continue
             if isinstance(item, Request):
                 _accept(item, sig, store, chats, out_events, now)
             elif isinstance(item, Command) and item.chat in chats:
@@ -1005,6 +1017,45 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
 
 
 STATUS_EVERY = timedelta(seconds=30)
+KNOWN_HOSTS_DAYS = 30
+
+
+def target_host(item: "Request | Command", event: dict) -> str | None:
+    """Host an event is addressed to: named (`@claude@X`, `/cmd@X`), else the host of the quoted house message,
+    else None (the default `agent_host`; also for a quoted house message from before hosts were named)."""
+    from . import signalhost
+    if item.host:
+        return item.host
+    quoted = signalhost.parse_prefix((event.get("quote") or {}).get("text"))
+    return quoted[1] if quoted else None
+
+
+def known_hosts(events: list[dict], now: datetime) -> list[str]:
+    """This host, `agent_host` and every host named in a house message of the last 30 days, sorted."""
+    from . import signalhost
+    cutoff = (now - timedelta(days=KNOWN_HOSTS_DAYS)).timestamp() * 1000
+    hosts = {signalhost.this_host(), signalhost.agent_host()}
+    for e in events:
+        if e.get("dir") in ("out", "own") and int(e.get("ts") or 0) >= cutoff:
+            parsed = signalhost.parse_prefix(e.get("text"))
+            hosts.add(parsed[1] if parsed else None)
+    return sorted(h for h in hosts if h)
+
+
+def _elsewhere(item: "Request | Command", event: dict, sig, chats: dict, events: list[dict], now: datetime) -> bool:
+    """True when another host handles this event (this one only moves the cursor).
+
+    A host name nobody knows is answered by the default host, so a typo is never swallowed silently.
+    """
+    from . import signalhost
+    if signalhost.addressed_to_me(target_host(item, event)):
+        return False
+    if item.host and item.chat in chats and signalhost.addressed_to_me(None):
+        hosts = known_hosts(events, now)
+        if item.host not in hosts:
+            ts = item.ts if isinstance(item, Request) else int(item.key.rsplit(":", 1)[1])
+            _say(sig, item.chat, f"nie znam hosta {item.host}; znane: {', '.join(hosts)}", quote=(ts, item.author))
+    return True
 
 
 def stop_job(job: Job, store: "JobStore", run=subprocess.run) -> Job:
@@ -1055,14 +1106,16 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
     """Answer a chat command without a model: /status, /lb, /stop (this chat's jobs only), /agent off|on (owner)."""
     now = now or datetime.now().astimezone()
     quote = (int(cmd.key.rsplit(":", 1)[1]), cmd.author)
+    from . import signalhost
+    host = signalhost.this_host()
     if cmd.name == "agent-off":
         store.set_enabled(False)
-        _say(sig, SELF, "S7 wyłączony: nowe zlecenia nie startują (działające trwają; `house signal agent off "
-                        "--kill` je zatrzyma).", quote=quote)
+        _say(sig, SELF, f"S7 wyłączony na {host}: nowe zlecenia nie startują (działające trwają; `house signal agent "
+                        "off --kill` je zatrzyma).", quote=quote)
         return ["agent: wyłączony z Signala"]
     if cmd.name == "agent-on":
         store.set_enabled(True)
-        _say(sig, SELF, "S7 włączony.", quote=quote)
+        _say(sig, SELF, f"S7 włączony na {host}.", quote=quote)
         return ["agent: włączony z Signala"]
     mine = [j for j in store.all() if j.chat == cmd.chat]
     contest = next((j.contest for j in mine if j.contest), None)
@@ -1074,7 +1127,9 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
         store.set_state(status_at={**(store.state().get("status_at") or {}), cmd.chat: now.isoformat()})
         running = [f"„{_snippet(j.text)}” ({j.author_name}, {_elapsed(j, now)})" for j in mine if j.status == "running"]
         queued = [f"„{_snippet(j.text)}”" for j in mine if j.status in ("queued", "waiting-approval")]
-        lines = [f"w toku: {', '.join(running) or 'nic'}", f"kolejka: {', '.join(queued) or 'pusta'}"]
+        default = " (domyślny)" if signalhost.agent_host() in (None, host) else ""
+        lines = [f"host: {host}{default}", f"w toku: {', '.join(running) or 'nic'}",
+                 f"kolejka: {', '.join(queued) or 'pusta'}"]
         if not store.enabled():
             lines.append("S7 wyłączony")
         _say(sig, cmd.chat, "\n".join(lines), contest=contest, quote=quote)

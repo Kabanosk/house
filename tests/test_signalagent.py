@@ -51,6 +51,24 @@ class ParseTest(unittest.TestCase):
                "sender": {"name": "house", "number": fx.OWN, "uuid": None}}
         self.assertIsNone(agent.parse(out))
 
+    def test_explicit_host(self):
+        for text, host, rest in (("@claude@dom zrób X", "dom", "zrób X"), ("@Claude@DOM x", "dom", "x"),
+                                 ("popraw to @claude@praca", "praca", "popraw to"),
+                                 ("@claude@ zrób", None, "zrób"), ("@claude zrób", None, "zrób")):
+            r = agent.parse(ev(fx.group_in(1000, text)))
+            self.assertEqual((r.host, r.text), (host, rest), text)
+        r = agent.parse(ev(fx.group_in(1000, "@claude@bardzo-dlugi-komputer-xyz zrób")))
+        self.assertEqual((r.host, r.text), ("bardzo-dlugi-komputer-xyz", "zrób"))
+        self.assertIsNone(agent.parse(ev(fx.group_in(1000, "pisz na x@claude.ai"))))
+
+    def test_command_with_host(self):
+        c = agent.parse(ev(fx.group_in(1000, "/status@praca")))
+        self.assertEqual((c.name, c.host), ("status", "praca"))
+        self.assertIsNone(agent.parse(ev(fx.group_in(1000, "/status"))).host)
+        c = agent.parse(ev(fx.self_note(1000, "/agent@dom on")))
+        self.assertEqual((c.name, c.host), ("agent-on", "dom"))
+        self.assertIsNone(agent.parse(ev(fx.group_in(1000, "/statusy"))))
+
     def test_edit_never_triggers(self):
         self.assertIsNone(agent.parse(ev(fx.edit(1100, 1000, "@claude zrób"))))
 
@@ -1087,3 +1105,87 @@ class DockerRuntimeTest(TickTest):
         self.finish_unit(job)
         self.tick()
         self.assertFalse((agent.job_files(job)["dir"] / "container.env").exists())
+
+
+class HostRoutingTest(TickTest):
+    """Several computers on one Signal account: each event is handled by exactly one host (this one is `test`)."""
+
+    def config(self, agent_host=None):
+        from pathlib import Path
+        import os
+        Path(os.environ["HOUSE_SIGNAL_CONFIG"]).write_text(f'agent_host = "{agent_host}"\n' if agent_host else "")
+
+    def now_ms(self):
+        return int(datetime.now().timestamp() * 1000)
+
+    def test_untargeted_goes_to_agent_host_only(self):
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude zrób X"))
+        self.tick()
+        self.assertEqual((self.store.all(), self.sig.sent), ([], []))
+        self.assertGreater(self.store.state()["cursor"], 0)
+        self.config("test")
+        self.add(fx.self_note(1001, "@claude zrób Y"))
+        self.tick()
+        self.assertEqual([j.text for j in self.store.all()], ["zrób Y"])
+
+    def test_explicit_host_wins_over_default(self):
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude@test zrób X"))
+        self.add(fx.self_note(1001, "@claude@inny zrób Y"))
+        self.tick()
+        self.assertEqual([j.text for j in self.store.all()], ["zrób X"])
+
+    def test_reply_goes_to_the_quoted_host(self):
+        self.config("test")
+        self.add(fx.self_note(1000, "@claude review", quote=(900, fx.OWN, "🤖 [house@inny] Krok 1 skończony")))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        self.add(fx.self_note(1001, "@claude review", quote=(901, fx.OWN, "🤖 [house] stara wiadomość")))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+        self.config("inny")
+        self.add(fx.self_note(1002, "@claude drugie", quote=(902, fx.OWN, "🤖 [house@test] Krok 2")))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 2)
+
+    def test_commands_follow_the_same_rules(self):
+        self.config("test")
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@inny] jestem"))
+        self.add(fx.self_note(2000, "/status", quote=(900, fx.OWN, "🤖 [house@inny] x")))
+        self.add(fx.self_note(2001, "/agent@inny off"))
+        self.tick()
+        self.assertEqual(self.sig.sent, [])
+        self.assertTrue(self.store.enabled())
+        self.add(fx.self_note(2002, "/agent off"))
+        self.tick()
+        self.assertFalse(self.store.enabled())
+        self.assertIn("S7 wyłączony na test", self.sig.sent[-1]["text"])
+
+    def test_status_names_the_host(self):
+        self.config("test")
+        self.add(fx.self_note(2000, "/status"))
+        self.tick()
+        self.assertIn("host: test (domyślny)", self.sig.sent[-1]["text"])
+
+    def test_no_agent_host_keeps_old_behavior(self):
+        self.config(None)
+        self.add(fx.self_note(1000, "@claude zrób X"))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+
+    def test_unknown_host_answered_by_default_host(self):
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@praca] coś z drugiego komputera"))
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude@dmo zrób X"))
+        self.tick()
+        self.assertEqual((self.store.all(), self.sig.sent), ([], []))
+        self.config("test")
+        self.add(fx.self_note(1001, "@claude@dmo zrób X"))
+        self.add(fx.self_note(1002, "/status@xyz"))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        texts = [s["text"] for s in self.sig.sent]
+        self.assertEqual(len(texts), 2, texts)
+        self.assertIn("nie znam hosta dmo; znane: praca, test", texts[0])
+        self.assertIn("nie znam hosta xyz", texts[1])
