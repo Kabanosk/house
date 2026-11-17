@@ -61,6 +61,11 @@ w osobnym kontenerze Dockera: widzi tylko swój worktree (`.git` repo tylko do o
 z read-only root, limitem pamięci i procesów; sieć ma tylko przez proxy z listą hostów (API Anthropic,
 pypi, pytorch). W kontenerze agent może uruchamiać kod i testy. Bez obrazu albo tokenu zlecenia idą lokalnie.
 
+Docker musi być z apt (`docker-ce`), nie ze snapa. Profil AppArmor snapowego `dockerd` odmawia `exec` każdemu
+kontenerowi z `no-new-privileges`, więc przy snapie zlecenia zostają lokalne, a `house doctor` to pokazuje. Timer
+dostaje katalog `docker` w PATH przy instalacji; po zmianie Dockera przeinstaluj go przez
+`house signal agent on`. Doctor zgłasza też proxy w pętli restartów (`docker logs house-agent-proxy`).
+
 ## Sandbox Basha
 
 Sandbox Basha potrzebuje zagnieżdżonych przestrzeni nazw użytkownika. Ubuntu z

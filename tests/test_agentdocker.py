@@ -11,8 +11,9 @@ from tests import helpers  # noqa: F401
 
 
 class FakeDocker:
-    def __init__(self, info=True, image=True, network=True, proxy_running=True):
+    def __init__(self, info=True, image=True, network=True, proxy_running=True, proxy_status="running"):
         self.calls, self.info, self.image, self.network, self.proxy = [], info, image, network, proxy_running
+        self.proxy_status = proxy_status
 
     def __call__(self, argv, **kw):
         self.calls.append(argv)
@@ -24,7 +25,7 @@ class FakeDocker:
         elif argv[:3] == ["docker", "network", "inspect"]:
             rc = 0 if self.network else 1
         elif argv[:2] == ["docker", "inspect"]:
-            out = "true\n" if self.proxy else ""
+            out = self.proxy_status + "\n" if self.proxy else ""
             rc = 0 if self.proxy else 1
         return subprocess.CompletedProcess(argv, rc, out, "")
 
@@ -36,8 +37,13 @@ class DockerCase(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"HOUSE_DATA_DIR": str(self.tmp / "data"),
                                                 "HOUSE_SIGNAL_CONFIG": str(self.tmp / "cfg/signal.toml")})
         self.env.start()
+        # hermetic: the machine running the tests may have snap docker (which forces "local")
+        self.docker_which = mock.patch("houselib.agentdocker.shutil.which",
+                                       lambda name, path=None: "/usr/bin/docker")
+        self.docker_which.start()
 
     def tearDown(self):
+        self.docker_which.stop()
         self.env.stop()
         self._tmp.cleanup()
 
@@ -90,6 +96,16 @@ class SetupTest(DockerCase):
         dk.token_path().unlink()
         self.assertEqual(dk.runtime(FakeDocker()), "local")
 
+    def test_snap_docker_stays_local(self):
+        # snap's dockerd AppArmor profile refuses exec under no-new-privileges, so no job container could start
+        dk.save_token("t")
+        self.assertEqual(dk.runtime(FakeDocker(), which=lambda _: "/snap/bin/docker"), "local")
+        self.assertEqual(dk.runtime(FakeDocker(), which=lambda _: "/usr/bin/docker"), "docker")
+
+    def test_restarting_proxy_is_not_running(self):
+        self.assertTrue(dk.proxy_running(FakeDocker()))
+        self.assertFalse(dk.proxy_running(FakeDocker(proxy_status="restarting")))
+
 
 class CommandTest(DockerCase):
     def test_job_command_isolation(self):
@@ -124,8 +140,38 @@ class DoctorTest(DockerCase):
         self.assertTrue(any("obraz" in x and x.startswith("✗") for x in lines), lines)
         self.assertTrue(any("token" in x and x.startswith("✗") for x in lines), lines)
         dk.save_token("t")
-        lines = dk.doctor_lines(FakeDocker())
+        lines = dk.doctor_lines(FakeDocker(), which=self.which, unit=self.unit("/usr/bin:/bin"))
         self.assertTrue(all(x.startswith("✓") for x in lines), lines)
+
+    def which(self, name, path=None):
+        return "/usr/bin/docker" if path is None or "/usr/bin" in path.split(":") else None
+
+    def unit(self, path):
+        unit = self.tmp / "house-signal-pull.service"
+        unit.write_text(f"[Service]\nEnvironment=PATH={path}\nExecStart=/x/bin/house signal pull\n")
+        return unit
+
+    def test_snap_docker_reported(self):
+        dk.save_token("t")
+        lines = dk.doctor_lines(FakeDocker(), which=lambda name, path=None: "/snap/bin/docker",
+                                unit=self.unit("/snap/bin:/usr/bin"))
+        self.assertTrue(any(x.startswith("✗") and "snap" in x and "docker-ce" in x for x in lines), lines)
+
+    def test_timer_without_docker_in_path_reported(self):
+        dk.save_token("t")
+        lines = dk.doctor_lines(FakeDocker(), which=self.which, unit=self.unit("/home/u/.local/bin"))
+        self.assertTrue(any(x.startswith("✗") and "PATH" in x and "agent on" in x for x in lines), lines)
+
+    def test_missing_timer_unit_is_not_an_error(self):
+        dk.save_token("t")
+        lines = dk.doctor_lines(FakeDocker(), which=self.which, unit=self.tmp / "nope.service")
+        self.assertTrue(all(x.startswith("✓") for x in lines), lines)
+
+    def test_restarting_proxy_reported(self):
+        dk.save_token("t")
+        lines = dk.doctor_lines(FakeDocker(proxy_status="restarting"), which=self.which,
+                                unit=self.unit("/usr/bin"))
+        self.assertTrue(any(x.startswith("✗") and "proxy" in x and "docker logs" in x for x in lines), lines)
 
 
 if __name__ == "__main__":

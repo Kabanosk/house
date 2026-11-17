@@ -183,9 +183,14 @@ def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=
 
 
 def _unit_path(claude: str | None) -> str:
-    """PATH for a unit: the directory of `claude` (if any) plus the system dirs (systemd keeps PATH minimal)."""
-    return ":".join(dict.fromkeys([*([str(Path(claude).parent)] if claude else []), "/usr/local/bin", "/usr/bin",
-                                   "/bin"]))
+    """PATH for a unit: the directories of `claude` and `docker` (if found) plus the system dirs.
+
+    systemd keeps PATH minimal, so a snap `docker` (`/snap/bin`) would be invisible to S7's tick, which then
+    silently runs jobs locally.
+    """
+    docker = shutil.which("docker")
+    extra = [str(Path(x).parent) for x in (claude, docker) if x]
+    return ":".join(dict.fromkeys([*extra, "/usr/local/bin", "/usr/bin", "/bin"]))
 
 
 def _install_timer(name: str, service_text: str, timer_text: str, home: Path | None, run) -> list[Path]:
