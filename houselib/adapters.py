@@ -5,6 +5,7 @@ protocols in `core/`, the skills in `adapters/`, and the contest's `.house/tools
 Output in the contest repo: `AGENTS.md` (Codex and generic tools; roster of agents plus the coordinator
 playbook), `CLAUDE.md`, `.claude/agents/<id>.md` (every profile except the coordinator, which is the main
 session), `.claude/skills/`, and `.claude/settings.local.json` (guard hooks and an allowlist, never committed).
+`adapt` also installs the git hooks (`githook`) into the contest repo's hooks directory.
 
 Rules for agents: generated files carry a marker comment; edit `core/` or `adapters/` in the house repo and
 re-run `house adapt`, never the generated files. A profile whose model tier is unavailable here (codex, local)
@@ -18,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import HOUSE_ROOT, doctor, gitutil, manifest
+from . import HOUSE_ROOT, doctor, githook, gitutil, manifest
 from .fm import parse_frontmatter
 from .gitutil import git
 from .scaffold import install_core
@@ -454,4 +455,6 @@ def adapt(contest: Path, root: Path = HOUSE_ROOT, detect=doctor.detect) -> Adapt
              manifest.MANIFEST, ".house/tools.json", ".house/playbooks", ".house/protocols"]
     _commit_owned(contest, owned)
     write_local_settings(contest, root)
+    hooks = githook.install(contest, root)
+    warnings += hooks.problems
     return AdaptResult([contest / rel for rel in res.written], warnings)

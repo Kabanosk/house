@@ -24,6 +24,7 @@ from . import (
     doctor,
     exp,
     export,
+    githook,
     guard,
     inbox,
     manifest,
@@ -85,6 +86,11 @@ def cmd_doctor(args) -> int:
             print(f"drift: {rel} ({state}); `house adapt {args.name}` keeps your edit as {rel}.orig")
         if not changed and manifest.load(target) is not None:
             print("generated files: in sync")
+        problems = githook.install(target, write=False).problems
+        for problem in problems:
+            print(f"! {problem}")
+        if not problems:
+            print("git hooks: pre-commit, pre-push installed")
         if args.context:
             print("\n" + context.format_report(context.measure(target.resolve(), Path.home())))
     return 0
