@@ -51,6 +51,14 @@ class TimerTest(unittest.TestCase):
         setup.install_signal_timer(self.root, home=self.home, run=FakeRun(), every="1min")
         self.assertIn("OnUnitActiveSec=1min", (self.home / ".config/systemd/user/house-signal-pull.timer").read_text())
 
+    def test_unit_path_includes_docker(self):
+        # docker from snap lives in /snap/bin, which systemd's minimal PATH lacks; S7 then silently ran jobs locally
+        which = {"docker": "/snap/bin/docker"}.get
+        with mock.patch("houselib.setup.shutil.which", which):
+            setup.install_signal_timer(self.root, home=self.home, run=FakeRun(), claude="/opt/claude/bin/claude")
+        service = (self.home / ".config/systemd/user/house-signal-pull.service").read_text()
+        self.assertIn("Environment=PATH=/opt/claude/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin\n", service)
+
     def test_lb_timer_units(self):
         run = FakeRun()
         service, timer = setup.install_lb_timer(self.root, home=self.home, run=run)

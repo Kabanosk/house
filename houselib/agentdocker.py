@@ -8,6 +8,8 @@ with a subscription token from `claude setup-token`, stored in `~/.config/house/
 job through an `--env-file` in the house-owned job dir — never in argv, never in the worktree.
 """
 import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -57,11 +59,21 @@ def ensure_networks(run=subprocess.run) -> None:
 
 def proxy_running(run=subprocess.run) -> bool:
     try:
-        r = run(["docker", "inspect", "-f", "{{.State.Running}}", PROXY], capture_output=True, text=True,
+        r = run(["docker", "inspect", "-f", "{{.State.Status}}", PROXY], capture_output=True, text=True,
                 check=False)
     except OSError:
         return False
-    return r.returncode == 0 and r.stdout.strip() == "true"
+    return r.returncode == 0 and r.stdout.strip() == "running"  # `.State.Running` is true in a restart loop too
+
+
+def proxy_status(run=subprocess.run) -> str:
+    """`docker inspect` status of the proxy ("running", "restarting", ...), "" when it does not exist."""
+    try:
+        r = run(["docker", "inspect", "-f", "{{.State.Status}}", PROXY], capture_output=True, text=True,
+                check=False)
+    except OSError:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def ensure_proxy(run=subprocess.run) -> None:
@@ -106,8 +118,19 @@ def save_token(token: str) -> None:
     path.chmod(0o600)
 
 
-def runtime(run=subprocess.run) -> str:
-    """"docker" when Docker works, the image is built and the token is set; else "local" (S7 fallback)."""
+def snap_docker(which=None) -> bool:
+    """Docker from snap: its dockerd AppArmor profile refuses every exec under `no-new-privileges`."""
+    path = (which or shutil.which)("docker")
+    return bool(path) and path.startswith("/snap/")
+
+
+def runtime(run=subprocess.run, which=None) -> str:
+    """"docker" when Docker works, the image is built and the token is set; else "local" (S7 fallback).
+
+    Snap Docker stays "local": no container with `no-new-privileges` can start there, so every job would fail.
+    """
+    if snap_docker(which):
+        return "local"
     return "docker" if token_present() and docker_usable(run) and image_present(run) else "local"
 
 
@@ -142,16 +165,46 @@ def container_command(job_id: str, wt: Path, repo: Path, prompt: Path, settings:
             "-w", str(wt), image_name(), *claude_argv]
 
 
-def doctor_lines(run=subprocess.run) -> list[str]:
-    """`house doctor` lines about the Docker runtime of Signal jobs."""
+def doctor_lines(run=subprocess.run, which=None, unit: Path | None = None) -> list[str]:
+    """`house doctor` lines about the Docker runtime of Signal jobs.
+
+    Args:
+        run: Runner for `docker` (signature of `subprocess.run`).
+        which: `shutil.which`-like lookup (default `shutil.which`), also called with `path=` for the timer's PATH.
+        unit: The S7 timer's service unit. Defaults to `~/.config/systemd/user/house-signal-pull.service`.
+    """
+    which = which or shutil.which
     if not docker_usable(run):
         return ["✗ S7 docker: Docker niedostępny (zlecenia idą lokalnie, bez Basha)"]
     lines = ["✓ S7 docker: Docker działa"]
+    if snap_docker(which):
+        lines.append(f"✗ S7 docker: Docker ze snapa ({which('docker')}) nie uruchamia kontenerów z "
+                     "no-new-privileges (AppArmor), zlecenia idą lokalnie; zainstaluj docker-ce z apt "
+                     "(https://docs.docker.com/engine/install/ubuntu/)")
+    path = _unit_env_path(unit or Path.home() / ".config/systemd/user/house-signal-pull.service")
+    if path is not None and not which("docker", path=path):
+        lines.append("✗ S7 docker: timer nie widzi `docker` w swoim PATH, zlecenia idą lokalnie "
+                     "(`house signal agent on` przeinstaluje timer)")
     lines.append("✓ S7 docker: obraz " + image_name() if image_present(run)
                  else f"✗ S7 docker: brak obrazu {image_name()} (`house signal agent image`)")
     lines.append("✓ S7 docker: token ustawiony" if token_present()
                  else "✗ S7 docker: brak tokenu (`claude setup-token`, potem `house signal agent token`)")
     if image_present(run):
-        lines.append("✓ S7 docker: proxy działa" if proxy_running(run)
-                     else "✗ S7 docker: proxy nie działa (`house signal agent image` je uruchomi)")
+        status = proxy_status(run)
+        if status == "running":
+            lines.append("✓ S7 docker: proxy działa")
+        elif status == "restarting":
+            lines.append(f"✗ S7 docker: proxy w pętli restartów (`docker logs {PROXY}`)")
+        else:
+            lines.append("✗ S7 docker: proxy nie działa (`house signal agent image` je uruchomi)")
     return lines
+
+
+def _unit_env_path(unit: Path) -> str | None:
+    """`Environment=PATH=` of a systemd unit, None when the unit is missing or sets no PATH."""
+    try:
+        text = unit.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"^Environment=PATH=(.*)$", text, re.MULTILINE)
+    return m.group(1).strip() if m else None
