@@ -71,6 +71,11 @@ def parse_prefix(text: str | None) -> tuple[str, str | None] | None:
     return (m[1], m[2]) if m else None
 
 
+def strip_prefix(text: str) -> str:
+    """The text without a leading house prefix (`🤖 [..]`, with or without a host) and the spaces after it."""
+    return re.sub(r"^🤖 \[[^\]]*\]\s*", "", text)
+
+
 def addressed_to_me(target: str | None) -> bool:
     """Whether this host handles an event addressed to `target` (None: no host named or implied).
 

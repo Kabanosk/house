@@ -519,7 +519,7 @@ class TickTest(JobStoreCase):
         (job,) = self.store.all()
         self.assertEqual(job.status, "running")
         ack = self.sig.sent[0]
-        self.assertTrue(ack["text"].startswith("🤖 [house] przyjąłem"), ack["text"])
+        self.assertTrue(ack["text"].startswith("🤖 [house@test] przyjąłem"), ack["text"])
         self.assertEqual((ack["group"], ack["quote"]), (None, (1000, "u-own")))
         self.assertEqual(len(self.sd.launches()), 1)
         self.tick()
@@ -818,7 +818,7 @@ class GreetingDoctorTest(TickTest):
         self.tick()
         hellos = [s for s in self.sig.sent if "@claude" in s["text"] and "Cześć" in s["text"]]
         self.assertEqual([h["group"] for h in hellos], [fx.GID])
-        self.assertTrue(hellos[0]["text"].startswith("🤖 [techarena]") or hellos[0]["text"].startswith("🤖 [house]"))
+        self.assertTrue(hellos[0]["text"].startswith(("🤖 [techarena@test]", "🤖 [house@test]")))
         self.add(fx.group_in(5000, "ok", quote=(hellos[0]["ts"], fx.OWN, hellos[0]["text"])))
         self.tick()
         self.assertEqual(self.store.all(), [])  # quoting the greeting does not start anything

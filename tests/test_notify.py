@@ -47,15 +47,15 @@ class NotifyTest(unittest.TestCase):
         (self.c / ".house/spec.yaml").write_text(text)
 
     def test_prefix(self):
-        self.assertEqual(notify.prefix(self.c), "🤖 [fr-contest]")
+        self.assertEqual(notify.prefix(self.c), "🤖 [fr-contest@test]")
         self.spec("notify:\n  alias: fr\n")
-        self.assertEqual(notify.prefix(self.c), "🤖 [fr]")
+        self.assertEqual(notify.prefix(self.c), "🤖 [fr@test]")
 
     def test_send_self_and_group_and_log(self):
         self.spec('notify:\n  alias: fr\n  signal_group: "Huawei Poland"\n')
         sig = FakeSignal([{"id": "g1", "name": "Huawei Poland"}, {"id": "g2", "name": "Other"}])
         ts, warnings = notify.send(self.c, "hello", sig=sig)
-        self.assertEqual(sig.sent, [(None, "🤖 [fr] hello"), ("g1", "🤖 [fr] hello")])
+        self.assertEqual(sig.sent, [(None, "🤖 [fr@test] hello"), ("g1", "🤖 [fr@test] hello")])
         self.assertEqual(len(ts), 2)
         self.assertEqual(warnings, [])
         self.assertEqual([(g, m["contest"]) for (g, _), m in zip(sig.sent, sig.meta, strict=True)],

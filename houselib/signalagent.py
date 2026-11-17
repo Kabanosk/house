@@ -701,7 +701,7 @@ def build_reply(job: Job, wt: Path) -> tuple[str, list[Path], list[str]]:
 
 def _prefix(contest: str | None) -> str:
     from . import notify
-    return notify.prefix(Path(contest)) if contest else "🤖 [house]"
+    return notify.house_prefix(contest)
 
 
 def _say(sig, job_or_chat, text: str, *, contest: str | None = None, quote=None, files=(), meta=None) -> int | None:

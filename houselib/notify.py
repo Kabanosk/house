@@ -7,7 +7,7 @@ Used by `house notify "<text>"` (free text), `house ask [Q-###]` (questions from
 PostToolUse hook (sends new open questions right after QUESTIONS.md is edited) and `inbox` (replies to answers).
 Agents normally just add an `open` entry to QUESTIONS.md and let the hook send it. Rules:
 
-* Message format: `🤖 [<alias>] <text>`, where alias is spec `notify.alias` or the contest's registry name.
+* Message format: `🤖 [<alias>@<host>] <text>`, where alias is spec `notify.alias` or the contest's registry name.
   Question messages start with the id and title (`Q-007 Title`) and are written in Polish, like the file.
 * Recipients: the owner's Note to Self always, plus the Signal group named by spec `notify.signal_group`
   (when set and found). A missing or ambiguous group only produces a warning.
@@ -22,7 +22,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from . import questions, registry
+from . import questions, registry, signalhost
 from . import spec as specmod
 from .signal import from_config
 
@@ -69,8 +69,14 @@ def alias(contest: Path) -> str:
 
 
 def prefix(contest: Path) -> str:
-    """Return the message prefix `🤖 [<alias>]` that marks a message as coming from house for this contest."""
-    return f"🤖 [{alias(contest)}]"
+    """Return the message prefix `🤖 [<alias>@<host>]` that marks a message as coming from house for this contest
+    on this computer (`signalhost`: one Signal account may be linked to several computers)."""
+    return signalhost.prefix(alias(contest))
+
+
+def house_prefix(contest: Path | str | None) -> str:
+    """Prefix for a contest's message, or `🤖 [house@<host>]` outside a contest."""
+    return prefix(Path(contest)) if contest else signalhost.prefix("house")
 
 
 def resolve_group(sig, name: str) -> tuple[str | None, str | None]:
