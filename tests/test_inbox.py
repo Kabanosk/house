@@ -109,7 +109,7 @@ class InboxTest(InboxCase):
         sig, _ = self.run_inbox([self_reply(200, "B", quote=100)])
         self.assertIn("- **Odpowiedź:** B (Wojciech Fiołka, Signal)", self.qtext(self.fr))
         self.assertIn("[open] Finalne", self.qtext(self.fi))
-        self.assertEqual(sig.sent, [(None, "🤖 [fr] ✓ Q-001: B (Wojciech Fiołka)")])
+        self.assertEqual(sig.sent, [(None, "🤖 [fr@test] ✓ Q-001: B (Wojciech Fiołka)")])
 
     def test_inbox_confirmation_meta(self):
         self.sent_question(self.fr, "Q-001", 100)
@@ -131,7 +131,7 @@ class InboxTest(InboxCase):
         sig, _ = self.run_inbox([group_msg(300, "A", "gT", quote=100),
                                  group_msg(250, "B", "gT", name="Ola", quote=100)])
         self.assertIn("B (Ola, Signal)", self.qtext(self.fr))
-        self.assertIn(("gT", "🤖 [fr] ✓ Q-001: B (Ola)"), sig.sent)
+        self.assertIn(("gT", "🤖 [fr@test] ✓ Q-001: B (Ola)"), sig.sent)
         self.assertTrue(any("już rozstrzygnięte" in t for _, t in sig.sent))
 
     def test_own_message_in_group_with_alias(self):
@@ -347,12 +347,12 @@ class ReactionAnswerTest(InboxCase):
         sig, _ = self.run_inbox([self.react(300, "👍🏻", 102), self.react(301, "👎", 103)])
         self.assertIn("- **Odpowiedź:** tak (Wojciech Fiołka, Signal)", self.qtext(self.fr))
         self.assertIn("- **Odpowiedź:** nie (Wojciech Fiołka, Signal)", self.qtext(self.fr))
-        self.assertIn((None, "🤖 [fr] ✓ Q-002: tak (Wojciech Fiołka)"), sig.sent)
+        self.assertIn((None, "🤖 [fr@test] ✓ Q-002: tak (Wojciech Fiołka)"), sig.sent)
 
     def test_thumb_on_options_question_replies(self):
         sig, _ = self.run_inbox([self.react(300, "👍", 101)])
         self.assertIn("[open] Finalne", self.qtext(self.fr))
-        self.assertEqual(sig.sent, [(None, "🤖 [fr] Q-001: odpowiedz literą albo ❤ = domyślna")])
+        self.assertEqual(sig.sent, [(None, "🤖 [fr@test] Q-001: odpowiedz literą albo ❤ = domyślna")])
 
     def test_heart_takes_default(self):
         self.run_inbox([self.react(300, "❤️", 101)])
@@ -361,7 +361,7 @@ class ReactionAnswerTest(InboxCase):
     def test_heart_without_default_replies(self):
         sig, _ = self.run_inbox([self.react(300, "💙", 103)])
         self.assertIn("[open] Batch", self.qtext(self.fr))
-        self.assertEqual(sig.sent, [(None, "🤖 [fr] Q-003: brak domyślnej, odpowiedz tekstem")])
+        self.assertEqual(sig.sent, [(None, "🤖 [fr@test] Q-003: brak domyślnej, odpowiedz tekstem")])
 
     def test_removed_before_handling_cancels(self):
         sig, _ = self.run_inbox([self.react(300, "👍", 102), self.react(301, "👍", 102, remove=True)])
@@ -382,7 +382,7 @@ class ReactionAnswerTest(InboxCase):
         self.sent_question(self.fr, "Q-002", 202, chat="gT")
         sig, _ = self.run_inbox([self.react(300, "👍", 202, gid="gT", name="Ola", uuid="u-ola")])
         self.assertIn("- **Odpowiedź:** tak (Ola, Signal)", self.qtext(self.fr))
-        self.assertIn(("gT", "🤖 [fr] ✓ Q-002: tak (Ola)"), sig.sent)
+        self.assertIn(("gT", "🤖 [fr@test] ✓ Q-002: tak (Ola)"), sig.sent)
 
     def test_first_answer_wins_across_text_and_reaction(self):
         sig, _ = self.run_inbox([self_reply(400, "nie", quote=102), self.react(300, "👍", 102)])

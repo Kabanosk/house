@@ -51,6 +51,28 @@ class ParseTest(unittest.TestCase):
                "sender": {"name": "house", "number": fx.OWN, "uuid": None}}
         self.assertIsNone(agent.parse(out))
 
+    def test_explicit_host(self):
+        for text, host, rest in (("@claude@dom zrób X", "dom", "zrób X"), ("@Claude@DOM x", "dom", "x"),
+                                 ("popraw to @claude@praca", "praca", "popraw to"),
+                                 ("@claude@ zrób", None, "zrób"), ("@claude zrób", None, "zrób")):
+            r = agent.parse(ev(fx.group_in(1000, text)))
+            self.assertEqual((r.host, r.text), (host, rest), text)
+        r = agent.parse(ev(fx.group_in(1000, "@claude@bardzo-dlugi-komputer-xyz zrób")))
+        self.assertEqual((r.host, r.text), ("bardzo-dlugi-komputer-xyz", "zrób"))
+        self.assertIsNone(agent.parse(ev(fx.group_in(1000, "pisz na x@claude.ai"))))
+
+    def test_trigger_keeps_other_mentions(self):
+        self.assertEqual(agent.parse(ev(fx.group_in(1000, "@claude @kuba zrób"))).text, "@kuba zrób")
+        self.assertEqual(agent.parse(ev(fx.group_in(1000, "zrób @claude@ to"))).text, "zrób to")
+
+    def test_command_with_host(self):
+        c = agent.parse(ev(fx.group_in(1000, "/status@praca")))
+        self.assertEqual((c.name, c.host), ("status", "praca"))
+        self.assertIsNone(agent.parse(ev(fx.group_in(1000, "/status"))).host)
+        c = agent.parse(ev(fx.self_note(1000, "/agent@dom on")))
+        self.assertEqual((c.name, c.host), ("agent-on", "dom"))
+        self.assertIsNone(agent.parse(ev(fx.group_in(1000, "/statusy"))))
+
     def test_edit_never_triggers(self):
         self.assertIsNone(agent.parse(ev(fx.edit(1100, 1000, "@claude zrób"))))
 
@@ -519,7 +541,7 @@ class TickTest(JobStoreCase):
         (job,) = self.store.all()
         self.assertEqual(job.status, "running")
         ack = self.sig.sent[0]
-        self.assertTrue(ack["text"].startswith("🤖 [house] przyjąłem"), ack["text"])
+        self.assertTrue(ack["text"].startswith("🤖 [house@test] przyjąłem"), ack["text"])
         self.assertEqual((ack["group"], ack["quote"]), (None, (1000, "u-own")))
         self.assertEqual(len(self.sd.launches()), 1)
         self.tick()
@@ -818,7 +840,7 @@ class GreetingDoctorTest(TickTest):
         self.tick()
         hellos = [s for s in self.sig.sent if "@claude" in s["text"] and "Cześć" in s["text"]]
         self.assertEqual([h["group"] for h in hellos], [fx.GID])
-        self.assertTrue(hellos[0]["text"].startswith("🤖 [techarena]") or hellos[0]["text"].startswith("🤖 [house]"))
+        self.assertTrue(hellos[0]["text"].startswith(("🤖 [techarena@test]", "🤖 [house@test]")))
         self.add(fx.group_in(5000, "ok", quote=(hellos[0]["ts"], fx.OWN, hellos[0]["text"])))
         self.tick()
         self.assertEqual(self.store.all(), [])  # quoting the greeting does not start anything
@@ -845,6 +867,39 @@ class GreetingDoctorTest(TickTest):
         self.assertTrue(any(line.startswith("✗") and "bwrap" in line for line in lines), lines)
         self.store.set_enabled(False)
         self.assertEqual(agent.doctor_lines(run=run, which=lambda n: None), ["- S7: wyłączony"])
+
+
+class HostDoctorTest(JobStoreCase):
+    def lines(self, toml):
+        import os
+        import subprocess
+        from pathlib import Path
+        Path(os.environ["HOUSE_SIGNAL_CONFIG"]).write_text(toml)
+        return agent.doctor_lines(run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+                                  which=lambda name: f"/usr/bin/{name}")
+
+    def test_host_and_default(self):
+        lines = self.lines('agent_host = "test"\n')
+        self.assertIn("✓ S7: host: test · domyślny: test", lines)
+
+    def test_missing_agent_host_warns(self):
+        lines = self.lines("")
+        self.assertTrue(any(line.startswith("! S7: brak agent_host") for line in lines), lines)
+
+    def test_agent_host_never_seen_warns(self):
+        lines = self.lines('agent_host = "dmo"\n')
+        self.assertTrue(any(line.startswith("! S7: agent_host dmo") for line in lines), lines)
+        from houselib import signalparse, signalstore
+        e, _ = signalparse.extract(fx.self_note(int(datetime.now().timestamp() * 1000), "🤖 [house@dmo] hej"),
+                                   fx.OWN, {"self": "self"}, now=NOW)
+        signalstore.append(e)
+        lines = self.lines('agent_host = "dmo"\n')
+        self.assertFalse(any(line.startswith("! S7: agent_host dmo") for line in lines), lines)
+
+    def test_bad_name_reported(self):
+        lines = self.lines('agent_host = "Dom Główny"\n')
+        self.assertTrue(any(line.startswith("! S7:") and "agent_host" in line and "Dom" in line for line in lines),
+                        lines)
 
 
 class SecurityReviewTest(TickTest):
@@ -1087,3 +1142,179 @@ class DockerRuntimeTest(TickTest):
         self.finish_unit(job)
         self.tick()
         self.assertFalse((agent.job_files(job)["dir"] / "container.env").exists())
+
+
+class HostCase(TickTest):
+    """Tick with this host named `test` (HOUSE_HOST) and `agent_host` set per test."""
+
+    def config(self, agent_host=None):
+        from pathlib import Path
+        import os
+        Path(os.environ["HOUSE_SIGNAL_CONFIG"]).write_text(f'agent_host = "{agent_host}"\n' if agent_host else "")
+
+    def now_ms(self):
+        return int(datetime.now().timestamp() * 1000)
+
+
+class HostRoutingTest(HostCase):
+    """Several computers on one Signal account: each event is handled by exactly one host (this one is `test`)."""
+
+    def test_untargeted_goes_to_agent_host_only(self):
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude zrób X"))
+        self.tick()
+        self.assertEqual((self.store.all(), self.sig.sent), ([], []))
+        self.assertGreater(self.store.state()["cursor"], 0)
+        self.config("test")
+        self.add(fx.self_note(1001, "@claude zrób Y"))
+        self.tick()
+        self.assertEqual([j.text for j in self.store.all()], ["zrób Y"])
+
+    def test_explicit_host_wins_over_default(self):
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude@test zrób X"))
+        self.add(fx.self_note(1001, "@claude@inny zrób Y"))
+        self.tick()
+        self.assertEqual([j.text for j in self.store.all()], ["zrób X"])
+
+    def test_reply_goes_to_the_quoted_host(self):
+        self.config("test")
+        self.add(fx.self_note(1000, "@claude review", quote=(900, fx.OWN, "🤖 [house@inny] Krok 1 skończony")))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        self.add(fx.self_note(1001, "@claude review", quote=(901, fx.OWN, "🤖 [house] stara wiadomość")))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+        self.config("inny")
+        self.add(fx.self_note(1002, "@claude drugie", quote=(902, fx.OWN, "🤖 [house@test] Krok 2")))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 2)
+
+    def test_commands_follow_the_same_rules(self):
+        self.config("test")
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@inny] jestem"))
+        self.add(fx.self_note(2000, "/status", quote=(900, fx.OWN, "🤖 [house@inny] x")))
+        self.add(fx.self_note(2001, "/agent@inny off"))
+        self.tick()
+        self.assertEqual(self.sig.sent, [])
+        self.assertTrue(self.store.enabled())
+        self.add(fx.self_note(2002, "/agent off"))
+        self.tick()
+        self.assertFalse(self.store.enabled())
+        self.assertIn("S7 wyłączony na test", self.sig.sent[-1]["text"])
+
+    def test_status_names_the_host(self):
+        self.config("test")
+        self.add(fx.self_note(2000, "/status"))
+        self.tick()
+        self.assertIn("host: test (domyślny)", self.sig.sent[-1]["text"])
+
+    def test_no_agent_host_keeps_old_behavior(self):
+        self.config(None)
+        self.add(fx.self_note(1000, "@claude zrób X"))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+
+    def test_unknown_host_answered_by_default_host(self):
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@praca] coś z drugiego komputera"))
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude@dmo zrób X"))
+        self.tick()
+        self.assertEqual((self.store.all(), self.sig.sent), ([], []))
+        self.config("test")
+        self.add(fx.self_note(1001, "@claude@dmo zrób X"))
+        self.add(fx.self_note(1002, "/status@xyz"))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        texts = [s["text"] for s in self.sig.sent]
+        self.assertEqual(len(texts), 2, texts)
+        self.assertIn("host dmo nie pisał od 30 dni (znane: praca, test)", texts[0])
+        self.assertIn("host xyz nie pisał", texts[1])
+
+
+class HostFollowUpTest(HostCase):
+    """Review fixes: a reply to a request follows that request's host; greeting only from the default host."""
+
+    def test_stop_reply_to_named_request_goes_to_its_host(self):
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@inny] jestem"))
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude@test długie"))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop", quote=(1000, fx.OWN_UUID, "@claude@test długie")))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "stopped")
+
+    def test_stop_reply_to_implicitly_routed_request(self):
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude zrób", quote=(900, fx.OWN, "🤖 [house@test] Krok 1")))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop", quote=(1000, fx.OWN_UUID, "@claude zrób")))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "stopped")
+
+    def test_quote_without_text_uses_stored_message(self):
+        self.config("test")
+        self.add(fx.self_note(900, "🤖 [house@inny] Krok 1"))
+        self.add(fx.self_note(1000, "@claude zrób", quote=(900, fx.OWN, None)))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+
+    def test_stop_quoting_unrelated_message_stops_nothing(self):
+        self.config("test")
+        self.add(fx.self_note(1000, "@claude długie"))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop", quote=(555, fx.OWN_UUID, "jakaś inna wiadomość")))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "running")
+        self.assertIn("nic do zatrzymania", self.sig.sent[-1]["text"])
+
+    def test_only_default_host_greets(self):
+        self.config("inny")
+        self.store.set_state(greeted=[])
+        self.tick()
+        self.assertEqual(self.sig.sent, [])
+        self.config("test")
+        self.tick()
+        self.assertEqual(len(self.sig.sent), 1)
+
+    def test_stored_text_wins_over_quote_text(self):
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@inny] jestem"))
+        self.config("inny")
+        self.add(fx.self_note(900, "🤖 [house@test] Krok 1"))
+        self.add(fx.self_note(1000, "@claude zrób", quote=(900, fx.OWN, "🤖 [house@inny] Krok 1")))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+
+
+class HostConfigBrokenTest(HostCase):
+    """A broken host config stops dispatch (fail-closed) with one alarm instead of misrouting silently."""
+
+    def check_paused(self, toml):
+        from pathlib import Path
+        import os
+        Path(os.environ["HOUSE_SIGNAL_CONFIG"]).write_text(toml)
+        self.add(fx.self_note(1000, "@claude zrób X"))
+        self.tick()
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        alarms = [s["text"] for s in self.sig.sent if "signal.toml" in s["text"]]
+        self.assertEqual(len(alarms), 1, self.sig.sent)
+        self.assertIsNone(self.sig.sent[0]["group"])
+        self.config("test")
+        self.tick()
+        self.assertEqual([j.text for j in self.store.all()], ["zrób X"])  # nothing was skipped while paused
+
+    def test_invalid_agent_host(self):
+        self.check_paused('agent_host = "Dom"\n')
+
+    def test_invalid_host(self):
+        self.check_paused('host = "Dom"\nagent_host = "test"\n')
+
+    def test_keys_inside_group(self):
+        self.check_paused('[groups.t]\nid = "x"\nagent_host = "test"\n')
+
+    def test_unreadable_toml(self):
+        self.check_paused('agent_host = \n')

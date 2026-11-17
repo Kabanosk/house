@@ -26,7 +26,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b", re.IGNORECASE)
+# `@claude@dom` names a host; a bare `@claude@` is plain `@claude`
+TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b(?:@([A-Za-z0-9-]+)|@(?!\S))?", re.IGNORECASE)
 ALIAS_HINT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*)\s*:\s*(.+)$", re.DOTALL)
 COMMANDS = {"/status": "status", "/lb": "lb", "/stop": "stop"}
 SELF = "self"
@@ -48,6 +49,7 @@ class Request:
         alias_hint: `fr` for `@claude fr: …`, lower-case, else None; routing decides whether it names a contest.
         quote_ts: Timestamp of the quoted message, if any.
         received_ms: `serverReceivedTimestamp` of the envelope (age check), None when unknown.
+        host: Host named with `@claude@<host>` (lower case), else None (see `signalhost`).
     """
 
     key: str
@@ -62,11 +64,15 @@ class Request:
     alias_hint: str | None
     quote_ts: int | None
     received_ms: int | None
+    host: str | None = None
 
 
 @dataclass
 class Command:
-    """A chat command handled by house without a model: status, lb, stop, agent-off, agent-on."""
+    """A chat command handled by house without a model: status, lb, stop, agent-off, agent-on.
+
+    `host` is the host named with `/status@<host>` or `/agent@<host> on`, else None (see `signalhost`).
+    """
 
     name: str
     key: str
@@ -74,6 +80,7 @@ class Command:
     author: str
     own: bool
     quote_ts: int | None
+    host: str | None = None
 
 
 def _sent_text(event: dict) -> str:
@@ -107,13 +114,16 @@ def parse(event: dict) -> "Request | Command | None":
     chat = str(event.get("chat"))
     quote_ts = (event.get("quote") or {}).get("ts")
     words = sent.strip().lower().split()
-    if words and words[0] in COMMANDS:
-        return Command(COMMANDS[words[0]], str(event["key"]), chat, author, own, quote_ts)
-    if words[:1] == ["/agent"] and words[1:2] in (["off"], ["on"]):
+    head, _, cmd_host = (words[0] if words else "").partition("@")
+    cmd_host = cmd_host or None
+    if head in COMMANDS:
+        return Command(COMMANDS[head], str(event["key"]), chat, author, own, quote_ts, cmd_host)
+    if head == "/agent" and words[1:2] in (["off"], ["on"]):
         if own and chat == SELF:
-            return Command(f"agent-{words[1]}", str(event["key"]), chat, author, own, quote_ts)
+            return Command(f"agent-{words[1]}", str(event["key"]), chat, author, own, quote_ts, cmd_host)
         return None
-    if not TRIGGER_RE.search(sent):
+    trigger = TRIGGER_RE.search(sent)
+    if not trigger:
         return None
     shown = str(event.get("text") or sent)
     full = " ".join(TRIGGER_RE.sub(" ", shown, count=1).split()).strip(" ,:")
@@ -125,7 +135,8 @@ def parse(event: dict) -> "Request | Command | None":
         author=author, author_name=str(sender.get("name") or author), own=own,
         text=hint[2].strip() if hint else full, full_text=full, alias_hint=hint[1].lower() if hint else None,
         quote_ts=int(quote_ts) if quote_ts is not None else None,
-        received_ms=int(received) if str(received or "").isdigit() else None)
+        received_ms=int(received) if str(received or "").isdigit() else None,
+        host=trigger[1].lower() if trigger[1] else None)
 
 
 # --- routing ----------------------------------------------------------------------------------------------------
@@ -701,7 +712,7 @@ def build_reply(job: Job, wt: Path) -> tuple[str, list[Path], list[str]]:
 
 def _prefix(contest: str | None) -> str:
     from . import notify
-    return notify.prefix(Path(contest)) if contest else "🤖 [house]"
+    return notify.house_prefix(contest)
 
 
 def _say(sig, job_or_chat, text: str, *, contest: str | None = None, quote=None, files=(), meta=None) -> int | None:
@@ -947,8 +958,11 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
         if cursor is None:
             store.set_state(cursor=signalstore.last_seq())
             return ["agent: kursor ustawiony, historia pominięta"]
-        events = list(signalstore.iter_events())
-        latest = signalstore.latest(events)
+        if _host_config_broken(sig, store):
+            events, latest = [], []  # fail-closed: the cursor stays, nothing new is handled until the fix
+        else:
+            events = list(signalstore.iter_events())
+            latest = signalstore.latest(events)
         out_events = {e["ts"]: e for e in latest if e.get("dir") == "out" and e.get("ts")}
         by_key = {e["key"]: e for e in latest}
         chats = signalchats.allowed(None)
@@ -962,6 +976,8 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
                 log.append(f"agent: zatwierdzone {approved}")
                 continue
             item = parse(e)
+            if isinstance(item, (Request, Command)) and _elsewhere(item, e, sig, chats, latest, now):
+                continue
             if isinstance(item, Request):
                 _accept(item, sig, store, chats, out_events, now)
             elif isinstance(item, Command) and item.chat in chats:
@@ -1005,6 +1021,89 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
 
 
 STATUS_EVERY = timedelta(seconds=30)
+KNOWN_HOSTS_DAYS = 30
+
+
+def _quoted(event: dict, events: list[dict]) -> tuple[str | None, dict | None]:
+    """(text, stored event) of the message `event` quotes: the stored text, else the quote's (a sender's client
+    fills the quote, so the stored copy is the one to trust)."""
+    quote = event.get("quote") or {}
+    if quote.get("ts") is None:
+        return None, None
+    stored = next((e for e in events if e.get("ts") == quote["ts"] and e.get("chat") == event.get("chat")
+                   and e.get("kind") == "message"), None)
+    return (stored or {}).get("text") or quote.get("text"), stored
+
+
+def target_host(item: "Request | Command", event: dict, events: list[dict] = ()) -> str | None:
+    """Host an event is addressed to; None means the default `agent_host`.
+
+    In order: the host named (`@claude@X`, `/cmd@X`); the host of the quoted house message (None for one from
+    before hosts were named); for a quoted request or command (e.g. `/stop` replying to your own `@claude`), the
+    host that one was addressed to: named, else the host of the house message it quoted.
+    """
+    from . import signalhost
+    if item.host:
+        return item.host
+    text, stored = _quoted(event, events)
+    house = signalhost.parse_prefix(text)
+    if house:
+        return house[1]
+    first = parse(stored) if stored else None
+    if not isinstance(first, (Request, Command)):
+        return None
+    if first.host:
+        return first.host
+    inner = signalhost.parse_prefix(_quoted(stored, events)[0])
+    return inner[1] if inner else None
+
+
+def seen_hosts(events: list[dict], now: datetime) -> set[str]:
+    """Hosts named in the prefix of a house message (sent here or synced from another device) in the last 30 days."""
+    from . import signalhost
+    cutoff = (now - timedelta(days=KNOWN_HOSTS_DAYS)).timestamp() * 1000
+    parsed = (signalhost.parse_prefix(e.get("text")) for e in events
+              if e.get("dir") in ("out", "own") and int(e.get("ts") or 0) >= cutoff)
+    return {p[1] for p in parsed if p and p[1]}
+
+
+def known_hosts(events: list[dict], now: datetime) -> list[str]:
+    """This host, `agent_host` and every host seen in the last 30 days, sorted."""
+    from . import signalhost
+    return sorted((seen_hosts(events, now) | {signalhost.this_host(), signalhost.agent_host()}) - {None})
+
+
+def _host_config_broken(sig, store: "JobStore") -> bool:
+    """True when `host` / `agent_host` in signal.toml are broken, so routing could run a request twice or drop it.
+
+    The owner gets one alarm in Note to Self per distinct problem; events wait (the cursor stays) until the fix.
+    """
+    from . import signalhost
+    problems = signalhost.problems()
+    text = "; ".join(problems)
+    if store.state().get("host_alarm") != text:
+        if problems:
+            _say(sig, SELF, f"S7 wstrzymany na {signalhost.this_host()}: {text}. Zlecenia czekają na poprawkę "
+                            "(`house doctor`).")
+        store.set_state(host_alarm=text)
+    return bool(problems)
+
+
+def _elsewhere(item: "Request | Command", event: dict, sig, chats: dict, events: list[dict], now: datetime) -> bool:
+    """True when another host handles this event (this one only moves the cursor).
+
+    A host name nobody knows is answered by the default host, so a typo is never swallowed silently.
+    """
+    from . import signalhost
+    if signalhost.addressed_to_me(target_host(item, event, events)):
+        return False
+    if item.host and item.chat in chats and signalhost.addressed_to_me(None):
+        hosts = known_hosts(events, now)
+        if item.host not in hosts:
+            ts = item.ts if isinstance(item, Request) else int(item.key.rsplit(":", 1)[1])
+            _say(sig, item.chat, f"host {item.host[:20]} nie pisał od {KNOWN_HOSTS_DAYS} dni (znane: "
+                 f"{', '.join(hosts)}); jeśli to literówka, napisz jeszcze raz z dobrą nazwą", quote=(ts, item.author))
+    return True
 
 
 def stop_job(job: Job, store: "JobStore", run=subprocess.run) -> Job:
@@ -1055,14 +1154,16 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
     """Answer a chat command without a model: /status, /lb, /stop (this chat's jobs only), /agent off|on (owner)."""
     now = now or datetime.now().astimezone()
     quote = (int(cmd.key.rsplit(":", 1)[1]), cmd.author)
+    from . import signalhost
+    host = signalhost.this_host()
     if cmd.name == "agent-off":
         store.set_enabled(False)
-        _say(sig, SELF, "S7 wyłączony: nowe zlecenia nie startują (działające trwają; `house signal agent off "
-                        "--kill` je zatrzyma).", quote=quote)
+        _say(sig, SELF, f"S7 wyłączony na {host}: nowe zlecenia nie startują (działające trwają; `house signal agent "
+                        "off --kill` je zatrzyma).", quote=quote)
         return ["agent: wyłączony z Signala"]
     if cmd.name == "agent-on":
         store.set_enabled(True)
-        _say(sig, SELF, "S7 włączony.", quote=quote)
+        _say(sig, SELF, f"S7 włączony na {host}.", quote=quote)
         return ["agent: włączony z Signala"]
     mine = [j for j in store.all() if j.chat == cmd.chat]
     contest = next((j.contest for j in mine if j.contest), None)
@@ -1074,7 +1175,9 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
         store.set_state(status_at={**(store.state().get("status_at") or {}), cmd.chat: now.isoformat()})
         running = [f"„{_snippet(j.text)}” ({j.author_name}, {_elapsed(j, now)})" for j in mine if j.status == "running"]
         queued = [f"„{_snippet(j.text)}”" for j in mine if j.status in ("queued", "waiting-approval")]
-        lines = [f"w toku: {', '.join(running) or 'nic'}", f"kolejka: {', '.join(queued) or 'pusta'}"]
+        default = " (domyślny)" if signalhost.agent_host() in (None, host) else ""
+        lines = [f"host: {host}{default}", f"w toku: {', '.join(running) or 'nic'}",
+                 f"kolejka: {', '.join(queued) or 'pusta'}"]
         if not store.enabled():
             lines.append("S7 wyłączony")
         _say(sig, cmd.chat, "\n".join(lines), contest=contest, quote=quote)
@@ -1083,9 +1186,9 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
         return _leaderboard(cmd, sig, store, chats, now, quote)
     if cmd.name == "stop":
         target = None
-        if cmd.quote_ts is not None:
+        if cmd.quote_ts is not None:  # a quote names the job; never fall back to another one
             target = next((j for j in mine if cmd.quote_ts in (j.ack_ts, j.ts)), None)
-        if target is None:
+        else:
             target = next((j for j in sorted(mine, key=lambda j: j.created, reverse=True)
                            if j.status == "running"), None)
         if target is None or target.status not in ("running", "queued", "waiting-approval"):
@@ -1122,7 +1225,11 @@ HELLO_TEMPLATE = "core/templates/signal-hello.md"
 
 
 def _greet(sig, store: "JobStore", chats: dict) -> None:
-    """Send the S7 greeting once to every allowed group (never Note to Self) while S7 is on."""
+    """Send the S7 greeting once to every allowed group (never Note to Self) while S7 is on, from the default
+    host only."""
+    from . import signalhost
+    if not signalhost.addressed_to_me(None):
+        return  # one greeting per group: from the default host only
     greeted = set(store.state().get("greeted") or [])
     text = (CODE_ROOT / HELLO_TEMPLATE).read_text().strip()
     for chat in chats.values():
@@ -1134,13 +1241,32 @@ def _greet(sig, store: "JobStore", chats: dict) -> None:
             store.set_state(greeted=sorted(greeted))
 
 
+def _host_lines() -> list[str]:
+    """`house doctor` lines about hosts: this host and the default, or why routing may misfire."""
+    from . import signalhost
+    lines = [f"! S7: {p}" for p in signalhost.problems()]
+    default, me = signalhost.agent_host(), signalhost.this_host()
+    if default:
+        from . import signalstore
+        events = signalstore.latest(list(signalstore.iter_events()))
+        if default != me and default not in seen_hosts(events, datetime.now().astimezone()):
+            lines.append(f"! S7: agent_host {default} nie pisał od {KNOWN_HOSTS_DAYS} dni: literówka? Zlecenia bez "
+                         "wskazanego hosta czekają na niego, a ten komputer je pomija")
+        return [f"✓ S7: host: {me} · domyślny: {default}", *lines]
+    return [f"! S7: brak agent_host w signal.toml (host: {signalhost.this_host()}); przy kilku komputerach na "
+            "jednym koncie Signal każdy weźmie zlecenie bez wskazanego hosta, wpisz ten sam `agent_host` na "
+            "każdym", *lines]
+
+
 def doctor_lines(run=subprocess.run, which=shutil.which) -> list[str]:
-    """`house doctor` lines about S7: on/off, sandbox (bubblewrap usable), systemd-run, jobs, breaker."""
+    """`house doctor` lines about S7: on/off, host routing, sandbox (bubblewrap usable), systemd-run, jobs,
+    breaker."""
     store = JobStore()
     if not store.enabled():
         return ["- S7: wyłączony"]
     running = len(store.running())
     lines = [f"✓ S7: włączony · w toku: {running} · porażki z rzędu: {store.state().get('failures', 0)}"]
+    lines += _host_lines()
     from . import agentdocker
     docker = agentdocker.doctor_lines(run)
     lines += docker

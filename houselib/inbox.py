@@ -175,8 +175,8 @@ def _reaction_text(contest: Path, qid: str, emoji: str) -> tuple[str | None, str
 
 
 def _reply(sig, contest: Path | None, chat: str, text: str) -> None:
-    """Send `text` back into `chat` ("self" or a group id), prefixed for the contest or `🤖 [house]` if None."""
-    prefix = notify.prefix(contest) if contest else "🤖 [house]"
+    """Send `text` back into `chat` ("self" or a group id), prefixed for the contest or `🤖 [house@<host>]` if None."""
+    prefix = notify.house_prefix(contest)
     sig.send(f"{prefix} {text}", group_id=None if chat == "self" else chat,
              meta={"origin": "inbox-reply", "contest": notify.contest_name(contest) if contest else None})
 

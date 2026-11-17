@@ -154,10 +154,11 @@ def _quote_target(chat, ts: int, who: str | None) -> tuple[dict | None, str | No
 def cmd_send(args) -> int:
     """`house signal send CHAT [TEXT...] [--reply-to TS] [--file PATH]...`: send to an allowed chat, logged.
 
-    The text gets the prefix `🤖 [house]` (or `🤖 [<alias>]` inside a contest repo). Exit 0 sent, 1 Signal not
-    configured or sending failed, 2 bad chat / unknown or ambiguous ts / refused file / nothing to send.
+    The text gets the prefix `🤖 [house@<host>]` (or `🤖 [<alias>@<host>]` inside a contest repo); a prefix already
+    typed is replaced. Exit 0 sent, 1 Signal not configured or sending failed, 2 bad chat / unknown or ambiguous
+    ts / refused file / nothing to send.
     """
-    from . import guard, notify
+    from . import guard, notify, signalhost
     sig = _client()
     try:
         chat = signalchats.resolve(args.chat, sig)
@@ -187,8 +188,8 @@ def cmd_send(args) -> int:
         print("error: Signal nie jest skonfigurowany (~/.config/house/notify.env)", file=sys.stderr)
         return 1
     contest = guard.contest_root(Path.cwd())
-    prefix = notify.prefix(contest) if contest else "🤖 [house]"
-    body = text if text.startswith(prefix) else f"{prefix} {text}".strip()
+    prefix = notify.house_prefix(contest)
+    body = f"{prefix} {signalhost.strip_prefix(text)}".strip()  # a typed prefix never names another host
     meta = {"origin": "cli", "contest": notify.contest_name(contest) if contest else None}
     group = None if chat.id == signalchats.SELF else chat.id
     ts = sig.send(body, group_id=group, attachments=[str(p) for p in files], quote=quote, meta=meta)

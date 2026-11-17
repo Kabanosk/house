@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import notify
+from . import notify, signalhost
 
 SELF = "self"
 RESERVED = {"self", "all"}
@@ -53,9 +53,7 @@ def _group_id(sig, name: str) -> str | None:
     return cache.get(name) if isinstance(cache, dict) else None
 
 
-def config_path() -> Path:
-    """The allowed-groups file: $HOUSE_SIGNAL_CONFIG, else ~/.config/house/signal.toml (outside every repo)."""
-    return Path(os.environ.get("HOUSE_SIGNAL_CONFIG") or Path.home() / ".config/house/signal.toml")
+config_path = signalhost.config_path  # the allowed-groups file (also holds `host`, `agent_host`)
 
 
 def load_config() -> dict[str, dict]:
@@ -105,14 +103,17 @@ def save_config(groups: dict[str, dict]) -> None:
     """Write `signal.toml` atomically (mode 0600; a newly created directory gets 0700).
 
     Args:
-        groups: alias → entry, as returned by `load_config`. Keys of each entry are written in order.
+        groups: alias → entry, as returned by `load_config`. Keys of each entry are written in order. The
+            top-level `host` and `agent_host` already in the file are kept.
     """
     path = config_path()
     if not path.parent.exists():
         path.parent.mkdir(parents=True)
         path.parent.chmod(0o700)
-    body = HEADER + "".join(f"\n[groups.{alias}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in entry.items())
-                            for alias, entry in groups.items())
+    top = signalhost.top_keys()  # `host` / `agent_host` stay as the owner wrote them
+    body = HEADER + "".join(f"{k} = {_toml_value(v)}\n" for k, v in top.items())
+    body += "".join(f"\n[groups.{alias}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in entry.items())
+                    for alias, entry in groups.items())
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:

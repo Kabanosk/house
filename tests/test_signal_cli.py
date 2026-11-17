@@ -104,14 +104,15 @@ class SendTest(CliCase):
     def test_send_prefixes_and_logs(self):
         code, out, _ = self.run_cli("send", "self", "hej", "tam")
         self.assertEqual(code, 0)
-        self.assertEqual(self.argv()[3:], ["send", "--note-to-self", "--notify-self", "-m", "🤖 [house] hej tam"])
+        self.assertEqual(self.argv()[3:], ["send", "--note-to-self", "--notify-self", "-m", "🤖 [house@test] hej tam"])
         self.assertEqual(out.strip(), "✓ self 1794822101442")
         out_events = [e for e in signalstore.iter_events() if e["dir"] == "out"]
         self.assertEqual(out_events[0]["meta"], {"origin": "cli", "contest": None})
 
     def test_prefix_not_doubled(self):
-        self.run_cli("send", "self", "🤖 [house] hej")
-        self.assertEqual(self.argv()[-1], "🤖 [house] hej")
+        for text in ("🤖 [house] hej", "🤖 [house@test] hej", "🤖 [house@inny] hej"):
+            self.run_cli("send", "self", text)
+            self.assertEqual(self.argv()[-1], "🤖 [house@test] hej", text)  # never another host's name
 
     def test_prefix_in_contest_repo(self):
         c = self.tmp / "fr-2026"
@@ -124,7 +125,7 @@ class SendTest(CliCase):
             self.run_cli("send", "self", "hej")
         finally:
             os.chdir(old)
-        self.assertEqual(self.argv()[-1], "🤖 [fr] hej")
+        self.assertEqual(self.argv()[-1], "🤖 [fr@test] hej")
 
     def test_reply_to(self):
         self.kuba()
@@ -187,7 +188,7 @@ class SendTest(CliCase):
         f = self.tmp / "a.csv"
         f.write_text("1")
         self.assertEqual(self.run_cli("send", "self", "--file", str(f))[0], 0)
-        self.assertEqual(self.argv()[self.argv().index("-m") + 1], "🤖 [house]")
+        self.assertEqual(self.argv()[self.argv().index("-m") + 1], "🤖 [house@test]")
 
     def test_empty_message_refused(self):
         self.assertEqual(self.run_cli("send", "self")[0], 2)
