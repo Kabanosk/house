@@ -156,3 +156,121 @@ def poll(contest: Path, now: datetime, run=subprocess.run, force: bool = False) 
         return f"lb {name}: {len(rows)} drużyn" + (" · zmiana zapisana" if changed else " · bez zmian")
     _write_state(contest, state)
     return f"lb {name}: błąd: {state['error']}"
+
+
+@dataclass
+class Change:
+    """A team that is new or changed its score (rank shifts caused by others are not changes)."""
+
+    team: str
+    score: float
+    old_score: float | None
+    rank: int
+    old_rank: int | None
+
+
+@dataclass
+class Summary:
+    """The `/lb` answer for one contest: `at` = snapshot shown, `sentences` = quote the previous `/lb`."""
+
+    text: str
+    at: str | None
+    sentences: bool
+
+
+def _rank(rows: list[dict], team: str | None) -> int | None:
+    return next((i for i, r in enumerate(rows, 1) if team and r["team"] == team), None)
+
+
+def changes(old: list[dict], new: list[dict], team: str | None) -> list[Change]:
+    """Teams in the new top 10 or within ±2 of our rank that are new or changed their score (not us)."""
+    ours = _rank(new, team)
+    before = {r["team"]: (i, r["score"]) for i, r in enumerate(old, 1)}
+    out = []
+    for i, r in enumerate(new, 1):
+        if r["team"] == team or not (i <= TOP or (ours and abs(i - ours) <= NEAR)):
+            continue
+        prev = before.get(r["team"])
+        if prev is None:
+            out.append(Change(r["team"], r["score"], None, i, None))
+        elif prev[1] != r["score"]:
+            out.append(Change(r["team"], r["score"], prev[1], i, prev[0]))
+    return out
+
+
+def _num(x: float) -> str:
+    return f"{x:g}"
+
+
+def table(rows: list[dict], team: str | None) -> str:
+    """`miejsce | team | wynik`: top 10, plus our row after `…` when we are lower."""
+    def line(i, r):
+        return f"{i} | {r['team']} | {_num(r['score'])}" + (" ← my" if r["team"] == team else "")
+    lines = ["miejsce | team | wynik"] + [line(i, r) for i, r in enumerate(rows[:TOP], 1)]
+    ours = _rank(rows, team)
+    if ours and ours > TOP:
+        lines += ["…", line(ours, rows[ours - 1])]
+    elif team and not ours:
+        lines.append("nas nie ma w rankingu")
+    return "\n".join(lines)
+
+
+def _sentence(c: Change) -> str:
+    if c.old_score is None:
+        return f"{c.team} wszedł z {_num(c.score)} na #{c.rank}"
+    verb = "poprawił" if c.score > c.old_score else "zmienił"
+    where = f"z #{c.old_rank} na #{c.rank}" if c.old_rank != c.rank else f"#{c.rank}"
+    return f"{c.team} {verb} na {_num(c.score)} (było {_num(c.old_score)}), {where}"
+
+
+def _us(old: list[dict], new: list[dict], team: str) -> str:
+    rank, was = _rank(new, team), _rank(old, team)
+    if rank is None:
+        return "my: nas nie ma w rankingu"
+    score = new[rank - 1]["score"]
+    text = f"my: #{rank} ({_num(score)})"
+    if was is None:
+        return text + ", wcześniej poza rankingiem"
+    if old[was - 1]["score"] != score:
+        text += f", nasz wynik był {_num(old[was - 1]['score'])}"
+    return text + (f", było #{was}" if was != rank else "")
+
+
+def _clock(iso: str, now: datetime) -> str:
+    from .signalread import parse_iso
+    t = parse_iso(iso).astimezone(now.tzinfo)
+    return t.strftime("%H:%M" if t.date() == now.date() else "%d.%m %H:%M")
+
+
+def summary(contest: Path, seen_at: str | None, asked: datetime | None, now: datetime) -> Summary:
+    """The `/lb` answer: changes since the snapshot `seen_at` the chat saw when it asked at `asked`.
+
+    Table when there is no previous `/lb`, its snapshot is gone, it was over 8 h ago, or more than 3 teams
+    changed; sentences otherwise (quote the previous answer). Ends with the data time and, when the last
+    poll failed, a staleness warning.
+    """
+    cfg = config(contest) or {}
+    team = cfg.get("team")
+    from .signalread import parse_iso
+    snaps, state = snapshots(contest), poll_state(contest)
+    failed = bool(state["error"]) and (not state["last_ok"] or not state["last_try"]
+                                       or parse_iso(state["last_try"]) > parse_iso(state["last_ok"]))
+    if not snaps:
+        text = "brak danych rankingu (proces w tle jeszcze nic nie pobrał)"
+        if failed:
+            when = f" ({_clock(state['last_try'], now)})" if state["last_try"] else ""
+            text += f"\n⚠ ostatnie pobranie nieudane{when}: {state['error']}"
+        return Summary(text, None, False)
+    latest = snaps[-1]
+    fresh = max([latest["at"], *([state["last_ok"]] if state["last_ok"] else [])], key=parse_iso)
+    tail = (f"⚠ ostatnie pobranie nieudane ({_clock(state['last_try'] or fresh, now)}); dane z {_clock(fresh, now)}"
+            if failed else f"ranking z {_clock(fresh, now)}")
+    prev = next((s for s in reversed(snaps) if s["at"] == seen_at), None) if seen_at else None
+    found = changes(prev["rows"], latest["rows"], team) if prev else []
+    if prev is None or (asked and now - asked > TABLE_AFTER) or len(found) > MANY:
+        return Summary(f"{table(latest['rows'], team)}\n{tail}", latest["at"], False)
+    lines = [_sentence(c) for c in found] or [f"bez zmian od {_clock(asked.isoformat(), now)}" if asked
+                                              else "bez zmian"]
+    if team:
+        lines.append(_us(prev["rows"], latest["rows"], team))
+    return Summary("\n".join(lines + [tail]), latest["at"], True)
