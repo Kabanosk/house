@@ -1189,13 +1189,27 @@ def _greet(sig, store: "JobStore", chats: dict) -> None:
             store.set_state(greeted=sorted(greeted))
 
 
+def _host_lines() -> list[str]:
+    """`house doctor` lines about hosts: this host and the default, or why routing may misfire."""
+    from . import signalhost
+    lines = [f"! S7: {p}" for p in signalhost.problems()]
+    default = signalhost.agent_host()
+    if default:
+        return [f"✓ S7: host: {signalhost.this_host()} · domyślny: {default}", *lines]
+    return [f"! S7: brak agent_host w signal.toml (host: {signalhost.this_host()}); przy kilku komputerach na "
+            "jednym koncie Signal każdy weźmie zlecenie bez wskazanego hosta, wpisz ten sam `agent_host` na "
+            "każdym", *lines]
+
+
 def doctor_lines(run=subprocess.run, which=shutil.which) -> list[str]:
-    """`house doctor` lines about S7: on/off, sandbox (bubblewrap usable), systemd-run, jobs, breaker."""
+    """`house doctor` lines about S7: on/off, host routing, sandbox (bubblewrap usable), systemd-run, jobs,
+    breaker."""
     store = JobStore()
     if not store.enabled():
         return ["- S7: wyłączony"]
     running = len(store.running())
     lines = [f"✓ S7: włączony · w toku: {running} · porażki z rzędu: {store.state().get('failures', 0)}"]
+    lines += _host_lines()
     from . import agentdocker
     docker = agentdocker.doctor_lines(run)
     lines += docker

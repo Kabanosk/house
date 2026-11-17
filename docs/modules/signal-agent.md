@@ -13,7 +13,25 @@ porażki z rzędu wyłączają S7 z alarmem.
 
 Powiązane: [Signal](signal.md), [Ochrona](guard.md).
 Plany: [`signal-agent`](../plans/2026-11-16-signal-agent.md),
-[`signal-agent-docker`](../plans/2026-11-16-signal-agent-docker.md).
+[`signal-agent-docker`](../plans/2026-11-16-signal-agent-docker.md),
+[`signal-host-routing`](../plans/2026-11-17-signal-host-routing.md).
+
+## Kilka komputerów na jednym koncie Signal
+
+Każde połączone urządzenie dostaje wszystkie wiadomości, więc każda wiadomość house'a ma w prefiksie komputer
+(`🤖 [fr@dom]`), a zlecenie bierze dokładnie jeden. Kolejność: jawny host (`@claude@praca …`, `/status@praca`,
+`/agent@praca off`), potem host cytowanej wiadomości house'a (albo zlecenia, na które odpowiadasz, np. `/stop`),
+w pozostałych przypadkach `agent_host`. Na początku `~/.config/house/signal.toml` (przed `[groups…]`, inaczej
+klucze trafią do ostatniej grupy) na każdym komputerze:
+
+```toml
+host = "dom"          # inna nazwa na każdym komputerze; bez tego nazwa z hostname
+agent_host = "dom"    # ta sama wartość wszędzie
+```
+
+Bez `agent_host` każdy komputer bierze zlecenia bez wskazanego hosta (`house doctor` ostrzega). Zła nazwa albo
+klucze wewnątrz `[groups…]` wstrzymują S7 na tym komputerze z alarmem w Notatce do siebie, aż do poprawki. Na
+nazwę hosta, który nie pisał od 30 dni, odpowiada `agent_host`.
 
 ## Ranking (`/lb`)
 

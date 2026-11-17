@@ -865,6 +865,29 @@ class GreetingDoctorTest(TickTest):
         self.assertEqual(agent.doctor_lines(run=run, which=lambda n: None), ["- S7: wyłączony"])
 
 
+class HostDoctorTest(JobStoreCase):
+    def lines(self, toml):
+        import os
+        import subprocess
+        from pathlib import Path
+        Path(os.environ["HOUSE_SIGNAL_CONFIG"]).write_text(toml)
+        return agent.doctor_lines(run=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+                                  which=lambda name: f"/usr/bin/{name}")
+
+    def test_host_and_default(self):
+        lines = self.lines('agent_host = "test"\n')
+        self.assertIn("✓ S7: host: test · domyślny: test", lines)
+
+    def test_missing_agent_host_warns(self):
+        lines = self.lines("")
+        self.assertTrue(any(line.startswith("! S7: brak agent_host") for line in lines), lines)
+
+    def test_bad_name_reported(self):
+        lines = self.lines('agent_host = "Dom Główny"\n')
+        self.assertTrue(any(line.startswith("! S7:") and "agent_host" in line and "Dom" in line for line in lines),
+                        lines)
+
+
 class SecurityReviewTest(TickTest):
     def start_job(self, text="@claude x"):
         self.add(fx.self_note(1000, text))
