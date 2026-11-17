@@ -5,6 +5,17 @@ Na podstawie specyfikacji konkursu system dobiera tryb pracy i agentów, deleguj
 według kryteriów konkursu i zostawia ślad dla drużyny.
 
 Założenia i decyzje: [`docs/SPEC.md`](docs/SPEC.md). Tło naukowe: [`docs/research/`](docs/research/).
+Pełny spis dokumentacji: [`docs/README.md`](docs/README.md).
+
+## Co to daje
+
+- **Agenci i playbooki** dla Claude Code (i Codexa): ideator, coordinator, koderzy, sędzia, od pomysłu po pitch.
+- **Zamrożone kryteria i bramka scalania:** zadanie wchodzi do `main` dopiero po zielonych sprawdzeniach.
+- **Ochrona:** hooki blokują zmianę testów akceptacyjnych, sekrety i niebezpieczne `git push`.
+- **Pętla eksperymentów** w konkursach optymalizacyjnych: o `keep`/`revert` decyduje kod, nie agent.
+- **Recenzja krzyżowa:** kod Claude'a recenzuje Codex i odwrotnie.
+- **Tryb nocny:** kolejka zadań, które agenci robią sami, z raportem rano.
+- **Signal:** pytania i odpowiedzi z telefonu oraz agent `@claude` w sandboxie Dockera.
 
 ## Wymagania
 
@@ -21,310 +32,52 @@ bin/house adapt grok-bot-wro-2026     # agenci i skille dla Claude Code, AGENTS.
 cd contests/grok-bot-wro-2026 && claude
 ```
 
-W Claude Code:
+W Claude Code: `/house-start` (regulamin i kryteria) → `/house-ideate` → `/house-plan` → `/house-run` →
+`/house-judge` → `/house-ship` (albo `/house-submit` w konkursie optymalizacyjnym). Odpowiedzi na pytania agentów:
+napisz „jak tam”. Pełna lista komend i kroków: [Konkurs krok po kroku](docs/modules/contest-workflow.md).
 
-| Komenda | Co robi |
-|---|---|
-| `/house-start` + wklejony regulamin, zadanie, kryteria | uzupełnia `.house/spec.yaml`, sprawdza regulamin, zadaje pytania o luki |
-| `/house-ideate` | pomysły od ideatora, ocena sędziego według kryteriów, wybór (Ty albo sędzia) |
-| `/house-plan` | rozpisuje zadania (DAG) w `.house/tasks/` z kryteriami jako komendami i je zamraża |
-| `/house-run` | odpala koderów w osobnych worktree, scala przez `house merge` (bramka) |
-| `/house-judge` | ocena według rubryki/metryki z dowodami |
-| `/house-ship` | deploy, pitch, slajdy, README zgłoszenia, czysty eksport |
-| `/house-submit` | zgłoszenie w konkursie optymalizacyjnym |
-| „jak tam” / `/house-status` | briefing: co się działo, potem pytania po kolei |
-| `/house-retro` | po konkursie: co poprawić w samym systemie (raport z propozycjami, zmiany dopiero po Twojej akceptacji) |
+## Moduły
 
-## Jak tego używać na konkursie (krok po kroku)
-
-**Raz na maszynę**
-```bash
-git clone git@github.com:Kabanosk/house.git ~/house && cd ~/house
-git config user.name "Wojciech Fiołka"; git config user.email "56364007+Kabanosk@users.noreply.github.com"
-bin/house setup       # skille użytkownika (grill-me, retro, …) + remotion-best-practices do ~/.claude/skills, sprawdzenie narzędzi, co doinstalować
-echo 'export PATH="$HOME/house/bin:$PATH"' >> ~/.bashrc   # potem `house …` z dowolnego miejsca
-house sync            # odtwórz konkursy zapisane w contests.yaml
-house adapt <nazwa>   # ścieżki i agenci pod ten komputer
-```
-Tożsamość git ustawiona w repo systemu jest kopiowana do każdego nowego konkursu. Skille użytkownika żyją w
-`user-skills/`; `house setup` instaluje je ponownie po zmianach (lokalnie zmienioną kopię odkłada jako `*.bak-*`).
-
-**Konkurs, który już trwa (istniejące repo)**: `house adopt <nazwa> <ścieżka-do-repo>` podpina je w miejscu
-(odnośnik w `contests/`, bez drugiej kopii) i dodaje `.house/`, niczego nie commitując. Wybierz gałąź, potem
-`house adapt <nazwa>` i `/house-start` z treścią zadania, a do `ideas.md` niech trafi wszystko, co już sprawdzono.
-Uwaga: `AGENTS.md`/`CLAUDE.md` na wspólnej gałęzi czytają też narzędzia reszty drużyny.
-
-**Przed startem konkursu**
-1. `house new <nazwa>` (albo `--repo <url>`, jeśli repo konkursu już istnieje), potem `house adapt <nazwa>`.
-2. `cd contests/<nazwa> && claude`
-3. `/house-start` i wklej wszystko, co masz: treść zadania, link/tekst regulaminu, kryteria oceny, harmonogram.
-   Dopisz tryb (`copilot`/`autopilot`) i limity, jeśli chcesz inne niż domyślne (3 agentów, 5 pomysłów).
-4. Odpowiedz na pytania z `QUESTIONS.md` (przez „jak tam”). Dopóki regulamin jest „UNCLEAR”, dopytaj organizatorów.
-
-**W trakcie (hackathon budowlany)**
-1. `/house-ideate` → pomysły, do każdego karta „co już istnieje” (katalog YC, YC Requests for Startups,
-   zwycięzcy hackathonów, Product Hunt), ocena sędziego na podstawie kart → wybierasz Ty (`copilot`) albo sędzia
-   (`autopilot`). Bez karty pomysł nie może zostać wybrany.
-2. `/house-plan` → zadania w `.house/tasks/`. Przejrzyj je, zwłaszcza kryteria akceptacji (komendy), zanim
-   zostaną zamrożone; to najtańszy moment na korektę.
-3. `/house-run` → koderzy (Claude i Codex) w osobnych worktree w `.worktrees/`, scalanie do `main` na bieżąco
-   przez `house merge` (patrz „Sprawdzenia i bramka scalania”).
-4. `/house-judge` przed każdym kamieniem milowym → oceny 1–5 według kryteriów i jedna najtańsza poprawa.
-5. `/house-ship` → demo, pitch (`pitch/script.md`, `pitch/slides.html`), README zgłoszenia, czysty eksport.
-
-**W trakcie (konkurs optymalizacyjny)**: to samo do `/house-run`, potem pętla eksperymentów `house exp`
-(patrz „Pętla eksperymentów”) → `/house-judge` → `/house-submit`. Każde zgłoszenie ląduje w
-`.house/submissions.csv` z wynikiem lokalnym i z leaderboardu.
-
-**Po powrocie od komputera**: napisz „jak tam”. Najpierw dostajesz briefing (co się zmieniło, wynik, decyzje
-podjęte bez Ciebie, ryzyka), potem pytania po jednym. Twoje odpowiedzi trafiają do `DECISIONS.md`.
-
-**Drużyna** czyta `.house/PROGRESS.md` (po polsku) i `.house/reports/` (po angielsku).
-
-**Zgłoszenie publiczne**: `house export <nazwa> <katalog>` → sprawdź zawartość → wypchnij **eksport**
-na publiczne repo. Samego repo konkursu nigdy nie upubliczniaj.
-
-**Sprawdzenie pomysłu w katalogu YC** (też ręcznie): `house yc AI agents that negotiate prices` → najbliższe
-firmy YC z edycją, statusem i linkiem. Dane: codzienny zrzut katalogu YC ([yc-oss](https://github.com/yc-oss/api)),
-cache w `~/.cache/house/`, działa offline na starym zrzucie.
-
-## Sprawdzenia i bramka scalania
-
-Kryteria akceptacji zadania to komendy (`run`, opcjonalnie `expect`, np. `score >= 0.71`); `manual` tylko dla
-tego, czego nie sprawdzi komenda. Na końcu planowania są zamrażane (`.house/checks/T###.json`), więc koder ich nie
-poluzuje; zmiana tylko z powodem (`--refreeze --reason`, wpis D-###).
-
-| Komenda | Co robi |
-|---|---|
-| `house check <konkurs> T### [--worktree P]` | uruchamia zamrożone kryteria (najpierw `.house/init.sh`, jeśli jest), GREEN/RED |
-| `house check <konkurs> --all` | to samo dla wszystkich zadań `merged`/`done` na głównej gałęzi |
-| `house check <konkurs> T### --freeze` / `--refreeze --reason …` | zamraża / zmienia kryteria |
-| `house check <konkurs> T### --manual AC-n --evidence …` | judge zapisuje kryterium ręczne |
-| `house merge <konkurs> T###` | sprawdza gałąź → scala → sprawdza wszystkie scalone zadania → przy regresji cofa |
-| `house guard diff <konkurs> T### [--worktree P]` | czy gałąź zadania zmieniła chronione pliki, `.house/` albo dodała sekrety |
-
-Statusy: `todo` → `doing` → `review` (tu kończy koder) → `merged` (bramka przeszła) → `done` (także kryteria
-ręczne); `blocked`, gdy utknęło albo scalenie zostało cofnięte. `house merge` odmawia, gdy w katalogu konkursu są
-niezapisane zmiany w kodzie.
-
-### Ochrona (hooki)
-
-`house adapt` dopisuje do `.claude/settings.local.json` (nie trafia do gita, wpis w `.git/info/exclude`, więc
-drużyny nie dotyczy) hooki `bin/house-hook` i listę dozwolonych komend. Przed każdą edycją i komendą hook blokuje:
-zmianę chronionych plików (testy akceptacyjne z `protected`, lokalna sprawdzarka z `spec.scoring.local_scorer`),
-pisanie do `.house/checks/`, commit plików `.env*` i plików z kluczami, push na remote spoza
-`spec.guard.push_allow` (domyślnie `origin`) i force push na główną gałąź. Na start sesji podaje stan konkursu
-(pytania, zadania gotowe do pracy, czerwone sprawdzenia). Codex nie ma hooków, więc te same reguły sprawdza po fakcie
-`house guard diff` (sterownik Codexa i `house merge`). Awaryjnie: `HOUSE_GUARD=off claude` (zapis w PROGRESS.md).
-Hook to pierwsza linia obrony (łapie typowe komendy: przekierowania, `sed -i`, `rm`, `git -C`, wiele linii),
-ale nie każdą sztuczkę (np. `python3 -c "open(...,'w')"`); twardą granicą jest `house merge`, który sprawdza
-diff gałęzi niezależnie od tego, jak plik został zmieniony.
-
-## Signal: pytania i odpowiedzi z telefonu
-
-Konto: `signal-cli` jako urządzenie połączone z Twoim numerem (`~/.config/house/notify.env`:
-`HOUSE_NOTIFY_CHANNEL=signal`, `HOUSE_SIGNAL_ACCOUNT=+48…`). W `spec.yaml` konkursu: `notify.alias` (np. `fr`) i
-`notify.signal_group` (nazwa grupy drużyny). Każde nowe pytanie z `QUESTIONS.md` idzie jako osobna wiadomość
-`🤖 [fr] Q-007 …` do Twojej „Notatki do siebie” i do grupy. **Odpowiedź: przeciągnij wiadomość w prawo i napisz
-decyzję** (np. `B`). Odpowiadać może każdy z grupy; liczy się pierwsza odpowiedź, `house` potwierdza
-`✓ [fr] Q-007: B (Kuba)` i zapisuje ją w `QUESTIONS.md` + `DECISIONS.md`. Bez cytatu: `Q-007: B` albo
-`fr Q-007: B`. Pytania krytyczne mają `Termin` i `Domyślnie`: przypomnienie w połowie czasu, po terminie
-judge przyjmuje domyślną odpowiedź (z powiadomieniem). House zapisuje tylko „Notatkę do siebie” i grupy
-konkursów; inne rozmowy odrzuca bez zapisu.
-
-| Komenda | Co robi |
-|---|---|
-| `house notify <konkurs> "tekst"` | wiadomość do Ciebie i grupy |
-| `house ask <konkurs> [Q-###]` | wyślij nowe otwarte pytania (albo jedno ponownie) |
-| `house inbox [konkurs]` | odbierz odpowiedzi (robi to też start każdej sesji) |
-| `house deadlines [konkurs]` | przypomnienia i domyślne odpowiedzi po terminie |
-
-Odpowiedzią jest też **reakcja** pod pytaniem: 👍 / 👎 = tak / nie (tylko pytanie bez opcji A/B/C), każde serce =
-„leć z domyślną odpowiedzią”. Cofnięcie reakcji przed zapisaniem ją anuluje.
-
-### Rozmowy drużyny (`house signal`)
-
-Każdy odbiór i każda wysyłka trafia do jednego magazynu (`~/.local/share/house/signal/messages.jsonl`, tylko
-dozwolone rozmowy, pliki 0600). Czytanie idzie zawsze z magazynu, więc nic nie ginie, nawet gdy odbiór zostanie
-przerwany. Dozwolone rozmowy to „Notatka do siebie”, grupy trwających konkursów i grupy z
-`~/.config/house/signal.toml`. Prywatne rozmowy (DM) są odrzucane przed zapisem.
-
-| Komenda | Co robi |
-|---|---|
-| `house signal read [czat] [-n 20] [--since 2h] [--from Kuba] [--grep x] [--thread TS]` | historia rozmowy (z tekstem cytatów i ścieżkami plików) |
-| `house signal unread [czat] [--peek]` | nowe od ostatniego odczytu w tym projekcie |
-| `house signal show TS` | jedna wiadomość w całości: cytat, reakcje, odpowiedzi |
-| `house signal send <czat> "tekst" [--reply-to TS] [--file plik]` | wiadomość z prefiksem 🤖, zapisana w historii |
-| `house signal groups [--all]` | dozwolone rozmowy, liczba wiadomości |
-| `house signal allow "<nazwa grupy>" --alias krotka` / `deny krotka` | **tylko człowiek w terminalu**: dopisz / usuń grupę |
-| `house signal pull` / `status` / `migrate` | odbierz teraz / stan odbioru i magazynu / przenieś stare pliki |
-| `house signal compact` / `reparse` | sprzątanie: usunięte, znikające, starsze niż `retention_days`; ponowne parsowanie |
-| `house signal archive [czat] [--summarize]` | archiwa (zip + streszczenie dla agentów); grupa bez wiadomości od 180 dni trafia tam sama |
-| `house setup --signal-timer` | timer systemd: odbiór co 5 min bez sesji, raz dziennie `compact` |
-
-### `@claude` z Signala (S7)
-
-`house signal agent on` (tylko w terminalu) włącza agenta: timer odbiera co minutę, a wiadomość z `@claude …`
-w dozwolonej rozmowie uruchamia sesję Claude Code we własnym worktree repo konkursu (grupa konkursu) albo repo
-`house` (Notatka do siebie, grupy z `signal.toml`), na gałęzi `signal/<id>`. Agent działa w sandboxie: bez
-dostępu do katalogu domowego, sekretów, innych repo i rozmów, z siecią tylko do pypi/pytorch, bez narzędzi web
-i MCP, najwyżej 2 h na zlecenie (na subskrypcji, bez limitu w dolarach). Sam nie commituje ani nie wysyła: house robi commit na gałęzi
-i odsyła odpowiedź (po filtrze sekretów, ≤ 1500 znaków, ≤ 3 pliki). Scalanie robisz Ty. Zlecać mogą osoby, które
-były w grupie przy `allow` (`house signal agent members <czat>` odświeża listę); nowa osoba albo zlecenie starsze
-niż 2 h czeka na Twoje 👍 w Notatce do siebie. W czacie: `/status`, `/stop` (cytatem albo bieżące), `/lb`;
-w Notatce do siebie: `/agent off|on`. W terminalu: `house signal agent status|off [--kill]|stop <id>|gc`. 3
-porażki z rzędu wyłączają S7 z alarmem.
-**Kontener (S7.1, zalecane):** `house signal agent image` buduje obraz (przypięty Claude Code) i uruchamia proxy,
-a `claude setup-token` + `house signal agent token` (w terminalu) zapisuje token z subskrypcji. Od tej chwili każde
-zlecenie działa w osobnym kontenerze Dockera: widzi tylko swój worktree (`.git` repo tylko do odczytu), bez
-uprawnień, z read-only root, limitem pamięci i procesów; sieć ma tylko przez proxy z listą hostów (API Anthropic,
-pypi, pytorch). W kontenerze agent może uruchamiać kod i testy. Bez obrazu albo tokenu zlecenia idą lokalnie.
-
-Sandbox Basha potrzebuje zagnieżdżonych przestrzeni nazw użytkownika. Ubuntu z
-`kernel.apparmor_restrict_unprivileged_userns=1` ich nie pozwala, więc wtedy zlecenia idą bez Basha (agent czyta
-i edytuje, kodu nie uruchamia), a `house doctor` to pokazuje. Włączenie wymaga sudo: profil AppArmor dla sandboxa
-albo wyłączenie tego ograniczenia.
-
-Agent nie może sam dodać grupy: `allow` wymaga terminala, a hook blokuje agentowi `house signal allow|deny`,
-każde uruchomienie `signal-cli`, nadpisywanie ścieżek przez `HOUSE_*=…`, odczyt `~/.local/share/signal-cli/` (tam
-lądują też pliki z DM) i zapis do `~/.config/house/` oraz `~/.local/share/house/`. Start sesji w repo
-konkursu (i w repo `house` po `house setup --signal-hook`) pokazuje w 1–4 liniach, ile jest nowych wiadomości.
-Drużyna z dozwolonych grup jest zaufana: jej prośby agent traktuje jak prośby człowieka, a przekazane treści jak
-dane.
-
-## Tryb nocny
-
-`house night <konkurs> [--hours 8] [--max-tasks N] [--dry-run]`:
-1. **Preflight:** czysty katalog konkursu, wszystkie scalone zadania zielone, wolne miejsce na dysku, logowanie
-   Claude ważne do końca nocy, hooki z `house adapt`.
-2. **Pętla:** każde gotowe zadanie dostaje **świeżą** sesję `claude -p --agent coder` (albo Codex, gdy zadanie ma
-   `agent: coder-codex`) w swoim worktree, z limitem `night.task_minutes`; potem `house merge` decyduje.
-3. **Wyłączniki:** 3 nieudane próby jednego zadania → `blocked`; 5 z rzędu → koniec nocy; plik `.house/STOP`
-   zatrzymuje nowe sesje.
-4. **Rano:** raport `reports/night-*.md`, linia w PROGRESS i podsumowanie na Signalu.
-
-`--max-tasks` liczy uruchomione sesje (także powtórki). Noc commituje tylko własne pliki; to, co worker zapisał
-w `.house/`, przechodzi przez bramkę `house merge` (ręczna zmiana kryteriów albo statusu `done` jest cofana).
-
-Uprawnienia sesji: tryb `auto` + lista dozwolonych komend + hooki (bez `--dangerously-skip-permissions`).
-
-## Pętla eksperymentów (optimize)
-
-Każda próba to jedna mała zmiana rodzica, uruchomiona ze stałym limitem czasu i oceniona lokalną sprawdzarką.
-O tym, czy zmiana zostaje, decyduje kod, nie agent:
-
-```bash
-house exp new <konkurs> --from best --idea I-003 --note "lgbm zamiast rf"   # → E-007 .worktrees/exp-E-007
-# agent zmienia kod w tym worktree
-house exp run <konkurs> E-007 --budget 5m -- python train.py                  # → E-007 keep 0.873
-house exp run <konkurs> --from best -- python train.py --lr 0.03               # zmiana = sama komenda
-house exp status <konkurs>                                                     # najlepszy, drzewo, stagnacja
-```
-
-- Lepszy od rodzica → `keep` (worktree zostaje, bo są w nim predykcje i wagi do zgłoszenia), inaczej `revert`
-  (worktree znika). `crash`/`timeout` naprawia się jako dziecko: `--from E-###`. Remis to `revert`.
-- Wszystko trafia do `.house/experiments.csv` (`id, parent, commit, idea_id, budget, duration, score, status, …`),
-  a każdy commit zostaje jako `refs/exp/E-###`. Stagnację liczy `house exp status` z tego pliku.
-- W `spec.yaml` ustaw `scoring.local_scorer` (drukuje `score: <liczba>`) i `scoring.direction: max|min`. Dane
-  spoza gita wpisz w `exp.shared` (np. `[data]`), wtedy każdy worktree dostaje do nich link.
-- Sprawdzarka to pliki z gita wymienione w komendzie, moduły, które importują, oraz `scoring.scorer_files`
-  (globy, np. dla skryptu shell). Dane i predykcje z komendy nie są jej częścią.
-- Eksperyment, który zmienia sprawdzarkę albo zamrożony test, kończy się `crash` („tampered”). Ocena zawsze
-  używa aktualnej sprawdzarki z konkursu. Po poprawce sprawdzarki starsze wyniki nie są porównywane z nowymi.
-- `house exp prune <konkurs> --keep 3` usuwa worktree słabszych `keep` (commity zostają).
-
-## Recenzja krzyżowa
-
-`house review <konkurs> T###` (gałąź zadania) albo `house review <konkurs> --since last` (wszystko od poprzedniej
-recenzji, na kamień milowy). Kod napisany przez Claude'a recenzuje Codex, a kod Codexa recenzuje Claude.
-Codex ma mniejsze limity, więc obowiązuje `limits.codex_reviews_per_day` (domyślnie 4); potem recenzuje świeża
-sesja Claude'a, a raport zaznacza słabszą niezależność. Brief jest „ślepy”: cel, kryteria i dokładny diff, bez
-raportu autora. Recenzja, która nie wróciła (zawieszenie, pusta odpowiedź, brak `VERDICT:`), jest porażką, a nie
-„brakiem uwag”. Zadania `review: always` (sprawdzarka, potok zgłoszeń, kontrakty) przejdą `house merge` dopiero z
-recenzją aktualnego commita i bez BLOCKER ani MAJOR, albo z `--accept-review "powód"` (wpis D-###).
-
-## Aktualizacja systemu
-
-Zmiany w `core/` albo `adapters/` (np. poprawiony playbook) przenosisz do konkursu przez `house adapt <nazwa>`.
-Nadpisuje to wygenerowane pliki (`AGENTS.md`, `CLAUDE.md`, agenci i skille `house-*` w `.claude/`,
-`.house/playbooks/`, `.house/protocols/`), ale nigdy specyfikacji, decyzji, pytań, zadań ani raportów.
-Co wygenerował, zapisuje w `.house/generated.json` i rusza tylko te pliki: cudze pliki w `.claude/` (np. agenci
-drużyny) zostają i nie trafiają do commita. Wygenerowany plik zmieniony ręcznie oraz własny `AGENTS.md`/`CLAUDE.md`
-z repo konkursu zostają zachowane jako `*.orig` (z ostrzeżeniem). `house doctor <nazwa>` pokazuje, które
-wygenerowane pliki ktoś zmienił.
-
-Ile stałego kontekstu niesie sesja w konkursie (AGENTS.md, opisy skilli i agentów, duplikaty skilli):
-`house doctor --context <nazwa>`. Pomiary: [`docs/context-budget.md`](docs/context-budget.md).
-
-## Gdy coś nie działa
-
-| Objaw | Co zrobić |
-|---|---|
-| `coder-codex` nie istnieje albo kończy się kodem 3 | `house doctor`: brak Codex CLI → `npm i -g @openai/codex && codex login`, potem `house adapt` |
-| Agent pisze „$HOUSE_DIR” zamiast ścieżki | `house adapt <nazwa>` (stare wygenerowane pliki) |
-| `house export` zatrzymuje się na „possible secrets” | usuń klucz z pliku (i z historii, jeśli trzeba); `--force` tylko przy fałszywym alarmie |
-| Agent wraca do sprawdzonego pomysłu | sprawdź, czy `ideas.md` jest uzupełniane; ideator musi je czytać |
-| Briefing nie pokazuje zmian | `.house/state.json` → `last_briefing` ustaw na `null`, żeby zebrać wszystko od początku |
-
-## Skille zewnętrzne (`vendor/skills/`)
-
-Skopiowane bez zmian, z licencją i `ATTRIBUTION.md`. Agenci czytają je po ścieżce z `vendor/skills/` (profile
-w `core/agents/` wskazują plik); `house adapt` nie kopiuje ich do konkursów, żeby ich opisy nie zajmowały kontekstu
-każdej sesji (stare kopie identyczne z `vendor/` usuwa).
-
-| Skill | Źródło | Kto używa |
+| Moduł | O czym | Dokument |
 |---|---|---|
-| `codebase-design` | Matt Pocock (MIT) | coordinator przy planowaniu modułów, judge przy review struktury |
-| `frontend-design` | Anthropic (Apache-2.0) | coder przy zadaniach z UI |
-| `webapp-testing` | Anthropic (Apache-2.0) | judge: Playwright, zrzuty ekranu, błędy konsoli w demo |
-| `no-ai-slop` | Peter Yang (MIT) | pitch: skrypt, slajdy, README bez „AI slop” |
-| `second-opinion` | Jens van Bellen (MIT) | podstawa `house review`; interaktywnie: niezależna opinia innego modelu |
-| `video-director` | win4r (MIT) | pitch: reżyseria filmiku (hak w 3 s, `timeline.json`, kontrola `qa_video.py`) |
-
-Aktualizacja: sklonuj źródło na nowo i podmień folder (nie edytuj w miejscu).
-
-`remotion-best-practices` (oficjalny skill Remotion, budowanie filmiku w kodzie) **nie** jest w `vendor/`, bo jego
-repo nie ma licencji pozwalającej na kopiowanie. `house setup` pobiera go na każdej maszynie z
-[remotion-dev/skills](https://github.com/remotion-dev/skills) do `~/.claude/skills/` (cache w `~/.cache/house/`,
-offline zostaje poprzednia kopia). Remotion jest darmowy dla osób prywatnych i firm do 3 osób. Zasady filmiku
-i nadpisania obu skilli: [`core/protocols/demo-video.md`](core/protocols/demo-video.md).
+| Konkurs krok po kroku | instalacja, komendy `/house-*`, stan `.house/`, eksport | [`contest-workflow.md`](docs/modules/contest-workflow.md) |
+| Sprawdzenia i bramka scalania | `house check`, `house merge`, statusy zadań | [`checks-and-merge.md`](docs/modules/checks-and-merge.md) |
+| Ochrona | hooki Claude Code, reguły guarda | [`guard.md`](docs/modules/guard.md) |
+| Recenzja krzyżowa | `house review`, Claude ↔ Codex | [`review.md`](docs/modules/review.md) |
+| Pętla eksperymentów | `house exp` w konkursach optymalizacyjnych | [`experiments.md`](docs/modules/experiments.md) |
+| Tryb nocny | `house night`, wyłączniki, raport | [`night.md`](docs/modules/night.md) |
+| Signal | pytania z telefonu, `house signal` | [`signal.md`](docs/modules/signal.md) |
+| Agent z Signala | `@claude`, sandbox, Docker | [`signal-agent.md`](docs/modules/signal-agent.md) |
+| Skille zewnętrzne | `vendor/skills/`, licencje | [`vendor-skills.md`](docs/modules/vendor-skills.md) |
+| Utrzymanie | `house adapt`, rozwiązywanie problemów, zasady, testy | [`maintenance.md`](docs/modules/maintenance.md) |
+| Architektura | układ repo, moduły `houselib/`, planowany refactor | [`architecture.md`](docs/modules/architecture.md) |
 
 ## Jak to jest zbudowane
 
 ```text
 core/            neutralny rdzeń (Markdown/YAML): agenci, playbooki, zasady, szablon .house/
 adapters/        nakładki: claude-code (skille), codex (AGENTS.md)
-bin/house        CLI: setup, doctor, new, adopt, adapt, sync, export, yc
-bin/codex-task   uruchamia zadanie przez Codex CLI
+bin/house        CLI
+houselib/        kod CLI i logiki
+vendor/skills/   skille zewnętrzne
 contests/        repozytoria konkursów (każde osobne, poza gitem systemu)
 contests.yaml    spis konkursów → `bin/house sync` odtwarza je na nowej maszynie
 ```
 
-Stan konkursu żyje w `contests/<nazwa>/.house/`:
-
-| Plik | Dla kogo | Po co |
-|---|---|---|
-| `spec.yaml` | wszyscy | centralna specyfikacja: wynik, kryteria, harmonogram, limity, tryb, autonomia |
-| `QUESTIONS.md` | Ty | pytania o trudne decyzje, ze statusem |
-| `DECISIONS.md` | wszyscy | dlaczego coś zostało zdecydowane |
-| `PROGRESS.md` | drużyna | krótki ślad postępu (PL) |
-| `tasks/`, `reports/` | agenci, drużyna | zadania (DAG) i raporty (EN) |
-| `ideas.md`, `submissions.csv` | agenci | archiwum pomysłów, zgłoszenia lokalnie vs leaderboard |
-| `experiments.csv` | `house exp` | drzewo eksperymentów: rodzic, commit, budżet, wynik, keep/revert |
-
-Tryby (`mode` w `spec.yaml`): `copilot` pyta o wybór pomysłu, zmianę kierunku i duże koszty;
-`autopilot` decyduje sam i loguje decyzje. W końcówce konkursu oba pytają przed zgłoszeniem.
+Szczegóły i plan podziału `houselib/` na pakiety: [`architecture.md`](docs/modules/architecture.md).
 
 ## Zasady
 
-- Repo konkursu jest zawsze prywatne. Publicznie tylko przez `bin/house export <nazwa> <katalog>`
-  (bez `.house/`, configów agentów i sekretów, ze skanem kluczy API).
-- Nazwy konkursów: małe litery i cyfry rozdzielone pojedynczym myślnikiem, np. `techarena-finland-2026`.
-- Git: tożsamość ustawiana lokalnie w każdym repo (kopiowana z repo systemu), nigdy globalnie.
-- Zmiana narzędzia (np. z Claude Code na inne) = nowa nakładka w `adapters/`, rdzeń zostaje.
+- Repo konkursu jest zawsze prywatne. Publicznie tylko przez `bin/house export <nazwa> <katalog>`.
+- Git: tożsamość ustawiana lokalnie w każdym repo, nigdy globalnie.
+- Pozostałe zasady: [`maintenance.md`](docs/modules/maintenance.md#zasady).
 
 ## Testy
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+## Projekt i historia
+
+Specyfikacje zmian: [`docs/specs/`](docs/specs/). Plany wykonania: [`docs/plans/`](docs/plans/).
