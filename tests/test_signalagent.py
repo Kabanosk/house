@@ -882,6 +882,16 @@ class HostDoctorTest(JobStoreCase):
         lines = self.lines("")
         self.assertTrue(any(line.startswith("! S7: brak agent_host") for line in lines), lines)
 
+    def test_agent_host_never_seen_warns(self):
+        lines = self.lines('agent_host = "dmo"\n')
+        self.assertTrue(any(line.startswith("! S7: agent_host dmo") for line in lines), lines)
+        from houselib import signalparse, signalstore
+        e, _ = signalparse.extract(fx.self_note(int(datetime.now().timestamp() * 1000), "🤖 [house@dmo] hej"),
+                                   fx.OWN, {"self": "self"}, now=NOW)
+        signalstore.append(e)
+        lines = self.lines('agent_host = "dmo"\n')
+        self.assertFalse(any(line.startswith("! S7: agent_host dmo") for line in lines), lines)
+
     def test_bad_name_reported(self):
         lines = self.lines('agent_host = "Dom Główny"\n')
         self.assertTrue(any(line.startswith("! S7:") and "agent_host" in line and "Dom" in line for line in lines),
@@ -1212,3 +1222,52 @@ class HostRoutingTest(TickTest):
         self.assertEqual(len(texts), 2, texts)
         self.assertIn("nie znam hosta dmo; znane: praca, test", texts[0])
         self.assertIn("nie znam hosta xyz", texts[1])
+
+
+class HostFollowUpTest(HostRoutingTest):
+    """Review fixes: a reply to a request follows that request's host; greeting only from the default host."""
+
+    def test_stop_reply_to_named_request_goes_to_its_host(self):
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@inny] jestem"))
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude@test długie"))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop", quote=(1000, fx.OWN_UUID, "@claude@test długie")))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "stopped")
+
+    def test_stop_reply_to_implicitly_routed_request(self):
+        self.config("inny")
+        self.add(fx.self_note(1000, "@claude zrób", quote=(900, fx.OWN, "🤖 [house@test] Krok 1")))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop", quote=(1000, fx.OWN_UUID, "@claude zrób")))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "stopped")
+
+    def test_quote_without_text_uses_stored_message(self):
+        self.config("test")
+        self.add(fx.self_note(900, "🤖 [house@inny] Krok 1"))
+        self.add(fx.self_note(1000, "@claude zrób", quote=(900, fx.OWN, None)))
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+
+    def test_stop_quoting_unrelated_message_stops_nothing(self):
+        self.config("test")
+        self.add(fx.self_note(1000, "@claude długie"))
+        self.tick()
+        (job,) = self.store.all()
+        self.add(fx.self_note(2000, "/stop", quote=(555, fx.OWN_UUID, "jakaś inna wiadomość")))
+        self.tick()
+        self.assertEqual(self.store.get(job.id).status, "running")
+        self.assertIn("nic do zatrzymania", self.sig.sent[-1]["text"])
+
+    def test_only_default_host_greets(self):
+        self.config("inny")
+        self.store.set_state(greeted=[])
+        self.tick()
+        self.assertEqual(self.sig.sent, [])
+        self.config("test")
+        self.tick()
+        self.assertEqual(len(self.sig.sent), 1)

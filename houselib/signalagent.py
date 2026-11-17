@@ -1020,26 +1020,52 @@ STATUS_EVERY = timedelta(seconds=30)
 KNOWN_HOSTS_DAYS = 30
 
 
-def target_host(item: "Request | Command", event: dict) -> str | None:
-    """Host an event is addressed to: named (`@claude@X`, `/cmd@X`), else the host of the quoted house message,
-    else None (the default `agent_host`; also for a quoted house message from before hosts were named)."""
+def _quoted(event: dict, events: list[dict]) -> tuple[str | None, dict | None]:
+    """(text, stored event) of the message `event` quotes; the text from the quote, else from the store."""
+    quote = event.get("quote") or {}
+    if quote.get("ts") is None:
+        return None, None
+    stored = next((e for e in events if e.get("ts") == quote["ts"] and e.get("chat") == event.get("chat")
+                   and e.get("kind") == "message"), None)
+    return quote.get("text") or (stored or {}).get("text"), stored
+
+
+def target_host(item: "Request | Command", event: dict, events: list[dict] = ()) -> str | None:
+    """Host an event is addressed to; None means the default `agent_host`.
+
+    In order: the host named (`@claude@X`, `/cmd@X`); the host of the quoted house message (None for one from
+    before hosts were named); for a quoted request or command (e.g. `/stop` replying to your own `@claude`), the
+    host that one was addressed to: named, else the host of the house message it quoted.
+    """
     from . import signalhost
     if item.host:
         return item.host
-    quoted = signalhost.parse_prefix((event.get("quote") or {}).get("text"))
-    return quoted[1] if quoted else None
+    text, stored = _quoted(event, events)
+    house = signalhost.parse_prefix(text)
+    if house:
+        return house[1]
+    first = parse(stored) if stored else None
+    if not isinstance(first, (Request, Command)):
+        return None
+    if first.host:
+        return first.host
+    inner = signalhost.parse_prefix(_quoted(stored, events)[0])
+    return inner[1] if inner else None
+
+
+def seen_hosts(events: list[dict], now: datetime) -> set[str]:
+    """Hosts named in the prefix of a house message (sent here or synced from another device) in the last 30 days."""
+    from . import signalhost
+    cutoff = (now - timedelta(days=KNOWN_HOSTS_DAYS)).timestamp() * 1000
+    parsed = (signalhost.parse_prefix(e.get("text")) for e in events
+              if e.get("dir") in ("out", "own") and int(e.get("ts") or 0) >= cutoff)
+    return {p[1] for p in parsed if p and p[1]}
 
 
 def known_hosts(events: list[dict], now: datetime) -> list[str]:
-    """This host, `agent_host` and every host named in a house message of the last 30 days, sorted."""
+    """This host, `agent_host` and every host seen in the last 30 days, sorted."""
     from . import signalhost
-    cutoff = (now - timedelta(days=KNOWN_HOSTS_DAYS)).timestamp() * 1000
-    hosts = {signalhost.this_host(), signalhost.agent_host()}
-    for e in events:
-        if e.get("dir") in ("out", "own") and int(e.get("ts") or 0) >= cutoff:
-            parsed = signalhost.parse_prefix(e.get("text"))
-            hosts.add(parsed[1] if parsed else None)
-    return sorted(h for h in hosts if h)
+    return sorted((seen_hosts(events, now) | {signalhost.this_host(), signalhost.agent_host()}) - {None})
 
 
 def _elsewhere(item: "Request | Command", event: dict, sig, chats: dict, events: list[dict], now: datetime) -> bool:
@@ -1048,7 +1074,7 @@ def _elsewhere(item: "Request | Command", event: dict, sig, chats: dict, events:
     A host name nobody knows is answered by the default host, so a typo is never swallowed silently.
     """
     from . import signalhost
-    if signalhost.addressed_to_me(target_host(item, event)):
+    if signalhost.addressed_to_me(target_host(item, event, events)):
         return False
     if item.host and item.chat in chats and signalhost.addressed_to_me(None):
         hosts = known_hosts(events, now)
@@ -1138,9 +1164,9 @@ def handle_command(cmd: Command, sig, store: "JobStore", run=subprocess.run, cha
         return _leaderboard(cmd, sig, store, chats, now, quote)
     if cmd.name == "stop":
         target = None
-        if cmd.quote_ts is not None:
+        if cmd.quote_ts is not None:  # a quote names the job; never fall back to another one
             target = next((j for j in mine if cmd.quote_ts in (j.ack_ts, j.ts)), None)
-        if target is None:
+        else:
             target = next((j for j in sorted(mine, key=lambda j: j.created, reverse=True)
                            if j.status == "running"), None)
         if target is None or target.status not in ("running", "queued", "waiting-approval"):
@@ -1177,7 +1203,11 @@ HELLO_TEMPLATE = "core/templates/signal-hello.md"
 
 
 def _greet(sig, store: "JobStore", chats: dict) -> None:
-    """Send the S7 greeting once to every allowed group (never Note to Self) while S7 is on."""
+    """Send the S7 greeting once to every allowed group (never Note to Self) while S7 is on, from the default
+    host only."""
+    from . import signalhost
+    if not signalhost.addressed_to_me(None):
+        return  # one greeting per group: from the default host only
     greeted = set(store.state().get("greeted") or [])
     text = (CODE_ROOT / HELLO_TEMPLATE).read_text().strip()
     for chat in chats.values():
@@ -1193,9 +1223,14 @@ def _host_lines() -> list[str]:
     """`house doctor` lines about hosts: this host and the default, or why routing may misfire."""
     from . import signalhost
     lines = [f"! S7: {p}" for p in signalhost.problems()]
-    default = signalhost.agent_host()
+    default, me = signalhost.agent_host(), signalhost.this_host()
     if default:
-        return [f"✓ S7: host: {signalhost.this_host()} · domyślny: {default}", *lines]
+        from . import signalstore
+        events = signalstore.latest(list(signalstore.iter_events()))
+        if default != me and default not in seen_hosts(events, datetime.now().astimezone()):
+            lines.append(f"! S7: agent_host {default} nie pisał od {KNOWN_HOSTS_DAYS} dni: literówka? Zlecenia bez "
+                         "wskazanego hosta czekają na niego, a ten komputer je pomija")
+        return [f"✓ S7: host: {me} · domyślny: {default}", *lines]
     return [f"! S7: brak agent_host w signal.toml (host: {signalhost.this_host()}); przy kilku komputerach na "
             "jednym koncie Signal każdy weźmie zlecenie bez wskazanego hosta, wpisz ten sam `agent_host` na "
             "każdym", *lines]

@@ -57,6 +57,12 @@ class ThisHostTest(HostCase):
         self.assertEqual(len(problems), 2, problems)
         self.assertIn("host", problems[0])
 
+    def test_keys_inside_a_group_table_are_reported(self):
+        self.toml('[groups.t]\nid = "x"\nhost = "dom"\nagent_host = "dom"\n')
+        self.assertEqual(signalhost.this_host(), "wro1-ldl-p32030")
+        problems = signalhost.problems()
+        self.assertTrue(any("[groups.t]" in p and "host" in p for p in problems), problems)
+
     def test_broken_toml_is_not_fatal(self):
         self.toml("host = \n")
         self.assertEqual(signalhost.this_host(), "wro1-ldl-p32030")

@@ -53,10 +53,21 @@ def agent_host() -> str | None:
 
 
 def problems() -> list[str]:
-    """Invalid `host` / `agent_host` values in signal.toml (for `house doctor`)."""
+    """Invalid `host` / `agent_host` values in signal.toml, and those keys written inside a `[groups.*]` table
+    (appended at the end of the file), where they are ignored (for `house doctor`)."""
     top = top_keys()
-    return [f"{config_path()}: `{key}` = {top[key]!r} nie pasuje do [a-z0-9-]{{1,16}}, pomijam"
-            for key in ("host", "agent_host") if key in top and not _valid(top[key])]
+    out = [f"{config_path()}: `{key}` = {top[key]!r} nie pasuje do [a-z0-9-]{{1,16}}, pomijam"
+           for key in ("host", "agent_host") if key in top and not _valid(top[key])]
+    try:
+        groups = tomllib.loads(config_path().read_text()).get("groups")
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        groups = None
+    for alias, entry in (groups if isinstance(groups, dict) else {}).items():
+        for key in ("host", "agent_host"):
+            if isinstance(entry, dict) and key in entry:
+                out.append(f"{config_path()}: `{key}` jest w [groups.{alias}], więc nie działa; przenieś go na "
+                           "początek pliku, przed [groups…]")
+    return out
 
 
 def prefix(alias: str) -> str:
