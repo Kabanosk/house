@@ -176,17 +176,27 @@ def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=
     Raises:
         RuntimeError: `systemctl --user` is missing or fails (no user manager, no D-Bus).
     """
+    claude = claude or shutil.which("claude")
+    tick = f"ExecStart={Path(root).resolve()}/bin/house signal agent tick\n" if agent else ""
+    return _install_timer(TIMER, SERVICE_UNIT.format(root=Path(root).resolve(), path=_unit_path(claude), agent=tick),
+                          TIMER_UNIT.format(every=every), home, run)
+
+
+def _unit_path(claude: str | None) -> str:
+    """PATH for a unit: the directory of `claude` (if any) plus the system dirs (systemd keeps PATH minimal)."""
+    return ":".join(dict.fromkeys([*([str(Path(claude).parent)] if claude else []), "/usr/local/bin", "/usr/bin",
+                                   "/bin"]))
+
+
+def _install_timer(name: str, service_text: str, timer_text: str, home: Path | None, run) -> list[Path]:
+    """Write `<name>.service` / `<name>.timer` user units, reload systemd and enable the timer."""
     units = (home or Path.home()) / ".config/systemd/user"
     units.mkdir(parents=True, exist_ok=True)
-    service, timer = units / f"{TIMER}.service", units / f"{TIMER}.timer"
-    claude = claude or shutil.which("claude")
-    path = ":".join(dict.fromkeys([*([str(Path(claude).parent)] if claude else []), "/usr/local/bin", "/usr/bin",
-                                   "/bin"]))
-    tick = f"ExecStart={Path(root).resolve()}/bin/house signal agent tick\n" if agent else ""
-    service.write_text(SERVICE_UNIT.format(root=Path(root).resolve(), path=path, agent=tick))
-    timer.write_text(TIMER_UNIT.format(every=every))
+    service, timer = units / f"{name}.service", units / f"{name}.timer"
+    service.write_text(service_text)
+    timer.write_text(timer_text)
     for argv in (["systemctl", "--user", "daemon-reload"],
-                 ["systemctl", "--user", "enable", "--now", f"{TIMER}.timer"]):
+                 ["systemctl", "--user", "enable", "--now", f"{name}.timer"]):
         try:
             r = run(argv, capture_output=True, text=True, check=False)
         except OSError as e:
@@ -194,3 +204,40 @@ def install_signal_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=
         if r.returncode != 0:
             raise RuntimeError(f"{' '.join(argv)}: {(r.stderr or '').strip()[:200]}")
     return [service, timer]
+
+
+LB_TIMER = "house-lb"
+LB_SERVICE_UNIT = """[Unit]
+Description=house: oficjalne rankingi konkursów (house lb poll)
+
+[Service]
+Type=oneshot
+Environment=PATH={path}
+ExecStart={root}/bin/house lb poll
+TimeoutStartSec=900
+"""
+LB_TIMER_UNIT = """[Unit]
+Description=house: rankingi co {every}
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={every}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def install_lb_timer(root: Path = HOUSE_ROOT, home: Path | None = None, run=subprocess.run,
+                     every: str = "5min") -> list[Path]:
+    """Install and start the user timer running `house lb poll` (each contest's own `leaderboard.every` applies).
+
+    Returns:
+        Paths of the service and timer unit files.
+
+    Raises:
+        RuntimeError: `systemctl --user` is missing or fails.
+    """
+    return _install_timer(LB_TIMER, LB_SERVICE_UNIT.format(root=Path(root).resolve(), path=_unit_path(None)),
+                          LB_TIMER_UNIT.format(every=every), home, run)

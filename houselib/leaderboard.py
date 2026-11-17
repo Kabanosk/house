@@ -274,3 +274,46 @@ def summary(contest: Path, seen_at: str | None, asked: datetime | None, now: dat
     if team:
         lines.append(_us(prev["rows"], latest["rows"], team))
     return Summary("\n".join(lines + [tail]), latest["at"], True)
+
+
+UA = "Mozilla/5.0 (X11; Linux x86_64) house-lb"
+
+
+def _http_get(url: str, headers: dict) -> str:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": UA, **headers})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def agorize_board(page_url: str, fetch=None, sort: str | None = None) -> list[dict]:
+    """Board of an Agorize challenge (Huawei Tech Arena) from its public leaderboard page.
+
+    The page's JS holds the organisers' API url and a public bearer token (`const url = '…'`,
+    `const token = '…'`); both are read on every call and never stored.
+
+    Args:
+        page_url: The challenge's `…/pages/leaderboard` URL.
+        fetch: `fetch(url, headers) -> str`; defaults to urllib.
+        sort: "max"/"min" to stable-sort by score; None keeps the API order (as the page shows it).
+
+    Returns:
+        Rows in the `parse_rows` contract (`team`, `score`, plus `id`/`filename`/`created_at` when present).
+
+    Raises:
+        ValueError: The page has no API url or token.
+    """
+    fetch = fetch or _http_get
+    page = fetch(page_url, {})
+    url = re.search(r"const\s+url\s*=\s*'(https://[^']+)'", page)
+    token = re.search(r"const\s+token\s*=\s*'([^']+)'", page)
+    if not url or not token:
+        raise ValueError("strona nie zawiera adresu API rankingu albo tokenu")
+    data = json.loads(fetch(url.group(1), {"Authorization": f"Bearer {token.group(1)}"}))
+    rows = parse_rows(json.dumps([
+        {"team": r.get("team__name"), "score": r.get("score"),
+         **{k: r[k] for k in ("id", "filename", "created_at") if k in r}}
+        for r in (data.get("data") if isinstance(data, dict) else None) or []]))
+    if sort in ("max", "min"):
+        rows.sort(key=lambda r: r["score"], reverse=sort == "max")
+    return rows

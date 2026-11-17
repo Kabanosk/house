@@ -237,5 +237,78 @@ class SummaryTest(ContestCase):
         self.assertTrue(text.endswith("⚠ ostatnie pobranie nieudane (14:00); dane z 12:00"), text)
 
 
+PAGE = """<script>
+$(document).on('turbolinks:load', function () {
+    const url = 'https://techarena2026.xianti.fr/api/leaderboard/tap26-finland?best=true';
+    const token = 'tok123';
+</script>"""
+
+
+class AgorizeTest(unittest.TestCase):
+    def fake(self, data):
+        calls = []
+
+        def fetch(url, headers):
+            calls.append((url, headers))
+            return PAGE if "agorize" in url else json.dumps({"data": data})
+        return fetch, calls
+
+    def test_agorize_parses_page(self):
+        fetch, calls = self.fake([{"team__name": "B", "score": "0.5", "id": 2, "filename": "b.onnx"},
+                                  {"team__name": "A", "score": 0.6, "id": 1}])
+        rows = lb.agorize_board("https://huawei.agorize.com/x/pages/leaderboard", fetch=fetch)
+        self.assertEqual(rows, [{"team": "B", "score": 0.5, "id": 2, "filename": "b.onnx"},
+                                {"team": "A", "score": 0.6, "id": 1}])
+        self.assertEqual(calls[1], ("https://techarena2026.xianti.fr/api/leaderboard/tap26-finland?best=true",
+                                    {"Authorization": "Bearer tok123"}))
+        rows = lb.agorize_board("https://huawei.agorize.com/x", fetch=fetch, sort="max")
+        self.assertEqual([r["team"] for r in rows], ["A", "B"])
+        self.assertEqual([r["team"] for r in lb.agorize_board("https://huawei.agorize.com/x", fetch=fetch,
+                                                              sort="min")], ["B", "A"])
+
+    def test_agorize_missing_token(self):
+        with self.assertRaises(ValueError):
+            lb.agorize_board("https://huawei.agorize.com/x", fetch=lambda u, h: "<html>login</html>")
+
+
+class CliTest(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+
+        from houselib import cli
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "contests.yaml").write_text("a-2026: ''\nb-2026: ''\n")
+        for name in ("a-2026", "b-2026"):
+            (self.root / "contests" / name / ".house").mkdir(parents=True)
+        out = json.dumps(board(("A", 0.5)))
+        (self.root / "contests/a-2026/.house/spec.yaml").write_text(
+            f"leaderboard:\n  cmd: \"echo '{out}'\"\n  team: A\n")
+        self.patch = mock.patch.object(cli, "HOUSE_ROOT", self.root)
+        self.patch.start()
+        self.cli = cli
+
+    def tearDown(self):
+        self.patch.stop()
+
+    def run_cli(self, *argv):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.cli.main(list(argv))
+        return code, out.getvalue()
+
+    def test_cli_poll_all_contests(self):
+        code, out = self.run_cli("lb", "poll")
+        self.assertEqual(code, 0)
+        self.assertIn("lb a-2026: 1 drużyn", out)
+        self.assertEqual(len(lb.snapshots(self.root / "contests/a-2026")), 1)
+        self.assertFalse((self.root / "contests/b-2026/.house/leaderboard.jsonl").exists())
+        code, out = self.run_cli("lb", "poll", "a-2026")
+        self.assertEqual(out, "")  # not due yet
+        code, out = self.run_cli("lb", "show", "a-2026")
+        self.assertIn("1 | A | 0.5 ← my", out)
+
+
 if __name__ == "__main__":
     unittest.main()

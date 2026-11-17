@@ -51,6 +51,14 @@ class TimerTest(unittest.TestCase):
         setup.install_signal_timer(self.root, home=self.home, run=FakeRun(), every="1min")
         self.assertIn("OnUnitActiveSec=1min", (self.home / ".config/systemd/user/house-signal-pull.timer").read_text())
 
+    def test_lb_timer_units(self):
+        run = FakeRun()
+        service, timer = setup.install_lb_timer(self.root, home=self.home, run=run)
+        self.assertEqual(service.name, "house-lb.service")
+        self.assertIn(f"ExecStart={self.root.resolve()}/bin/house lb poll", service.read_text())
+        self.assertIn("OnUnitActiveSec=5min", timer.read_text())
+        self.assertEqual(run.calls[-1], ["systemctl", "--user", "enable", "--now", "house-lb.timer"])
+
     def test_doctor_timer_line(self):
         self.assertIsNone(doctor.signal_timer_status(home=self.home, run=FakeRun()))
         setup.install_signal_timer(self.root, home=self.home, run=FakeRun())
