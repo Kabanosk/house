@@ -53,15 +53,17 @@ def agent_host() -> str | None:
 
 
 def problems() -> list[str]:
-    """Invalid `host` / `agent_host` values in signal.toml, and those keys written inside a `[groups.*]` table
-    (appended at the end of the file), where they are ignored (for `house doctor`)."""
+    """Invalid `host` / `agent_host` values in signal.toml, those keys written inside a `[groups.*]` table
+    (appended at the end of the file, where they are ignored), or an unreadable file. S7 pauses on any of them."""
     top = top_keys()
     out = [f"{config_path()}: `{key}` = {top[key]!r} nie pasuje do [a-z0-9-]{{1,16}}, pomijam"
            for key in ("host", "agent_host") if key in top and not _valid(top[key])]
     try:
         groups = tomllib.loads(config_path().read_text()).get("groups")
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+    except FileNotFoundError:
         groups = None
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        return [f"{config_path()}: nie da się odczytać ({e})"]
     for alias, entry in (groups if isinstance(groups, dict) else {}).items():
         for key in ("host", "agent_host"):
             if isinstance(entry, dict) and key in entry:

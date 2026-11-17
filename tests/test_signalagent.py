@@ -61,6 +61,10 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((r.host, r.text), ("bardzo-dlugi-komputer-xyz", "zrób"))
         self.assertIsNone(agent.parse(ev(fx.group_in(1000, "pisz na x@claude.ai"))))
 
+    def test_trigger_keeps_other_mentions(self):
+        self.assertEqual(agent.parse(ev(fx.group_in(1000, "@claude @kuba zrób"))).text, "@kuba zrób")
+        self.assertEqual(agent.parse(ev(fx.group_in(1000, "zrób @claude@ to"))).text, "zrób to")
+
     def test_command_with_host(self):
         c = agent.parse(ev(fx.group_in(1000, "/status@praca")))
         self.assertEqual((c.name, c.host), ("status", "praca"))
@@ -1140,8 +1144,8 @@ class DockerRuntimeTest(TickTest):
         self.assertFalse((agent.job_files(job)["dir"] / "container.env").exists())
 
 
-class HostRoutingTest(TickTest):
-    """Several computers on one Signal account: each event is handled by exactly one host (this one is `test`)."""
+class HostCase(TickTest):
+    """Tick with this host named `test` (HOUSE_HOST) and `agent_host` set per test."""
 
     def config(self, agent_host=None):
         from pathlib import Path
@@ -1150,6 +1154,10 @@ class HostRoutingTest(TickTest):
 
     def now_ms(self):
         return int(datetime.now().timestamp() * 1000)
+
+
+class HostRoutingTest(HostCase):
+    """Several computers on one Signal account: each event is handled by exactly one host (this one is `test`)."""
 
     def test_untargeted_goes_to_agent_host_only(self):
         self.config("inny")
@@ -1220,11 +1228,11 @@ class HostRoutingTest(TickTest):
         self.assertEqual(self.store.all(), [])
         texts = [s["text"] for s in self.sig.sent]
         self.assertEqual(len(texts), 2, texts)
-        self.assertIn("nie znam hosta dmo; znane: praca, test", texts[0])
-        self.assertIn("nie znam hosta xyz", texts[1])
+        self.assertIn("host dmo nie pisał od 30 dni (znane: praca, test)", texts[0])
+        self.assertIn("host xyz nie pisał", texts[1])
 
 
-class HostFollowUpTest(HostRoutingTest):
+class HostFollowUpTest(HostCase):
     """Review fixes: a reply to a request follows that request's host; greeting only from the default host."""
 
     def test_stop_reply_to_named_request_goes_to_its_host(self):
@@ -1271,3 +1279,42 @@ class HostFollowUpTest(HostRoutingTest):
         self.config("test")
         self.tick()
         self.assertEqual(len(self.sig.sent), 1)
+
+    def test_stored_text_wins_over_quote_text(self):
+        self.add(fx.self_note(self.now_ms(), "🤖 [house@inny] jestem"))
+        self.config("inny")
+        self.add(fx.self_note(900, "🤖 [house@test] Krok 1"))
+        self.add(fx.self_note(1000, "@claude zrób", quote=(900, fx.OWN, "🤖 [house@inny] Krok 1")))
+        self.tick()
+        self.assertEqual(len(self.store.all()), 1)
+
+
+class HostConfigBrokenTest(HostCase):
+    """A broken host config stops dispatch (fail-closed) with one alarm instead of misrouting silently."""
+
+    def check_paused(self, toml):
+        from pathlib import Path
+        import os
+        Path(os.environ["HOUSE_SIGNAL_CONFIG"]).write_text(toml)
+        self.add(fx.self_note(1000, "@claude zrób X"))
+        self.tick()
+        self.tick()
+        self.assertEqual(self.store.all(), [])
+        alarms = [s["text"] for s in self.sig.sent if "signal.toml" in s["text"]]
+        self.assertEqual(len(alarms), 1, self.sig.sent)
+        self.assertIsNone(self.sig.sent[0]["group"])
+        self.config("test")
+        self.tick()
+        self.assertEqual([j.text for j in self.store.all()], ["zrób X"])  # nothing was skipped while paused
+
+    def test_invalid_agent_host(self):
+        self.check_paused('agent_host = "Dom"\n')
+
+    def test_invalid_host(self):
+        self.check_paused('host = "Dom"\nagent_host = "test"\n')
+
+    def test_keys_inside_group(self):
+        self.check_paused('[groups.t]\nid = "x"\nagent_host = "test"\n')
+
+    def test_unreadable_toml(self):
+        self.check_paused('agent_host = \n')

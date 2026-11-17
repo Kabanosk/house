@@ -40,7 +40,9 @@ host = "dom"          # krótka nazwa tego komputera; brak → hostname małymi 
 agent_host = "dom"    # kto bierze zlecenia i komendy bez wskazanego hosta; ta sama wartość na wszystkich hostach
 ```
 
-Nazwa: `[a-z0-9-]{1,16}`. Inna wartość daje błąd przy wczytaniu configu.
+Nazwa: `[a-z0-9-]{1,16}`. Zła wartość, klucz wpisany wewnątrz `[groups.*]` albo nieczytelny plik wstrzymują S7
+na tym hoście: zdarzenia czekają (kursor stoi), właściciel dostaje jeden alarm w Notatce do siebie, `house doctor`
+pokazuje przyczynę. Odbiór i powiadomienia działają dalej (nazwa wtedy z hostname).
 
 **Prefiks.** Wszystkie wysyłki (`notify.prefix`, `inbox.py:179`, `signalcli.py:190`, `signalagent.py:704`)
 dostają hosta: `🤖 [house@dom]`, `🤖 [techarena@dom]`. Jedna funkcja buduje prefiks, a jedna go parsuje
@@ -56,8 +58,10 @@ dostają hosta: `🤖 [house@dom]`, `🤖 [techarena@dom]`. Jedna funkcja buduje
    `own` bez `meta`.
 3. W pozostałych przypadkach obsługuje `agent_host`.
 
-Host, który nie jest adresatem, przesuwa kursor i nic nie robi. To dotyczy też zatwierdzeń (`approval`) oraz
-`/agent on|off` z Signala. Komenda zmienia S7 tylko na hoście-adresacie, a odpowiedź to potwierdza
+Host, który nie jest adresatem, przesuwa kursor i nic nie robi. To dotyczy też `/agent on|off` z Signala.
+Zatwierdzenia (`approval`) są lokalne z natury: 👍 pasuje tylko do joba w magazynie hosta, który zadał pytanie.
+Tekst cytatu bierzemy z magazynu, a z koperty tylko wtedy, gdy wiadomości tam nie ma (cytat wypełnia klient
+nadawcy). Komenda zmienia S7 tylko na hoście-adresacie, a odpowiedź to potwierdza
 („S7 włączony na dom”).
 
 **Literówka w nazwie hosta.** `agent_host` odpowiada na `@claude@X` i `/komenda@X`, gdy `X` nie występuje w prefiksie

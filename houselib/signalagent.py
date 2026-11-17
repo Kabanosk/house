@@ -26,7 +26,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b(?:@([A-Za-z0-9-]+))?", re.IGNORECASE)  # `@claude@dom`: host
+# `@claude@dom` names a host; a bare `@claude@` is plain `@claude`
+TRIGGER_RE = re.compile(r"(?<![\w@.])@claude\b(?:@([A-Za-z0-9-]+)|@(?!\S))?", re.IGNORECASE)
 ALIAS_HINT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*)\s*:\s*(.+)$", re.DOTALL)
 COMMANDS = {"/status": "status", "/lb": "lb", "/stop": "stop"}
 SELF = "self"
@@ -125,7 +126,7 @@ def parse(event: dict) -> "Request | Command | None":
     if not trigger:
         return None
     shown = str(event.get("text") or sent)
-    full = " ".join(TRIGGER_RE.sub(" ", shown, count=1).split()).strip(" ,:@")
+    full = " ".join(TRIGGER_RE.sub(" ", shown, count=1).split()).strip(" ,:")
     hint = ALIAS_HINT_RE.match(full)
     env = (event.get("raw") or {}).get("envelope") or {}
     received = env.get("serverReceivedTimestamp")
@@ -957,8 +958,11 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
         if cursor is None:
             store.set_state(cursor=signalstore.last_seq())
             return ["agent: kursor ustawiony, historia pominięta"]
-        events = list(signalstore.iter_events())
-        latest = signalstore.latest(events)
+        if _host_config_broken(sig, store):
+            events, latest = [], []  # fail-closed: the cursor stays, nothing new is handled until the fix
+        else:
+            events = list(signalstore.iter_events())
+            latest = signalstore.latest(events)
         out_events = {e["ts"]: e for e in latest if e.get("dir") == "out" and e.get("ts")}
         by_key = {e["key"]: e for e in latest}
         chats = signalchats.allowed(None)
@@ -1021,13 +1025,14 @@ KNOWN_HOSTS_DAYS = 30
 
 
 def _quoted(event: dict, events: list[dict]) -> tuple[str | None, dict | None]:
-    """(text, stored event) of the message `event` quotes; the text from the quote, else from the store."""
+    """(text, stored event) of the message `event` quotes: the stored text, else the quote's (a sender's client
+    fills the quote, so the stored copy is the one to trust)."""
     quote = event.get("quote") or {}
     if quote.get("ts") is None:
         return None, None
     stored = next((e for e in events if e.get("ts") == quote["ts"] and e.get("chat") == event.get("chat")
                    and e.get("kind") == "message"), None)
-    return quote.get("text") or (stored or {}).get("text"), stored
+    return (stored or {}).get("text") or quote.get("text"), stored
 
 
 def target_host(item: "Request | Command", event: dict, events: list[dict] = ()) -> str | None:
@@ -1068,6 +1073,22 @@ def known_hosts(events: list[dict], now: datetime) -> list[str]:
     return sorted((seen_hosts(events, now) | {signalhost.this_host(), signalhost.agent_host()}) - {None})
 
 
+def _host_config_broken(sig, store: "JobStore") -> bool:
+    """True when `host` / `agent_host` in signal.toml are broken, so routing could run a request twice or drop it.
+
+    The owner gets one alarm in Note to Self per distinct problem; events wait (the cursor stays) until the fix.
+    """
+    from . import signalhost
+    problems = signalhost.problems()
+    text = "; ".join(problems)
+    if store.state().get("host_alarm") != text:
+        if problems:
+            _say(sig, SELF, f"S7 wstrzymany na {signalhost.this_host()}: {text}. Zlecenia czekają na poprawkę "
+                            "(`house doctor`).")
+        store.set_state(host_alarm=text)
+    return bool(problems)
+
+
 def _elsewhere(item: "Request | Command", event: dict, sig, chats: dict, events: list[dict], now: datetime) -> bool:
     """True when another host handles this event (this one only moves the cursor).
 
@@ -1080,7 +1101,8 @@ def _elsewhere(item: "Request | Command", event: dict, sig, chats: dict, events:
         hosts = known_hosts(events, now)
         if item.host not in hosts:
             ts = item.ts if isinstance(item, Request) else int(item.key.rsplit(":", 1)[1])
-            _say(sig, item.chat, f"nie znam hosta {item.host}; znane: {', '.join(hosts)}", quote=(ts, item.author))
+            _say(sig, item.chat, f"host {item.host[:20]} nie pisał od {KNOWN_HOSTS_DAYS} dni (znane: "
+                 f"{', '.join(hosts)}); jeśli to literówka, napisz jeszcze raz z dobrą nazwą", quote=(ts, item.author))
     return True
 
 
