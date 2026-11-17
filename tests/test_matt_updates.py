@@ -27,8 +27,8 @@ class HouseRetroTest(unittest.TestCase):
                      "No-ops", "Information access", "retro-", "approval", "submissions.csv"):
             self.assertIn(word, body, word)
 
-    def test_readme_lists_retro(self):
-        self.assertIn("/house-retro", (HOUSE_ROOT / "README.md").read_text())
+    def test_docs_list_retro(self):
+        self.assertIn("/house-retro", (HOUSE_ROOT / "docs/modules/contest-workflow.md").read_text())
 
 
 class QuestionsProtocolTest(unittest.TestCase):

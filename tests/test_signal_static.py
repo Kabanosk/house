@@ -21,8 +21,8 @@ class StaticTest(unittest.TestCase):
         text = (HOUSE_ROOT / "core/protocols/questions.md").read_text()
         self.assertIn("forwarded", text)
 
-    def test_readme_documents_signal_commands(self):
-        text = (HOUSE_ROOT / "README.md").read_text()
+    def test_docs_document_signal_commands(self):
+        text = (HOUSE_ROOT / "docs/modules/signal.md").read_text()
         for cmd in ("house signal read", "house signal unread", "house signal allow", "signal.toml"):
             self.assertIn(cmd, text)
 
