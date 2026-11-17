@@ -1,6 +1,7 @@
 # Ochrona (guard i hooki)
 
-Pierwszą linią obrony są hooki Claude Code (`bin/house-hook`). Twardą granicą jest
+Pierwszą linią obrony są hooki Claude Code (`bin/house-hook`), a w worktree zadań także hooki git
+(`bin/house-githook`, niżej). Twardą granicą jest
 `house merge`, który sprawdza diff gałęzi niezależnie od tego, jak plik został zmieniony
 (zob. [Sprawdzenia i bramka scalania](checks-and-merge.md)).
 
@@ -19,3 +20,25 @@ pisanie do `.house/checks/`, commit plików `.env*` i plików z kluczami, push n
 Hook to pierwsza linia obrony (łapie typowe komendy: przekierowania, `sed -i`, `rm`, `git -C`, wiele linii),
 ale nie każdą sztuczkę (np. `python3 -c "open(...,'w')"`); twardą granicą jest `house merge`, który sprawdza
 diff gałęzi niezależnie od tego, jak plik został zmieniony.
+
+## Hooki git
+
+Logika w `houselib/githook.py`, wejście `bin/house-githook`. `house adapt` wpisuje do `.git/hooks/` repo konkursu
+dwa małe skrypty (`pre-commit`, `pre-push`). Git uruchamia je przy każdym commicie i pushu, więc reguły działają dla
+Claude Code, Codexa i zwykłej powłoki, bez zgadywania, co robi komenda.
+
+Sprawdzają **tylko worktree zadań** (linked worktree konkursu). Główny checkout, w którym commitujesz Ty, i repo
+spoza house są pominięte.
+
+- `pre-commit` odrzuca sekrety (ocena po treści z indeksu), pliki `.house/` i zmiany chronionych plików. Dwa ostatnie
+  pomija w trakcie merge, rebase i cherry-pick; sekrety sprawdza zawsze.
+- `pre-push` odrzuca remote spoza `spec.guard.push_allow` (adres URL zamiast nazwy też), usunięcie głównej gałęzi
+  i force push na nią. Force push na gałąź zadania przechodzi.
+
+Błąd samego hooka nie blokuje pracy (jedna linia ostrzeżenia, exit 0). Nie ma przełącznika środowiskowego (także
+`HOUSE_GUARD=off` nie działa), bo agent kontroluje środowisko własnych komend. Hook Claude Code blokuje agentowi
+`--no-verify`, `git commit -n`, `core.hooksPath` (poza odczytem) oraz zapis do `.git/hooks` i `.git/config`.
+
+Jeśli `core.hooksPath` jest już ustawione (np. husky) albo istnieje cudzy hook, house go nie nadpisuje; `house adapt`
+i `house doctor <konkurs>` to zgłaszają. Obejście dla człowieka: commit w głównym checkoucie. Istniejące konkursy
+dostają hooki po `house adapt <konkurs>`.
