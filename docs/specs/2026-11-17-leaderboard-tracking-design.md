@@ -64,8 +64,12 @@ licząc tylko top 10 i nasze sąsiedztwo (±2 miejsca). Liczba zmian > 3, odstę
 Same przesunięcia miejsc wynikające z czyjegoś awansu nie są osobnymi zdaniami (opisuje się tego, kto awansował,
 plus nasze miejsce).
 
-**Techarena:** `leaderboard.py` dostaje flagę `--json` (wypisuje kontrakt, zachowuje swoje CSV), a repo konkursu
-dostaje `.house/spec.yaml` z sekcją powyżej.
+**Techarena (zmiana po rozpoznaniu):** zamiast flagi `--json` w `leaderboard.py` (który wymaga ciasteczka i
+nieobecnego tu `tools/agorize_cli.py`) house ma wbudowane `house lb agorize <url strony leaderboardu> [--sort
+max|min]`: pobiera publiczną stronę, wyciąga z jej JS `url` i `token` (nigdy nie zapisywane) i wypisuje kontrakt.
+Pasuje do każdej techareny na Agorize; `cmd: "<house>/bin/house lb agorize https://huawei.agorize.com/en/challenges/
+2026-france-tech-arena/pages/leaderboard?lang=en --sort max"`. Repo konkursu dostaje `.house/spec.yaml` z sekcją
+powyżej.
 
 ## Ograniczenia
 
