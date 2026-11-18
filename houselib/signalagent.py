@@ -595,10 +595,9 @@ def launch(job: Job, run=subprocess.run, claude: str | None = None) -> str | Non
         if not sandbox_usable(run):
             job = store.update(job.id, no_bash=True)
         settings, command = job_settings(job, wt), job_command(job, wt, claude)
-    files["prompt"].write_text(_prompt(job, wt))
-    files["settings"].write_text(json.dumps(settings, indent=2))
-    for p in (files["prompt"], files["settings"]):
-        p.chmod(0o644 if job.runtime == "docker" else 0o600)  # the container user reads them through ro mounts
+    # 0600 also in Docker: the container runs as the owner's uid, so its ro mounts read them as they are
+    _write_private(files["prompt"], _prompt(job, wt))
+    _write_private(files["settings"], json.dumps(settings, indent=2))
     for p in (files["log"], files["err"]):  # systemd would create them with its umask (0664); append keeps 0600
         _write_private(p, "")
     r = run(command, capture_output=True, text=True, check=False)

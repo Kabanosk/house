@@ -564,7 +564,7 @@ class TickTest(JobStoreCase):
             self.tick()
             (job,) = self.store.all()
             files = agent.job_files(job)
-            for key in ("log", "err"):
+            for key in ("log", "err", "prompt", "settings"):  # the container runs as the owner's uid: 0600 is enough
                 self.assertEqual(oct(files[key].stat().st_mode & 0o777), "0o600", key)
             self.finish_unit(job)
             self.tick()
