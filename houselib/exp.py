@@ -29,15 +29,14 @@ import hashlib
 import os
 import re
 import shlex
-import signal
 import subprocess
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import checks, gitutil, guard
+from . import checks, gitutil, guard, outlog
+from .outlog import LOG_CAP, cap_tail
 from . import spec as specmod
 
 COLUMNS = ["id", "parent", "commit", "idea_id", "budget", "duration", "score", "status", "scorer", "time", "note",
@@ -49,7 +48,6 @@ _SCORE_RE = re.compile(rf"\bscore\s*[:=]\s*({_NUM})", re.IGNORECASE)
 _DIRECTION_RE = re.compile(r"\b(min|minimi[sz]e|max|maximi[sz]e)\b", re.IGNORECASE)
 DEFAULT_BUDGET = "5m"
 DEFAULT_SCORER_MINUTES = 10
-LOG_CAP = 1_000_000
 MAX_UNTRACKED_BYTES = 20 * 1024 * 1024  # bigger new files (weights, predictions) must be gitignored, not committed
 _NOT_SHARED = {".git", ".house", ".worktrees"}
 
@@ -440,9 +438,8 @@ def _large_untracked(wt: Path) -> list[str]:
 
 
 def _write_log(path: Path, parts: list[str]) -> None:
-    """Write the experiment log, keeping only its last LOG_CAP characters."""
-    text = "\n".join(parts)
-    path.write_text(text[-LOG_CAP:])
+    """Write the experiment log, keeping only its last LOG_CAP characters (shared with `house out`)."""
+    path.write_text(cap_tail("\n".join(parts), LOG_CAP))
 
 
 def _command_text(command: list[str] | str) -> str | list[str]:
@@ -452,25 +449,8 @@ def _command_text(command: list[str] | str) -> str | list[str]:
     return command
 
 
-class _Interrupted(KeyboardInterrupt):
-    """SIGTERM/SIGHUP during `run` (e.g. the agent's tool timeout), raised like Ctrl+C."""
-
-
-@contextlib.contextmanager
-def _signals_interrupt():
-    """Turn SIGTERM and SIGHUP into `_Interrupted` while running (main thread only; SIGINT already raises)."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-
-    def handler(signum, frame):
-        raise _Interrupted(signum)
-    old = {sig: signal.signal(sig, handler) for sig in (signal.SIGTERM, signal.SIGHUP)}
-    try:
-        yield
-    finally:
-        for sig, h in old.items():
-            signal.signal(sig, h)
+_Interrupted = outlog.Interrupted  # SIGTERM/SIGHUP during `run`, raised like Ctrl+C (shared with `house out`)
+_signals_interrupt = outlog.signals_interrupt
 
 
 def _alive(pid: int) -> bool:
