@@ -40,12 +40,16 @@ napisz „jak tam”. Pełna lista komend i kroków: [Konkurs krok po kroku](doc
 
 | Moduł | O czym | Dokument |
 |---|---|---|
-| Konkurs krok po kroku | instalacja, komendy `/house-*`, stan `.house/`, eksport | [`contest-workflow.md`](docs/modules/contest-workflow.md) |
+| Konkurs krok po kroku | instalacja, komendy `/house-*`, stan `.house/`, eksport, `house decisions` (decyzje z innych konkursów) | [`contest-workflow.md`](docs/modules/contest-workflow.md) |
 | Sprawdzenia i bramka scalania | `house check`, `house merge`, statusy zadań | [`checks-and-merge.md`](docs/modules/checks-and-merge.md) |
-| Ochrona | hooki Claude Code, reguły guarda | [`guard.md`](docs/modules/guard.md) |
+| Ochrona | hooki Claude Code, reguły guarda, kompakcja kontekstu | [`guard.md`](docs/modules/guard.md) |
 | Recenzja krzyżowa | `house review`, Claude ↔ Codex | [`review.md`](docs/modules/review.md) |
 | Pętla eksperymentów | `house exp` w konkursach optymalizacyjnych | [`experiments.md`](docs/modules/experiments.md) |
+| Dokumenty konkursu (`house sources`) | regulamin i zadanie bajt w bajt w `.house/sources/`, spis treści z numerami linii, czytanie po zakresie | [`contest-workflow.md`](docs/modules/contest-workflow.md) |
+| Długie komendy (`house out`) | pełny wynik komendy do logu, agent widzi krótką kopertę, `show --grep` | [`out.md`](docs/modules/out.md) |
 | Tryb nocny | `house night`, wyłączniki, raport | [`night.md`](docs/modules/night.md) |
+| Koszt sesji | `house cost`: wiersz na sesję, kontekst, tokeny, kompakcje | [`cost.md`](docs/modules/cost.md) |
+| Ewaluacje agentów | `house eval run`, `house eval status`, pass^k, izolacja | [`evals.md`](docs/modules/evals.md) |
 | Signal | pytania z telefonu, `house signal` | [`signal.md`](docs/modules/signal.md) |
 | Agent z Signala | `@claude`, sandbox, Docker | [`signal-agent.md`](docs/modules/signal-agent.md) |
 | Skille zewnętrzne | `vendor/skills/`, licencje | [`vendor-skills.md`](docs/modules/vendor-skills.md) |

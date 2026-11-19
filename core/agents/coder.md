@@ -18,11 +18,23 @@ You implement exactly one task.
 3. Test first where the task has logic. Small commits with clear messages.
    For any task that changes what a person sees (UI), read and follow
    `$HOUSE_ROOT/vendor/skills/frontend-design/SKILL.md` before writing UI code.
+   Long commands that may fail (full test runs, builds) go through `$HOUSE_ROOT/bin/house out -- <command>`: read
+   its short envelope, then `house out show <id> --grep '<pattern>'` instead of rerunning.
 4. Run `$HOUSE_ROOT/bin/house check <contest> T### --worktree <your worktree>` (contest name = the AGENTS.md
    title) until it prints GREEN, and read the output. "Should work" is not evidence. Never edit the task's
    `acceptance`/`protected` or any file listed in `protected`.
-5. Write `$HOUSE_DIR/reports/T###.md` (English, template in `reports/TEMPLATE.md`) including what you tried that
-   failed. Append one Polish line to `$HOUSE_DIR/PROGRESS.md`. Set `status: review` (the coordinator's `house merge` sets the rest).
+5. Write `$HOUSE_DIR/reports/T###.md` (English) in the sections of `reports/TEMPLATE.md`, ending with `Next action:`
+   and `Done when:`. Add a `Dead ends` entry at the moment you abandon an approach (reason, number of tries,
+   "do not repeat"), not only at the end, so a killed session still leaves it. Keep `Observed` (each with its
+   source: command or path:line) apart from `Unverified` guesses; cite files as path:line, do not paste them.
+   Append one Polish line to `$HOUSE_DIR/PROGRESS.md`. Set `status: review` (the coordinator's `house merge` sets the rest).
 6. Blocked (missing contract, unclear requirement, failing dependency)? Set `status: blocked`, add a Q-### only if
    the human must decide, otherwise tell the coordinator in your summary.
 7. Return: 3–5 line summary, branch name, report path.
+
+Long inputs (contest docs, logs, data):
+- Local file larger than ~40 KB (~10K tokens): first a table of contents (`house sources <contest>` for files in `.house/sources/`, else `grep -n '^#' <file>`) or `grep -n` on the question's terms, then read a range around the hits.
+- One read is at most ~200 lines or ~16 000 characters, whichever comes first (a single minified line counts): `Read` with `offset`/`limit`; in a shell `sed -n 'A,Bp' <file>` or `head -c 16000`.
+- Files in `.house/sources/` are always read by range (`offset`/`limit`), never with `Read` and `allow_large: true`.
+- A brief for a sub-agent carries the path and line range, never the document's text.
+- Long command output (logs, test runs): read the tail or `grep -n`, not the whole output.

@@ -17,6 +17,8 @@ Kolejność uzgodniona 2026-11-05/06. Każdy projekt dostaje osobny dokument do 
    `core/protocols/demo-video.md`.
 
 ## Pomysły na później
+- **Komendy `house` z zapisaną komendą zamiast dowolnej** (Wojtek, 2026-11-17, Q10): zgoda z góry na `Bash(<root>/bin/house …)` jest bezpieczna tylko wtedy, gdy komenda uruchamia coś zapisanego w pliku konkursu i zatwierdzonego przez człowieka (jak `house check` z kryteriami z `.house/checks/`), a nie komendę podaną w wywołaniu. Dziś `house exp run … -- <komenda>` i `house lb poll` (polecenie z `spec.yaml`) przechodzą bez pytania o zgodę; guard sprawdza komendę po `--`, ale reszta (np. `pip install`, `curl`) nie pyta. Kierunek: `house test` / `house exp run E-###` z komendą treningu z `spec.yaml`, a dowolna komenda po `--` bez zgody z góry. Na razie zostaje jak jest (decyzja A).
+- **Workflowy, nie tylko predefiniowani agenci** (Wojtek, 2026-11-17, po lekturze „Building effective agents”): obok profili agentów w `core/agents/` opisywać całe przepływy pracy jako wzorce do złożenia: łańcuch kroków (prompt chaining), routing, równoległość, orchestrator-workers, evaluator-optimizer. Workflow = kolejność, bramki między krokami i kto wykonuje krok (agent albo kod). Punkt wyjścia: anthropic.com/research/building-effective-agents; do zestawienia z obecnymi skillami `/house-*` i trybem nocnym.
 - **(priorytet) Czytanie grup Signala**: dziś odczyt grupy wymaga ręcznego skryptu. Braki widoczne 2026-11-16:
   `house inbox` zatrzymuje tylko grupy trwających konkursów (grupa `techarena_claude` nie jest podpięta pod żaden,
   więc jej wiadomości zostałyby odrzucone), `inbox.extract` gubi tekst cytowanej wiadomości (trzeba było go szukać

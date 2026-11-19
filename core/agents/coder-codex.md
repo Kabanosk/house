@@ -16,6 +16,9 @@ You implement exactly one task (you are running inside Codex CLI, in the task's 
 3. Test first where the task has logic. Run `$HOUSE_ROOT/bin/house check <contest> T### --worktree .` until it
    prints GREEN and read the output. Never edit the task's `acceptance`/`protected` or files listed in
    `protected`.
-4. Write `$HOUSE_DIR/reports/T###.md` (English, template `$HOUSE_DIR/reports/TEMPLATE.md`), including what you
-   tried that failed. Append one Polish line to `$HOUSE_DIR/PROGRESS.md`.
+4. Write `$HOUSE_DIR/reports/T###.md` (English) in the sections of `$HOUSE_DIR/reports/TEMPLATE.md`, ending with
+   `Next action:` and `Done when:`. Add a `Dead ends` entry at the moment you abandon an approach (reason, number of
+   tries, "do not repeat"), not only at the end, so a killed session still leaves it. Keep `Observed` (each with its
+   source: command or path:line) apart from `Unverified` guesses; cite files as path:line, do not paste them.
+   Append one Polish line to `$HOUSE_DIR/PROGRESS.md`.
 5. Do not commit — the driver commits your changes on the task branch and sets `status: review`.

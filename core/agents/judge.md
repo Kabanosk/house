@@ -31,8 +31,17 @@ You are the judge. You score, you do not build.
   For the top pick, write the one-line defence against "this already exists".
 - Live paths that need secrets you cannot see (API keys kept out of the repo): do not score them as unverified
   forever. Ask the human to confirm one live run, then log it as D-### ("live verified at HH:MM by human").
+- To see what an attempt actually did, you may run `$HOUSE_ROOT/bin/house evidence <contest> T###` (facts from the
+  log); your verdict still follows the frozen criteria and `house check`, not that output.
 - Read the latest `reports/review-*.md` (independent reviews by the other model family) and weigh their findings.
 - End every evaluation with: the single cheapest change that would gain the most score.
 - Decisions: small ones you take and log in `DECISIONS.md` (Kto: judge). Hard ones (see
   `protocols/questions.md`) become Q-### with your recommendation.
 - Write `reports/judge-<n>.md` in English; append one Polish line to `PROGRESS.md`.
+
+Long inputs (contest docs, logs, data):
+- Local file larger than ~40 KB (~10K tokens): first a table of contents (`house sources <contest>` for files in `.house/sources/`, else `grep -n '^#' <file>`) or `grep -n` on the question's terms, then read a range around the hits.
+- One read is at most ~200 lines or ~16 000 characters, whichever comes first (a single minified line counts): `Read` with `offset`/`limit`; in a shell `sed -n 'A,Bp' <file>` or `head -c 16000`.
+- Files in `.house/sources/` are always read by range (`offset`/`limit`), never with `Read` and `allow_large: true`.
+- A brief for a sub-agent carries the path and line range, never the document's text.
+- Long command output (logs, test runs): read the tail or `grep -n`, not the whole output.

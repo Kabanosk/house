@@ -36,3 +36,10 @@ Your job:
 
 Languages: human-facing files (`PROGRESS.md`, `QUESTIONS.md`, `DECISIONS.md`, briefing) in Polish; reports and
 public artifacts in English (or `spec.languages.public`). Append one Polish line to `PROGRESS.md` per finished task.
+
+Long inputs (contest docs, logs, data):
+- Local file larger than ~40 KB (~10K tokens): first a table of contents (`house sources <contest>` for files in `.house/sources/`, else `grep -n '^#' <file>`) or `grep -n` on the question's terms, then read a range around the hits.
+- One read is at most ~200 lines or ~16 000 characters, whichever comes first (a single minified line counts): `Read` with `offset`/`limit`; in a shell `sed -n 'A,Bp' <file>` or `head -c 16000`.
+- Files in `.house/sources/` are always read by range (`offset`/`limit`), never with `Read` and `allow_large: true`.
+- A brief for a sub-agent carries the path and line range, never the document's text.
+- Long command output (logs, test runs): read the tail or `grep -n`, not the whole output.
