@@ -108,6 +108,178 @@ class HookTest(unittest.TestCase):
             self.assertEqual(hook.post_tool(ev), "")
             ask.assert_not_called()
 
+    # --- compaction hooks (A2a) ---
+
+    DECISIONS_HEAD = ("# Dziennik decyzji\n\nFormat wpisu:\n\n```\n- **Decyzja:** …\n"
+                      "- **Kto:** człowiek | judge | coordinator\n```\n")
+
+    def decision(self, n: int, kto: str, body: str = "x", extra: str = "") -> str:
+        return (f"\n## D-{n:03d} Title {n}\n\n- **Decyzja:** {body}\n- **Dlaczego:** y\n- **Kto:** {kto}\n"
+                f"- **Data:** 2026-11-17 10:00\n{extra}")
+
+    def test_compact_mode_keeps_a_human_decision_that_only_an_agent_superseded(self):
+        from houselib import hook
+        (self.c / ".house/DECISIONS.md").write_text(
+            self.DECISIONS_HEAD + self.decision(1, "człowiek", "HUMAN-CHOICE")
+            + self.decision(2, "judge", "AGENT-OPINION", "- **Zastępuje:** D-001\n"))
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertIn("HUMAN-CHOICE", out)
+        self.assertNotIn("AGENT-OPINION", out)  # an agent entry is not a human decision
+
+    def test_compact_mode_restores_human_decisions_first(self):
+        from houselib import hook
+        (self.c / ".house/DECISIONS.md").write_text(
+            self.DECISIONS_HEAD + self.decision(1, "człowiek", "OLD-CHOICE")
+            + self.decision(2, "judge", "JUDGE-CHOICE")
+            + self.decision(3, "człowiek", "NEW-CHOICE", "- **Zastępuje:** D-001\n"))
+        (self.c / ".house/QUESTIONS.md").write_text(
+            "# Q\n\n## Q-001 [answered 2026-11-13] Which model?\n\n- **Odpowiedź:** lgbm\n\n"
+            "## Q-002 [open] Which split?\n\n- **Blokuje:** T003\n")
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertTrue(out.startswith("house: state restored after compaction (contest c1)\n"), out)
+        self.assertLessEqual(len(out), 10_000)
+        self.assertIn("NEW-CHOICE", out)
+        self.assertIn(self.decision(3, "człowiek", "NEW-CHOICE", "- **Zastępuje:** D-001").strip(), out)
+        for gone in ("OLD-CHOICE", "JUDGE-CHOICE", "człowiek | judge | coordinator"):
+            self.assertNotIn(gone, out)
+        self.assertIn("Q-001 Which model? — answer: lgbm", out)
+        self.assertGreater(out.index("Q-002"), out.index("Q-001"))
+        self.assertGreater(out.index("Q-002"), out.index("NEW-CHOICE"))
+        self.assertIn("T003", out[out.index("Q-002"):])
+        self.assertNotIn("More:", out)
+
+    def answered(self, qid: str, title: str, answer: str) -> str:
+        return f"\n## {qid} [answered 2026-11-13] {title}\n\n- **Odpowiedź:** {answer}\n"
+
+    def test_compact_mode_answered_question_is_not_restored_twice(self):
+        from houselib import hook
+        qdec = lambda n, qid, kto, answer, extra="": (  # noqa: E731 — the entry questions.answer() writes
+            f"\n## D-{n:03d} {qid}: Which language?\n\n- **Decyzja:** {answer}\n- **Dlaczego:** y\n"
+            f"- **Kto:** {kto}\n- **Data:** 2026-11-17 10:00\n{extra}")
+        (self.c / ".house/DECISIONS.md").write_text(
+            self.DECISIONS_HEAD + qdec(2, "Q-003", "człowiek (W, Signal)", "Python")
+            + self.decision(10, "człowiek", "Rust", "- **Zastępuje:** D-002\n")
+            + qdec(11, "Q-007", "judge (deadline)", "JUDGE-DEFAULT"))
+        (self.c / ".house/QUESTIONS.md").write_text(
+            "# Q\n" + self.answered("Q-003", "Which language?", "Python")
+            + self.answered("Q-007", "Which split?", "JUDGE-DEFAULT")
+            + self.answered("Q-009", "Which metric?", "auc"))
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertIn("Rust", out)
+        self.assertNotIn("## D-002", out)
+        self.assertNotIn("Q-003", out)
+        self.assertNotIn("Q-007", out)
+        self.assertNotIn("JUDGE-DEFAULT", out)
+        self.assertIn("Q-009 Which metric? — answer: auc", out)
+
+    def test_compact_mode_shows_tasks_and_red_checks(self):
+        from houselib import hook
+        (self.c / ".house/tasks/T002-x.md").write_text(task("T002", "doing", deps="[T001]"))
+        checks_file = self.c / ".house/checks/T002.json"
+        checks_file.write_text(json.dumps({"results": {"AC-1": {"passes": False}, "AC-2": {"passes": True}}}))
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertRegex(out, r"T002.*doing.*RED.*AC-1")
+        self.assertIn("red checks: T002 (AC-1)", out)
+        self.assertNotIn("T003", out)  # todo tasks are not restored
+
+    def test_compact_mode_last_check_green_needs_every_run_criterion_passing(self):
+        from houselib import hook
+        (self.c / ".house/tasks/T002-x.md").write_text(task("T002", "doing", deps="[T001]"))
+        crit = [{"id": "AC-1", "kind": "run", "run": "true"}, {"id": "AC-2", "kind": "run", "run": "true"},
+                {"id": "AC-3", "kind": "manual"}]
+        cases = {
+            "no check result": {},
+            "incomplete (AC-2)": {"AC-1": {"passes": True}},
+            "incomplete (AC-1, AC-2)": {"AC-3": {"passes": True}},
+            "GREEN": {"AC-1": {"passes": True}, "AC-2": {"passes": True}},
+        }
+        for want, results in cases.items():
+            with self.subTest(want=want):
+                (self.c / ".house/checks/T002.json").write_text(
+                    json.dumps({"task": "T002", "frozen": {"criteria": crit}, "results": results}))
+                out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+                self.assertIn(f"last check: {want}", out)
+        self.assertNotIn("red checks", out)
+
+    def test_compact_mode_budget_keeps_order(self):
+        from houselib import hook
+        text = self.DECISIONS_HEAD + "".join(
+            self.decision(n, "człowiek", f"B{n:03d} " + "w" * 330) for n in range(1, 41))
+        (self.c / ".house/DECISIONS.md").write_text(text)
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertLessEqual(len(out), 10_000)
+        self.assertTrue(out.rstrip().endswith("More: .house/DECISIONS.md, .house/QUESTIONS.md, .house/tasks/"),
+                        out[-200:])
+        kept = [n for n in range(1, 41) if f"B{n:03d} " in out]
+        self.assertGreater(len(kept), 5)
+        self.assertLess(len(kept), 40)
+        self.assertEqual(kept, list(range(1, len(kept) + 1)))
+
+    def test_compact_mode_cuts_a_huge_first_decision(self):
+        from houselib import hook
+        (self.c / ".house/DECISIONS.md").write_text(
+            self.DECISIONS_HEAD + self.decision(1, "człowiek", "H" * 20_000)
+            + self.decision(2, "człowiek", "SMALL-ONE"))
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertLessEqual(len(out), 10_000)
+        self.assertIn("## D-001 Title 1", out)
+        self.assertIn("…\n\nMore:", out)  # cut, and the rest is reported as left out
+        self.assertGreater(len(out), 9_000)
+
+    def test_compact_mode_stops_at_first_miss(self):
+        from houselib import hook
+        (self.c / ".house/DECISIONS.md").write_text(
+            self.DECISIONS_HEAD + self.decision(1, "człowiek", "FIRST-SMALL")
+            + self.decision(2, "człowiek", "LONG-ONE " + "L" * 9_900) + self.decision(3, "człowiek", "LATER-SMALL"))
+        (self.c / ".house/QUESTIONS.md").write_text("# Q\n\n## Q-005 [open] Still open?\n")
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertLessEqual(len(out), 10_000)
+        self.assertIn("FIRST-SMALL", out)
+        self.assertIn("LONG-ONE", out)
+        self.assertIn("…\n\nMore:", out)
+        self.assertNotIn("LATER-SMALL", out)
+        self.assertNotIn("Q-005", out)
+        self.assertTrue(out.endswith(hook.MORE_LINE + "\n"))
+
+    def test_compact_mode_miss_with_little_room_is_not_cut(self):
+        from houselib import hook
+        (self.c / ".house/DECISIONS.md").write_text(
+            self.DECISIONS_HEAD + self.decision(1, "człowiek", "A" * 9_680)
+            + self.decision(2, "człowiek", "NEXT-ONE " + "N" * 300) + self.decision(3, "człowiek", "LATER-SMALL"))
+        out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+        self.assertLessEqual(len(out), 10_000)
+        self.assertNotIn("NEXT-ONE", out)
+        self.assertNotIn("LATER-SMALL", out)
+        self.assertTrue(out.endswith(hook.MORE_LINE + "\n"))
+
+    def test_compact_mode_never_calls_signal(self):
+        from unittest import mock
+
+        from houselib import hook
+        with mock.patch.object(hook, "_signal_lines", side_effect=AssertionError("signal")) as sig:
+            out = hook.session_start({"cwd": str(self.c), "source": "compact"})
+            self.assertNotIn("last briefing", out)
+            self.assertEqual(hook.session_start({"cwd": self._tmp.name, "source": "compact"}), "")
+            sig.assert_not_called()
+        with mock.patch.object(hook, "_signal_lines", return_value=[]):
+            today = hook.session_start({"cwd": str(self.c)})
+            startup = hook.session_start({"cwd": str(self.c), "source": "startup"})
+        self.assertEqual(startup, today)
+        self.assertIn("last briefing", startup)
+        self.assertLessEqual(len(startup.splitlines()), 25)
+
+    def test_house_hook_routes_new_modes(self):
+        ev = {"session_id": "abc", "transcript_path": "/x/abc.jsonl", "cwd": str(self.c), "trigger": "auto",
+              "compact_summary": "<summary>## Goal\ng\n</summary>"}
+        for mode, name in (("pre-compact", "PreCompact"), ("post-compact", "PostCompact")):  # removed after K5:
+            r = self.run_hook(mode, dict(ev, hook_event_name=name))  # silent no-ops for settings of an old adapt
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""), mode)
+            r = self.run_hook(mode, "{not json")
+            self.assertEqual(r.returncode, 0)
+        self.assertFalse((self.c / ".house/tmp/compactions.jsonl").exists())
+        r = self.run_hook("session-start", dict(ev, hook_event_name="SessionStart", source="compact"))
+        self.assertIn("state restored after compaction", r.stdout)
+
     def test_doctor_alias_collisions(self):
         from houselib import doctor
         a, b, old = (Path(self._tmp.name) / n for n in ("a", "b", "old"))

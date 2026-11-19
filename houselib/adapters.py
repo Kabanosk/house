@@ -13,6 +13,7 @@ is dropped or falls back to its `fallback` profile (e.g. coder-codex becomes cod
 kept as `<name>.orig`; see `manifest`.
 """
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -280,6 +281,36 @@ ALLOW_COMMANDS = ["git status:*", "git diff:*", "git log:*", "git show:*", "git 
                   "git worktree:*", "git -C:*", "git branch:*", "python3 -m unittest:*", "pytest:*", "uv run:*",
                   "npm test:*", "npm run:*", "npx tsc:*", "ruff check:*"]
 
+# Contest sessions compact earlier than the model's own window: auto-compact at 200K tokens, and compact an idle
+# session (cache gone cold) from 150K. The user's own values in the settings file always win (see merge_settings).
+AUTO_COMPACT_WINDOW = 200000
+IDLE_COMPACT_MIN_TOKENS = 150000
+
+
+# The allow rule house wrote before `house out` existed: it pre-approved `house out -- <anything>` too.
+_BLANKET_HOUSE_RULE = re.compile(r"Bash\([^()]*/bin/house:\*\)")
+
+
+def house_rules(root: Path = HOUSE_ROOT) -> list[str]:
+    """Allow rules for `<root>/bin/house`: one per subcommand except `out`, and `out` only for safe commands.
+
+    `house out -- CMD` runs CMD, so a blanket `house:*` (or `house out:*`) rule would pre-approve any command.
+    `out` gets `out show`, `out prune` and `out -- <c>` for each `ALLOW_COMMANDS` entry `<c>`; anything else
+    wrapped in `house out --` gets the normal permission prompt (or the auto-mode classifier).
+
+    Args:
+        root: House repo root.
+
+    Returns:
+        `Bash(...)` rules, generated from the CLI's subcommand registry so a new subcommand is never left out.
+    """
+    from . import cli  # cli imports this module
+
+    house = f"{root.resolve()}/bin/house"
+    return [*(f"Bash({house} {name}:*)" for name in cli.subcommands() if name != "out"),
+            f"Bash({house} out show:*)", f"Bash({house} out prune:*)",
+            *(f"Bash({house} out -- {c})" for c in ALLOW_COMMANDS)]
+
 
 def claude_settings(root: Path = HOUSE_ROOT) -> dict:
     """Build house's part of `.claude/settings.local.json`.
@@ -288,8 +319,12 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
         root: House repo root; the hook is `<root>/bin/house-hook`.
 
     Returns:
-        A settings dict: PreToolUse, PostToolUse and SessionStart guard hooks, and an allowlist of Bash commands
-        (house, codex-task, git, test and lint tools) so headless sessions need no permission prompts.
+        A settings dict: PreToolUse, PostToolUse and SessionStart guard hooks (contests only, see
+        `house_settings`; no PreCompact/PostCompact: compaction uses Claude Code's own instructions, K5), an
+        allowlist of Bash commands
+        (house subcommands per `house_rules`, codex-task, git, test and lint tools) so headless sessions need no
+        permission prompts, and the
+        compaction settings `autoCompactWindow` and `env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`.
     """
     hook = f"{root.resolve()}/bin/house-hook"
     return {
@@ -300,15 +335,18 @@ def claude_settings(root: Path = HOUSE_ROOT) -> dict:
                              "hooks": [{"type": "command", "command": f"{hook} post-tool"}]}],
             "SessionStart": [{"hooks": [{"type": "command", "command": f"{hook} session-start", "timeout": 45}]}],
         },
-        "permissions": {"allow": [f"Bash({root.resolve()}/bin/house:*)", f"Bash({root.resolve()}/bin/codex-task:*)",
+        "permissions": {"allow": [*house_rules(root), f"Bash({root.resolve()}/bin/codex-task:*)",
                                   *(f"Bash({c})" for c in ALLOW_COMMANDS)]},
+        "autoCompactWindow": AUTO_COMPACT_WINDOW,
+        "env": {"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": str(IDLE_COMPACT_MIN_TOKENS)},
     }
 
 
 def house_settings(root: Path = HOUSE_ROOT) -> dict:
     """House's hooks for the house repo itself: SessionStart (Signal summary) and PreToolUse (Signal guard rules).
 
-    No PostToolUse and no allowlist: the house repo has no contest files, and its permissions stay the user's.
+    No PostToolUse, no allowlist and no compaction settings: the house repo has no contest files, and its
+    permissions and compaction stay the user's.
     """
     full = claude_settings(root)
     return {"hooks": {k: full["hooks"][k] for k in ("PreToolUse", "SessionStart")}, "permissions": {"allow": []}}
@@ -351,8 +389,11 @@ def merge_settings(existing: dict, ours: dict) -> dict:
         ours: House's settings from `claude_settings`.
 
     Returns:
-        A new dict that keeps every user key, hook and permission, replaces house's own hook commands, and has
-        no duplicate allow rules.
+        A new dict that keeps every user key, hook and permission, replaces house's own hook commands, drops
+        the old blanket `Bash(<root>/bin/house:*)` rule (any root), drops an event that held only house's hooks
+        (e.g. `PreCompact` from an older `house adapt`), and has no duplicate allow rules. Any other key of `ours` (e.g. `autoCompactWindow`, `env`) is added only where the
+        user has no value: a dict value is filled in key by key (the user's entries win), a non-dict `existing`
+        value under a dict key is replaced, and any other existing value is kept.
     """
     out = dict(existing)
     hooks: dict = {}
@@ -366,15 +407,25 @@ def merge_settings(existing: dict, ours: dict) -> dict:
             mine = [h for h in e.get("hooks", []) if not _is_house_hook(h)]
             if mine:
                 kept.append({**e, "hooks": mine})
-        hooks[event] = kept
+        if kept or not any(isinstance(e, dict) and any(map(_is_house_hook, e.get("hooks", []))) for e in entries):
+            hooks[event] = kept  # an event left empty only because house's hooks were removed is dropped
     for event, entries in ours["hooks"].items():
         hooks[event] = [*hooks.get(event, []), *entries]
     out["hooks"] = hooks
     perms = existing.get("permissions")
     perms = dict(perms) if isinstance(perms, dict) else {}
     allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+    allow = [r for r in allow if not (isinstance(r, str) and _BLANKET_HOUSE_RULE.fullmatch(r))]
     perms["allow"] = list(dict.fromkeys([*allow, *ours["permissions"]["allow"]]))
     out["permissions"] = perms
+    for key, value in ours.items():
+        if key in ("hooks", "permissions"):
+            continue
+        if isinstance(value, dict):
+            current = existing.get(key)
+            out[key] = {**value, **current} if isinstance(current, dict) else value
+        elif key not in existing:
+            out[key] = value
     return out
 
 

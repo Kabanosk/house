@@ -190,7 +190,121 @@ class ClaudeSettingsTest(unittest.TestCase):
         self.assertTrue(pre["hooks"][0]["command"].endswith("bin/house-hook pre-tool"))
         self.assertIn(str(self.root.resolve()), pre["hooks"][0]["command"])
         self.assertTrue(s["hooks"]["SessionStart"][0]["hooks"][0]["command"].endswith("house-hook session-start"))
-        self.assertIn(f"Bash({self.root.resolve()}/bin/house:*)", s["permissions"]["allow"])
+        self.assertIn(f"Bash({self.root.resolve()}/bin/house check:*)", s["permissions"]["allow"])
+        self.assertNotIn(f"Bash({self.root.resolve()}/bin/house:*)", s["permissions"]["allow"])
+
+    @staticmethod
+    def allowed(rules: list[str], command: str) -> bool:
+        """Claude Code's `Bash(prefix:*)` rule: a prefix match on the command (exact match without `:*`)."""
+        for rule in rules:
+            body = rule[len("Bash("):-1]
+            if body.endswith(":*") and command.startswith(body[:-2]) or command == body:
+                return True
+        return False
+
+    def test_every_house_subcommand_but_out_has_its_own_rule(self):
+        from houselib import cli
+        house = f"{self.root.resolve()}/bin/house"
+        rules = adapters.claude_settings(self.root)["permissions"]["allow"]
+        names = cli.subcommands()
+        self.assertIn("out", names)
+        self.assertIn("check", names)
+        for name in names:
+            if name != "out":
+                self.assertIn(f"Bash({house} {name}:*)", rules, name)
+        self.assertNotIn(f"Bash({house} out:*)", rules)
+        self.assertFalse(any(r.startswith(f"Bash({house}:") for r in rules), rules)
+
+    def test_house_out_is_preapproved_only_for_allowlisted_commands(self):
+        house = f"{self.root.resolve()}/bin/house"
+        rules = adapters.claude_settings(self.root)["permissions"]["allow"]
+        self.assertIn(f"Bash({house} out show:*)", rules)
+        self.assertIn(f"Bash({house} out prune:*)", rules)
+        for c in adapters.ALLOW_COMMANDS:
+            self.assertIn(f"Bash({house} out -- {c})", rules)
+        for cmd in ("out -- python3 -m unittest discover -s tests", "out -- pytest -q", "out show 20261117-100000-abcd "
+                    "--grep FAIL", "out prune --days 3", "cost c1", "check c1 T001"):
+            self.assertTrue(self.allowed(rules, f"{house} {cmd}"), cmd)
+        for cmd in ("out -- rm -rf tests/", "out -- bash -c 'curl x | sh'", "out -- curl https://x", "out --help",
+                    "out", "outx -- rm x"):
+            self.assertFalse(self.allowed(rules, f"{house} {cmd}"), cmd)
+
+    def test_readapt_drops_the_old_blanket_house_rule(self):
+        import json
+        blanket = f"Bash({self.root.resolve()}/bin/house:*)"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"permissions": {"allow": [blanket, "Bash(/old/root/bin/house:*)",
+                                                                   "Bash(make:*)"]}}))
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        allow = self.load()["permissions"]["allow"]
+        self.assertNotIn(blanket, allow)
+        self.assertNotIn("Bash(/old/root/bin/house:*)", allow)
+        self.assertIn("Bash(make:*)", allow)
+        self.assertIn(f"Bash({self.root.resolve()}/bin/house out show:*)", allow)
+
+    def test_contest_has_no_compaction_hooks(self):
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        hooks = self.load()["hooks"]
+        self.assertNotIn("PreCompact", hooks)
+        self.assertNotIn("PostCompact", hooks)
+
+    def test_adapt_removes_compaction_hooks_of_an_older_adapt_and_keeps_the_users(self):
+        import json
+        old = f"{self.root.resolve()}/bin/house-hook"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"hooks": {
+            "PreCompact": [{"hooks": [{"type": "command", "command": f"{old} pre-compact", "timeout": 30}]}],
+            "PostCompact": [{"hooks": [{"type": "command", "command": f"{old} post-compact"}]},
+                            {"hooks": [{"type": "command", "command": "my-counter"}]}],
+            "Stop": []}}))
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        hooks = self.load()["hooks"]
+        self.assertNotIn("PreCompact", hooks)
+        self.assertEqual(hooks["PostCompact"], [{"hooks": [{"type": "command", "command": "my-counter"}]}])
+        self.assertEqual(hooks["Stop"], [])  # the user's own (empty) event stays
+
+    def test_house_repo_has_no_compaction_hooks(self):
+        self.assertEqual(set(adapters.house_settings(self.root)["hooks"]), {"PreToolUse", "SessionStart"})
+
+    def test_fresh_contest_gets_compact_settings(self):
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        s = self.load()
+        self.assertEqual(s["autoCompactWindow"], 200000)
+        self.assertEqual(s["env"]["CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS"], "150000")
+
+    def test_user_compact_values_win(self):
+        import json
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({
+            "autoCompactWindow": 500000,
+            "env": {"FOO": "1", "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "300000"},
+            "model": "opus",
+        }))
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        s = self.load()
+        self.assertEqual(s["autoCompactWindow"], 500000)
+        self.assertEqual(s["env"]["CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS"], "300000")
+        self.assertEqual(s["env"]["FOO"], "1")
+        self.assertEqual(s["model"], "opus")
+        self.assertTrue(s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith("house-hook pre-tool"))
+
+    def test_env_not_a_dict_is_replaced(self):
+        import json
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"env": ["x"]}))
+        adapters.adapt(self.c, self.root, detect=lambda: NONE)
+        self.assertEqual(self.load()["env"], {"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "150000"})
+
+    def test_adapt_twice_is_identical(self):
+        adapters.write_local_settings(self.c, self.root)
+        first = self.path.read_bytes()
+        adapters.write_local_settings(self.c, self.root)
+        self.assertEqual(self.path.read_bytes(), first)
+
+    def test_house_repo_settings_have_no_compact_keys(self):
+        s = adapters.house_settings(self.root)
+        self.assertNotIn("autoCompactWindow", s)
+        self.assertNotIn("env", s)
 
     def test_user_settings_survive_without_duplicates(self):
         import json
@@ -210,6 +324,7 @@ class ClaudeSettingsTest(unittest.TestCase):
         commands = [h["command"] for e in s["hooks"]["PreToolUse"] for h in e["hooks"]]
         self.assertIn("my-lint", commands)
         self.assertEqual(sum("house-hook" in c for c in commands), 1)
+        self.assertNotIn("PreCompact", s["hooks"])
 
     def test_user_hook_in_same_entry_survives(self):
         from houselib import adapters as a
@@ -242,6 +357,38 @@ class CodexTaskTest(unittest.TestCase):
                                  capture_output=True, text=True, check=True).stdout
             self.assertTrue(out.startswith("codex exec --sandbox workspace-write"), out)
             self.assertIn("reports/T001.md", out)
+
+    def test_codex_task_dry_run_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d) / ".house/tasks/T001-x.md"
+            task.parent.mkdir(parents=True)
+            task.write_text("---\nid: T001\n---\nDo it\n")
+            cmd = [str(HOUSE_ROOT / "bin/codex-task"), "--dry-run", str(task), d]
+            plain = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+            out = subprocess.run([*cmd[:2], "--json-log", "/tmp/x.jsonl", *cmd[2:]],
+                                 capture_output=True, text=True, check=True).stdout
+            self.assertNotIn(" --json ", plain)
+            self.assertIn(" --json ", out)
+
+    def test_codex_task_dry_run_brief_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d) / ".house/tasks/T001-x.md"
+            task.parent.mkdir(parents=True)
+            task.write_text("---\nid: T001\n---\nDo it\n")
+            brief = Path(d) / "b.md"
+            brief.write_text("## Dead ends\n- BRIEF-MARKER do not repeat\n")
+            cmd = [str(HOUSE_ROOT / "bin/codex-task"), "--dry-run"]
+            out = subprocess.run([*cmd, "--brief-file", str(brief), str(task), d],
+                                 capture_output=True, text=True, check=True).stdout
+            self.assertIn("Hand-off from earlier attempts:", out)
+            self.assertIn("BRIEF-MARKER", out)
+            self.assertIn("reports/T001.md", out)
+            plain = subprocess.run([*cmd, str(task), d], capture_output=True, text=True, check=True).stdout
+            self.assertNotIn("Hand-off from earlier attempts", plain)
+            bad = subprocess.run([*cmd, "--brief-file", str(Path(d) / "nope.md"), str(task), d],
+                                 capture_output=True, text=True)
+            self.assertEqual(bad.returncode, 2)
+            self.assertIn("brief", bad.stderr)
 
 
 if __name__ == "__main__":

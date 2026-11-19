@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Claude Code hook entry point: `house-hook pre-tool` / `house-hook session-start` (JSON event on stdin).
+"""Claude Code hook entry point: `house-hook <mode>` with the JSON event on stdin.
 
-Registered by `house adapt` in the contest's `settings.local.json`; Claude Code runs it before Edit/Write/Bash
-tool calls (`pre-tool`) and when a session starts (`session-start`). The logic lives in `houselib.hook`.
+Modes: `pre-tool`, `post-tool`, `session-start`. Registered by `house adapt` in the contest's
+`settings.local.json`; Claude Code runs it before Edit/Write/Bash tool calls (`pre-tool`) and when a session starts
+or resumes, also after a compaction (`session-start`). The logic lives in `houselib.hook`.
 
 Contract for agents:
   * `pre-tool`: exit 2 blocks the tool call and the reason on stderr is shown to the model; exit 0 allows it.
-  * `session-start`: prints the contest state summary on stdout, exit 0.
+  * `session-start`: prints the contest state summary on stdout, exit 0. With `source: "compact"` it prints the
+    restored state instead (human decisions verbatim, questions, unfinished tasks), at most 10 000 characters.
+  * `pre-compact`, `post-compact`: removed (K5 showed no gain over Claude Code's own compaction instructions); they
+    exit 0 silently so settings written by an older `house adapt` keep working until it runs again.
   * Fail open: an unknown mode, bad input or any internal error prints one `house-hook: ...` line to stderr and
     exits 0, so a broken hook never blocks work. Only a guard rule blocks. Exception: in a job started from Signal
     (`HOUSE_AGENT_JOB` set) `pre-tool` fails closed (exit 2).
@@ -20,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main() -> int:
-    """Run the hook selected by `sys.argv[1]` (`pre-tool` or `session-start`) on the JSON event read from stdin.
+    """Run the hook selected by `sys.argv[1]` (see the module docstring for the modes) on the JSON event read from stdin.
 
     Returns:
         The process exit code: 2 only when `pre-tool` blocks the call (reason printed to stderr); 0 otherwise,
@@ -44,6 +48,8 @@ def main() -> int:
         if mode == "session-start":
             sys.stdout.write(hook.session_start(event))
             return 0
+        if mode in ("pre-compact", "post-compact"):  # gone (K5: Claude Code's own compaction); settings from an
+            return 0                                   # older `house adapt` may still call them until the next adapt
         print(f"house-hook: unknown mode {mode!r}", file=sys.stderr)
         return 0
     except Exception as e:  # noqa: BLE001 — a hook must never break the session (fail open) …
