@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import notify, questions, registry
+from . import evalmode, notify, questions, registry
 from . import spec as specmod
 
 # Typed answers need the colon (`Q-007: B`, `fr Q7: B`): ordinary group chat ("q1 wyniki ok") is not an answer.
@@ -290,7 +290,12 @@ def process(contests: list[Path], sig, scope: list[Path] | None = None, *, timeo
     Returns:
         Human-readable log lines (answers applied, disambiguation asked, edits after recording, migration).
         Empty when there is nothing to report or `sig` is None; `[SKIPPED_LOCKED]` if another run holds the lock.
+        Always empty in eval mode (`HOUSE_EVAL=1`): nothing is received or applied, one `inbox.process` line goes
+        to the eval log.
     """
+    if evalmode.active():
+        evalmode.log("inbox.process", contests=len(list(contests)))
+        return []
     from . import signalchats, signalstore
     contests = running(contests)
     if sig is None:

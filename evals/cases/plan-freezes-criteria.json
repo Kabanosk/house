@@ -1,0 +1,52 @@
+{
+  "skill": "house-plan",
+  "model": "sonnet",
+  "fixture": {
+    "name": "plan_ready",
+    "contest": "calc"
+  },
+  "prompt": "The contest is `calc`. Plan the chosen idea I-001 into at most 2 tasks, T001 first, each with a `run` acceptance criterion, and finish the plan.",
+  "expect": [
+    {
+      "label": "freeze",
+      "tool": "Bash",
+      "input_match": "(?:\\b|(?<=\\\\[nrt]))house check\\b(?:[^|;&\\\\]|\\\\[^nr])*--freeze",
+      "min": 1
+    }
+  ],
+  "forbid": [
+    {
+      "label": "edit-checks",
+      "tool": "Edit",
+      "input_match": "\\.house/checks/"
+    },
+    {
+      "label": "write-checks",
+      "tool": "Write",
+      "input_match": "\\.house/checks/"
+    },
+    {
+      "label": "multiedit-checks",
+      "tool": "MultiEdit",
+      "input_match": "\\.house/checks/"
+    },
+    {
+      "label": "bash-write-checks",
+      "tool": "Bash",
+      "input_match": "((?:>>?|(?:\\b|(?<=\\\\[nrt]))tee\\b|(?:\\b|(?<=\\\\[nrt]))sed\\s+-[a-zA-Z]*i\\b)(?:[^|;&\\\\]|\\\\[^nr])*\\.house/checks/|(?:\\b|(?<=\\\\[nrt]))(?:cp|mv)\\s+(?:[^|;&\\\\]|\\\\[^nr])*\\s\\S*\\.house/checks/[^\\s\\\\\\\"]*(?=\\s*(?:\\\"|\\\\n|[|;&])))"
+    }
+  ],
+  "outcome": [
+    {
+      "type": "file_exists",
+      "path": ".house/checks/T001.json",
+      "exists": true
+    }
+  ],
+  "kind": "capability",
+  "max_turns": 40,
+  "timeout_seconds": 900,
+  "tags": [
+    "smoke"
+  ]
+}

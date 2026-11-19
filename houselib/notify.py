@@ -22,7 +22,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from . import questions, registry, signalhost
+from . import evalmode, questions, registry, signalhost
 from . import spec as specmod
 from .signal import from_config
 
@@ -125,8 +125,12 @@ def send(contest: Path, text: str, question: str | None = None, sig=None,
     Returns:
         (timestamps, warnings): Signal timestamps of delivered messages (empty if nothing was sent) and
         human-readable warnings (unknown/ambiguous group, failed delivery). ([], []) when Signal is not
-        configured.
+        configured, and in eval mode (`HOUSE_EVAL=1`), where one `notify.send` line (length, origin, question,
+        never the text) goes to the eval log instead.
     """
+    if evalmode.active():
+        evalmode.log("notify.send", contest=contest_name(contest), chars=len(text), origin=origin, question=question)
+        return [], []
     sig = sig or from_config()
     if sig is None:
         return [], []
@@ -203,10 +207,14 @@ def ask_new(contest: Path, sig=None) -> list[str]:
 
     Returns:
         Ids of the questions that were delivered; empty when there is no QUESTIONS.md, Signal is not configured
-        or nothing new is open.
+        or nothing new is open; always empty in eval mode (`HOUSE_EVAL=1`), with one `notify.ask_new` line in the
+        eval log (nothing is sent, `state.json` stays untouched).
     """
     path = contest / ".house/QUESTIONS.md"
     if not path.exists():
+        return []
+    if evalmode.active():
+        evalmode.log("notify.ask_new", contest=contest_name(contest))
         return []
     sig = sig or from_config()
     if sig is None:

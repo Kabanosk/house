@@ -21,6 +21,13 @@ PROXY_PORT = 3128
 CODE_ROOT = Path(__file__).resolve().parents[1]
 MEMORY = "8g"
 PIDS = 512
+# Environment every Claude container gets next to the token and proxy (HOME is the tmpfs, the rest keeps Claude quiet).
+BASE_ENV = {"HOME": "/home/agent", "LANG": "C.UTF-8",
+            "CLAUDE_CODE_TMPDIR": "/home/agent",  # owned by the job user; /tmp/claude-<uid> may be a root mount path
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1"}
+# The image's own PATH (node:22-bookworm-slim), for runs that put their own directory in front.
+IMAGE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def image_name() -> str:
@@ -134,32 +141,53 @@ def runtime(run=subprocess.run, which=None) -> str:
     return "docker" if token_present() and docker_usable(run) and image_present(run) else "local"
 
 
-def write_env_file(job_dir: Path, job_id: str, wt: Path) -> Path:
-    """The job's environment for `docker run --env-file` (token, proxy, job vars), 0600 in the job dir."""
+def proxy_env() -> dict[str, str]:
+    """The proxy variables of a container: HTTP(S) through `house-agent-proxy`, nothing else direct."""
     proxy = f"http://{PROXY}:{PROXY_PORT}"
-    lines = {"CLAUDE_CODE_OAUTH_TOKEN": read_token(), "HTTPS_PROXY": proxy, "HTTP_PROXY": proxy,
-             "https_proxy": proxy, "http_proxy": proxy, "NO_PROXY": "localhost,127.0.0.1",
-             "HOUSE_AGENT_JOB": job_id, "HOUSE_AGENT_WORKTREE": str(wt), "HOME": "/home/agent", "LANG": "C.UTF-8",
-             "CLAUDE_CODE_TMPDIR": "/home/agent",  # owned by the job user; /tmp/claude-<uid> may be a root mount path
-             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-             "DISABLE_AUTOUPDATER": "1", "DISABLE_TELEMETRY": "1"}
-    path = job_dir / "container.env"
+    return {"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy, "https_proxy": proxy, "http_proxy": proxy,
+            "NO_PROXY": "localhost,127.0.0.1"}
+
+
+def write_env_lines(path: Path, lines: dict[str, str]) -> Path:
+    """Write `KEY=value` lines for `docker run --env-file`, created 0600 (it holds the token)."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, "".join(f"{k}={v}\n" for k, v in lines.items()).encode())
     finally:
         os.close(fd)
+    path.chmod(0o600)
     return path
+
+
+def write_env_file(job_dir: Path, job_id: str, wt: Path) -> Path:
+    """The job's environment for `docker run --env-file` (token, proxy, job vars), 0600 in the job dir."""
+    lines = {"CLAUDE_CODE_OAUTH_TOKEN": read_token(), **proxy_env(),
+             "HOUSE_AGENT_JOB": job_id, "HOUSE_AGENT_WORKTREE": str(wt), **BASE_ENV}
+    return write_env_lines(job_dir / "container.env", lines)
+
+
+def hardening_flags(name: str, env_file: Path | None, network: str = INTERNAL_NET) -> list[str]:
+    """`docker run` flags shared by every container that runs Claude (or code an agent wrote): name, user, no
+    capabilities, read-only root, tmpfs home, limits, the network and the env-file (the caller adds mounts, workdir,
+    image, command).
+
+    Args:
+        name: Container name.
+        env_file: `--env-file` path; None adds no env-file (a container that must hold no secret).
+        network: Docker network; the internal one behind the proxy by default, `none` for no network at all.
+    """
+    flags = ["--rm", "-i", "--init", "--name", name,
+             "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+             "--read-only", "--tmpfs", "/tmp:exec",
+             "--tmpfs", f"/home/agent:exec,uid={os.getuid()},gid={os.getgid()},mode=0700", "--memory", MEMORY,
+             "--pids-limit", str(PIDS), "--network", network]
+    return flags + ["--env-file", str(env_file)] if env_file is not None else flags
 
 
 def container_command(job_id: str, wt: Path, repo: Path, prompt: Path, settings: Path, env_file: Path,
                       claude_argv: list[str]) -> list[str]:
     """`docker run` for one job: only the listed mounts, no capabilities, internal network, resource limits."""
-    return ["docker", "run", "--rm", "-i", "--init", "--name", f"house-agent-{job_id}",
-            "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "--read-only", "--tmpfs", "/tmp:exec",
-            "--tmpfs", f"/home/agent:exec,uid={os.getuid()},gid={os.getgid()},mode=0700", "--memory", MEMORY,
-            "--pids-limit", str(PIDS), "--network", INTERNAL_NET, "--env-file", str(env_file),
+    return ["docker", "run", *hardening_flags(f"house-agent-{job_id}", env_file),
             "-v", f"{wt}:{wt}", "-v", f"{repo / '.git'}:{repo / '.git'}:ro", "-v", f"{CODE_ROOT}:/house:ro",
             "-v", f"{prompt}:/job/prompt.md:ro", "-v", f"{settings}:/job/settings.json:ro",
             "-w", str(wt), image_name(), *claude_argv]
