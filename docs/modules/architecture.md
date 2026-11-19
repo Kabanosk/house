@@ -24,7 +24,7 @@ Zmiana narzędzia (np. z Claude Code na inne) to nowa nakładka w `adapters/`, r
 | Obszar | Moduły | Opis |
 |---|---|---|
 | Model konkursu | `spec`, `registry`, `questions`, `manifest`, `fm`, `gitutil` | pliki `.house/`, spis konkursów |
-| Praca nad konkursem | `checks`, `merge`, `review`, `exp`, `night`, `export` | [bramka](checks-and-merge.md), [recenzja](review.md), [eksperymenty](experiments.md), [noc](night.md) |
+| Praca nad konkursem | `checks`, `merge`, `review`, `exp`, `outlog`, `night`, `cost`, `export` | [bramka](checks-and-merge.md), [recenzja](review.md), [eksperymenty](experiments.md), [długie komendy](out.md), [noc](night.md), [koszt](cost.md) |
 | Ochrona | `guard`, `hook` | [guard i hooki](guard.md) |
 | Signal | `signal`, `signalstore`, `signalparse`, `signalread`, `signalchats`, `signalcli`, `notify`, `inbox` | [transport, magazyn, pytania](signal.md) |
 | Agent z Signala | `signalagent`, `agentdocker`, `agentproxy` | [`@claude` w Dockerze](signal-agent.md) |

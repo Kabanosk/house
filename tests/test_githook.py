@@ -162,14 +162,44 @@ class PreCommitTest(HookCase):
         (other / "cfg.py").write_text(SECRET)
         self.assertEqual(githook.pre_commit(other), [])
 
-    def test_merge_in_progress_skips_protected_but_not_secrets(self):
-        (self.wt / "test_a.py").write_text("assert False\n")
-        (self.wt / "cfg.py").write_text(SECRET)
-        git(self.wt, "add", "-f", "test_a.py", "cfg.py")
+    def fake_merge_of(self, files: dict[str, str]) -> None:
+        """Commit `files` on main and mark the worktree as merging that commit (`MERGE_HEAD`)."""
+        for rel, text in files.items():
+            (self.c / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.c / rel).write_text(text)
+        git(self.c, "add", "-f", *files)
+        git(self.c, "commit", "-q", "-m", "main side")
         gitdir = Path(git(self.wt, "rev-parse", "--absolute-git-dir").strip())
-        (gitdir / "MERGE_HEAD").write_text(git(self.wt, "rev-parse", "HEAD"))
+        (gitdir / "MERGE_HEAD").write_text(git(self.c, "rev-parse", "HEAD"))
+
+    def test_merge_in_progress_allows_the_other_side_but_not_secrets(self):
+        self.fake_merge_of({"test_a.py": "assert False\n", ".house/notes.md": "main\n"})
+        (self.wt / "test_a.py").write_text("assert False\n")
+        (self.wt / ".house/notes.md").write_text("main\n")
+        (self.wt / "cfg.py").write_text(SECRET)
+        git(self.wt, "add", "-f", "test_a.py", "cfg.py", ".house/notes.md")
         problems = githook.pre_commit(self.wt)
         self.assertEqual(problems, ["cfg.py looks like a secret (keep keys in an ignored .env)"])
+
+    def test_merge_in_progress_refuses_an_evil_merge(self):
+        self.fake_merge_of({"test_a.py": "assert False\n", ".house/notes.md": "main\n"})
+        (self.wt / "test_a.py").write_text("assert 1 == 1\n")  # neither HEAD's nor MERGE_HEAD's content
+        (self.wt / ".house/notes.md").write_text("edited\n")
+        git(self.wt, "add", "-f", "test_a.py", ".house/notes.md")
+        problems = githook.pre_commit(self.wt)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(any(p.startswith("test_a.py") and "neither side" in p for p in problems), problems)
+        self.assertTrue(any(p.startswith(".house/notes.md") and "neither side" in p for p in problems), problems)
+        self.assertEqual(self.commit(self.wt, "test_a.py").returncode, 1)
+
+    def test_merge_in_progress_refuses_new_conflict_markers(self):
+        self.fake_merge_of({"doc.md": "sample:\n<<<<<<< HEAD\n"})  # main carries a marker line on purpose
+        (self.wt / "doc.md").write_text("sample:\n<<<<<<< HEAD\n")
+        (self.wt / "app.py").write_text("<<<<<<< HEAD\nA = 1\n=======\nA = 2\n>>>>>>> main\n")
+        git(self.wt, "add", "doc.md", "app.py")
+        problems = githook.pre_commit(self.wt)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith("app.py") and "conflict marker" in problems[0], problems)
 
     def test_internal_error_fails_open(self):
         r = subprocess.run([str(HOUSE_ROOT / "bin/house-githook"), "nonsense"], cwd=self.wt, capture_output=True,

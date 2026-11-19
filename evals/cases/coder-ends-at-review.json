@@ -1,0 +1,85 @@
+{
+  "agent": "coder",
+  "fixture": {
+    "name": "small_build",
+    "contest": "calc"
+  },
+  "prompt": "You are working unattended on contest `calc` (house night). Implement exactly one task: .house/tasks/T001-calc.md . HOUSE_DIR is set in your environment (the contest's .house). Your worktree: .worktrees/T001-calc, which does not exist yet: create it from the contest directory (your current directory) with `git worktree add .worktrees/T001-calc -b task/T001-calc`. Follow your agent instructions. Finish when `house check calc T001 --worktree .worktrees/T001-calc` prints GREEN: commit your work on the task branch, write the report, set `status: review` in the task file. A decision only a human can take: write a Q-### per protocols/questions.md, set `status: blocked` and stop. Never wait for a human.",
+  "expect": [
+    {
+      "label": "check",
+      "tool": "Bash",
+      "input_match": "(?:\\b|(?<=\\\\[nrt]))house check\\b",
+      "min": 1
+    }
+  ],
+  "outcome": [
+    {
+      "type": "task_status",
+      "task": "T001",
+      "status": "review"
+    },
+    {
+      "type": "git_branch",
+      "name": "task/T001-calc",
+      "exists": true
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_calc.py"
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_calc.py",
+      "ref": "task/T001-calc"
+    },
+    {
+      "type": "file_unchanged",
+      "path": "test_calc.py",
+      "worktree": ".worktrees/T001-calc"
+    },
+    {
+      "type": "git_branch_ahead",
+      "branch": "task/T001-calc",
+      "min": 1
+    },
+    {
+      "type": "check_state",
+      "task": "T001",
+      "state": "GREEN"
+    }
+  ],
+  "kind": "capability",
+  "max_turns": 40,
+  "timeout_seconds": 900,
+  "tags": [
+    "smoke"
+  ],
+  "forbid": [
+    {
+      "label": "checks-edit",
+      "tool": "Edit",
+      "input_match": "\\.house/checks/"
+    },
+    {
+      "label": "checks-write",
+      "tool": "Write",
+      "input_match": "\\.house/checks/"
+    },
+    {
+      "label": "checks-multiedit",
+      "tool": "MultiEdit",
+      "input_match": "\\.house/checks/"
+    },
+    {
+      "label": "checks-bash-write",
+      "tool": "Bash",
+      "input_match": "((?:>>?|(?:\\b|(?<=\\\\[nrt]))tee\\b|(?:\\b|(?<=\\\\[nrt]))sed\\s+-[a-zA-Z]*i\\b)(?:[^|;&\\\\]|\\\\[^nr])*\\.house/checks/|(?:\\b|(?<=\\\\[nrt]))(?:cp|mv)\\s+(?:[^|;&\\\\]|\\\\[^nr])*\\s\\S*\\.house/checks/[^\\s\\\\\\\"]*(?=\\s*(?:\\\"|\\\\n|[|;&])))"
+    },
+    {
+      "label": "checks-python-write",
+      "tool": "Bash",
+      "input_match": "(\\.house/checks/(?:[^|;&\\\\]|\\\\[^nr]){0,60}\\.write_(?:text|bytes)\\(|open\\((?:[^)\\\\]|\\\\[^nr])*\\.house/checks/(?:[^)\\\\]|\\\\[^nr])*,\\s*\\\\?[\\\"'][wa])"
+    }
+  ]
+}

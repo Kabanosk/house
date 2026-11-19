@@ -1,0 +1,82 @@
+{
+  "agent": "researcher",
+  "fixture": {
+    "name": "sources_big",
+    "contest": "calc"
+  },
+  "prompt": "You are working unattended on contest `calc` (house night); your current directory is the contest. The contest rules are in its `.house/sources/` (HOUSE_DIR is set in your environment). What is the maximum team size according to the contest rules? Answer in one line, exactly in the form `maximum team size: N`. Do not create, edit or delete any file, do not start any task, and never wait for a human.",
+  "forbid": [
+    {
+      "label": "read-whole",
+      "tool": "Read",
+      "input_match": "^(?!.*\"limit\": ).*\"file_path\": \"[^\"]*sources/rules\\.md\""
+    },
+    {
+      "label": "read-allow-large",
+      "tool": "Read",
+      "input_match": "\"allow_large\": true"
+    },
+    {
+      "label": "read-huge-range",
+      "tool": "Read",
+      "input_match": "^(?=.*\"file_path\": \"[^\"]*sources/rules\\.md\")(?=.*\"limit\": (?:40[1-9]|4[1-9]\\d|[5-9]\\d{2}|\\d{4,})(?!\\d))"
+    },
+    {
+      "label": "cat-whole",
+      "tool": "Bash",
+      "input_match": "(?:\"command\": \"|[|;&(`]|\\\\[nr])\\s*(?:sudo\\s+)?cat\\b(?:[^|;&\\\\]|\\\\[^nr])*sources/rules\\.md(?![\\w.-])(?!\\s*\\|\\s*(?:head|tail|sed|grep|rg|awk|wc)\\b)"
+    },
+    {
+      "label": "head-bytes",
+      "tool": "Bash",
+      "input_match": "^(?=.*rules\\.md)(?=.*\\bhead\\b[^|;&\\\\]*?(?:\\s-c\\s*|\\s--bytes[=\\s]\\s*)(?:\\d{6,}|[3-9]\\d{4}|2[1-9]\\d{3}|20[1-9]\\d{2}|200[1-9]\\d|2000[1-9]|\\d+[mMgG]|(?:[2-9]\\d|\\d{3,})[kK]|-\\d+[A-Za-z]*)(?![\\w]))"
+    },
+    {
+      "label": "head-lines",
+      "tool": "Bash",
+      "input_match": "(?:\\bhead\\b(?:[^|;&\\\\]|\\\\\")*?(?:(?:\\s-n\\s*|\\s--lines[=\\s]\\s*)(?:(?:200[1-9]|20[1-9]\\d|2[1-9]\\d{2}|[3-9]\\d{3}|\\d{5,})|-\\d+|\\d+[kKmMgGbB])|\\s-(?:200[1-9]|20[1-9]\\d|2[1-9]\\d{2}|[3-9]\\d{3}|\\d{5,}))(?!\\d)(?:[^|;&\\\\]|\\\\\")*?rules\\.md(?![\\w.-])|rules\\.md(?![\\w.-])(?:[^|;&\\\\]|\\\\\")*?\\|\\s*head\\b(?:[^|;&\\\\]|\\\\\")*?(?:(?:\\s-n\\s*|\\s--lines[=\\s]\\s*)(?:(?:200[1-9]|20[1-9]\\d|2[1-9]\\d{2}|[3-9]\\d{3}|\\d{5,})|-\\d+|\\d+[kKmMgGbB])|\\s-(?:200[1-9]|20[1-9]\\d|2[1-9]\\d{2}|[3-9]\\d{3}|\\d{5,}))(?!\\d))"
+    },
+    {
+      "label": "tail-from-start",
+      "tool": "Bash",
+      "input_match": "(?:\\btail\\b(?:[^|;&\\\\]|\\\\\")*?(?:\\s-n\\s*|\\s--lines[=\\s]\\s*|\\s)\\+\\d{1,3}(?!\\d)(?:[^|;&\\\\]|\\\\\")*?rules\\.md(?![\\w.-])|rules\\.md(?![\\w.-])(?:[^|;&\\\\]|\\\\\")*?\\|\\s*tail\\b(?:[^|;&\\\\]|\\\\\")*?(?:\\s-n\\s*|\\s--lines[=\\s]\\s*|\\s)\\+\\d{1,3}(?!\\d))"
+    },
+    {
+      "label": "grep-all",
+      "tool": "Bash",
+      "input_match": "(?:\\bgrep\\b(?:\\s+(?:-(?!-)[A-Za-bd-z0-9]+|--(?!count)[\\w-]+(?:=\\S+)?))*\\s+(?:-e\\s*)?(?:''|\\\\\"\\\\\"|\\^|'\\^'|\\\\\"\\^\\\\\"|\\$|'\\$'|\\\\\"\\$\\\\\"|\\.|'\\.'|\\\\\"\\.\\\\\")(?=\\s|\"|\\\\[nr]|[|;&)]|$)(?:[^|;&\\\\]|\\\\\")*?rules\\.md(?![\\w.-])|rules\\.md(?![\\w.-])(?:[^|;&\\\\]|\\\\\")*?\\|\\s*grep\\b(?:\\s+(?:-(?!-)[A-Za-bd-z0-9]+|--(?!count)[\\w-]+(?:=\\S+)?))*\\s+(?:-e\\s*)?(?:''|\\\\\"\\\\\"|\\^|'\\^'|\\\\\"\\^\\\\\"|\\$|'\\$'|\\\\\"\\$\\\\\"|\\.|'\\.'|\\\\\"\\.\\\\\")(?=\\s|\"|\\\\[nr]|[|;&)]|$))"
+    },
+    {
+      "label": "awk-all",
+      "tool": "Bash",
+      "input_match": "(?:\\bawk\\b\\s+(?:(?:1|'1'|\\\\\"1\\\\\")|'\\{\\s*print(?:\\s+\\$0)?\\s*;?\\s*\\}'|\\\\\\\"\\{\\s*print(?:\\s+\\$0)?\\s*;?\\s*\\}\\\\\\\")(?=\\s|\"|\\\\[nr]|[|;&)]|$)(?:[^|;&\\\\]|\\\\\")*?rules\\.md(?![\\w.-])|rules\\.md(?![\\w.-])(?:[^|;&\\\\]|\\\\\")*?\\|\\s*awk\\b\\s+(?:(?:1|'1'|\\\\\"1\\\\\")|'\\{\\s*print(?:\\s+\\$0)?\\s*;?\\s*\\}'|\\\\\\\"\\{\\s*print(?:\\s+\\$0)?\\s*;?\\s*\\}\\\\\\\")(?=\\s|\"|\\\\[nr]|[|;&)]|$))"
+    },
+    {
+      "label": "sed-print-all",
+      "tool": "Bash",
+      "input_match": "(?:\\bsed\\b(?:\\s+-[ne])*\\s+(?:(?:p|'p'|\\\\\"p\\\\\"|1,\\$p|'1,\\$p'|\\\\\"1,\\$p\\\\\")|''|\\\\\\\"\\\\\\\")(?=\\s|\"|\\\\[nr]|[|;&)]|$)(?:[^|;&\\\\]|\\\\\")*?rules\\.md(?![\\w.-])|rules\\.md(?![\\w.-])(?:[^|;&\\\\]|\\\\\")*?\\|\\s*sed\\b(?:\\s+-[ne])*\\s+(?:(?:p|'p'|\\\\\"p\\\\\"|1,\\$p|'1,\\$p'|\\\\\"1,\\$p\\\\\")|''|\\\\\\\"\\\\\\\")(?=\\s|\"|\\\\[nr]|[|;&)]|$))"
+    },
+    {
+      "label": "brief-too-long",
+      "tool": "Agent",
+      "input_match": "\"prompt_chars\": (?:[2-9]\\d{4}|\\d{6,})\\b"
+    }
+  ],
+  "outcome": [
+    {
+      "type": "git_clean"
+    },
+    {
+      "type": "final_answer",
+      "match": "(?im)^[\\s*_`]*maximum team size[\\s*_`]*:[\\s*_`]*17(?:\\s+members)?[\\s*_`]*\\.?[\\s*_`]*$"
+    }
+  ],
+  "kind": "capability",
+  "max_turns": 20,
+  "timeout_seconds": 600,
+  "tags": [
+    "smoke",
+    "k3"
+  ],
+  "model": "sonnet"
+}

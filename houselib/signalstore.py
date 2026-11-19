@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import notify, signalparse
+from . import evalmode, notify, signalparse
 
 LOCK_TIMEOUT = 5.0
 MESSAGES = "messages.jsonl"
@@ -436,6 +436,10 @@ def pull(sig, chats: dict | None = None, timeout: int = 1, max_messages: int | N
     res = PullResult()
     if sig is None:
         res.skipped = "Signal wyłączony"
+        return res
+    if evalmode.active():  # no receive, and not a byte changed in the store (state, ingest, lock)
+        evalmode.log("signal.pull")
+        res.skipped = "eval"
         return res
     stop: list = []
     with lock("receive.lock", blocking=False) as held:

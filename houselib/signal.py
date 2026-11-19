@@ -27,6 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import evalmode
+
 CONFIG = Path.home() / ".config/house/notify.env"
 FALLBACK_BINARY = Path.home() / ".local/bin/signal-cli"
 TIMEOUT_S = 60
@@ -99,7 +101,13 @@ class Signal:
         self.attachments_dir = Path(attachments_dir or os.environ.get("HOUSE_SIGNAL_ATTACHMENTS") or ATTACHMENTS)
 
     def _call(self, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess | None:
-        """Run `signal-cli -a <account> <args>`; None if it cannot start, rc -1 with partial stdout on timeout."""
+        """Run `signal-cli -a <account> <args>`; None if it cannot start, rc -1 with partial stdout on timeout.
+
+        None without running anything in eval mode (`HOUSE_EVAL=1`): the one place every `signal-cli` call but
+        `receive` goes through.
+        """
+        if evalmode.active():
+            return None
         argv = [self.binary, "-a", self.account, *args]
         try:
             return self._run(argv, capture_output=True, text=True, timeout=timeout or self.timeout, check=False,
@@ -128,8 +136,13 @@ class Signal:
 
         Returns:
             Signal's message timestamp (milliseconds since the epoch), which is also the id a quote-reply refers
-            to. None when `signal-cli` is missing, exits non-zero, times out or prints no timestamp.
+            to. None when `signal-cli` is missing, exits non-zero, times out or prints no timestamp, and in eval
+            mode (`HOUSE_EVAL=1`): nothing is sent or stored, one `signal.send` line (chat, length) goes to the
+            eval log.
         """
+        if evalmode.active():
+            evalmode.log("signal.send", chat=group_id or "self", chars=len(text))
+            return None
         target = ["-g", group_id] if group_id else ["--note-to-self", "--notify-self"]
         extra = [x for path in attachments for x in ("--attachment", str(path))]
         if quote:
@@ -164,8 +177,12 @@ class Signal:
                 it already printed is drained and handled (nothing printed is dropped).
 
         Returns:
-            A `ReceiveResult` with counts and the error, if any. Never raises for signal-cli problems.
+            A `ReceiveResult` with counts and the error, if any. Never raises for signal-cli problems. An empty
+            result in eval mode (`HOUSE_EVAL=1`), with one `signal.pull` line in the eval log.
         """
+        if evalmode.active():
+            evalmode.log("signal.pull")
+            return ReceiveResult()
         argv = [self.binary, "-a", self.account, "-o", "json", "receive", "--timeout", str(timeout)]
         if max_messages:
             argv += ["--max-messages", str(max_messages)]

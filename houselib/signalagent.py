@@ -956,7 +956,10 @@ def tick(sig, now: datetime | None = None, run=subprocess.run, claude: str | Non
     Returns:
         Log lines.
     """
-    from . import signalchats, signalstore
+    from . import evalmode, signalchats, signalstore
+    if evalmode.active():  # no job is started and no cursor moves in an eval run
+        evalmode.log("signal.agent_tick")
+        return ["agent: eval"]
     if sig is None:
         return ["agent: Signal wyłączony"]
     now = now or datetime.now().astimezone()

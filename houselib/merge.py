@@ -15,7 +15,8 @@ What `house merge` refuses (nothing changes on main; exit code 1):
 - a task without `branch`, or without a worktree;
 - a task that is red on its own branch, or a merge conflict.
 After a successful merge every merged/done task is re-checked on main; a regression caused by this merge is
-reverted, the task becomes `blocked` and its branch is rebased onto the new main on the next attempt.
+reverted, the task becomes `blocked` and its branch is rebased onto the new main on the next attempt; when that
+rebase does not apply cleanly the task is blocked again for a human (not reported as a merge conflict).
 The task ends as `done` when all its criteria pass (manual ones included), otherwise `merged`.
 """
 import json
@@ -40,11 +41,15 @@ class MergeOutcome:
             ("?" when the task could not even be loaded).
         message: What happened, including `note:` lines for non-fatal problems; shown by `house merge`.
         reverted: True when the merge was made and then cleanly undone (regression or crash in the re-checks).
+        conflict: True when the refusal was a `git merge` conflict (git left unmerged paths before the abort);
+            `house night` then merges main into the task branch before the next attempt. A reverted task's branch
+            that does not rebase onto main is not a conflict: the task is blocked for a human instead.
     """
     ok: bool
     status: str
     message: str
     reverted: bool = False
+    conflict: bool = False
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -58,10 +63,15 @@ def _set_status(task: checks.Task, status: str) -> None:
 
 
 def _commit_house(contest: Path, message: str) -> None:
-    """Commit all pending changes under `.house/` with the given message, if there are any."""
-    _git(contest, "add", "-A", "--", ".house")
-    if _git(contest, "diff", "--cached", "--quiet", "--", ".house").returncode != 0:
-        _git(contest, "commit", "-q", "-m", message, "--", ".house")
+    """Commit all pending changes under `.house/` with the given message, if there are any.
+
+    The attempt register is left out: only `night.record_attempt` (and `house merge` through it) commits it, so an
+    edit slipped in while the gate was running is never committed as house's own.
+    """
+    spec = (".house", f":(exclude){guard.REGISTER}")
+    _git(contest, "add", "-A", "--", *spec)
+    if _git(contest, "diff", "--cached", "--quiet", "--", *spec).returncode != 0:
+        _git(contest, "commit", "-q", "-m", message, "--", *spec)
 
 
 def _porcelain_paths(cwd: Path, *extra: str) -> list[str]:
@@ -216,11 +226,19 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None,
     data = json.loads((house / "checks" / f"{task_id}.json").read_text())
     if data.get("reverted"):  # replay every commit since the old fork point as new commits; otherwise git
         # treats the reverted ones as already merged and brings only the newer ones
+        # no --rebase-merges: a recreated merge of main would bring main's revert of this task back into the branch
         rb = _git(wt, "rebase", "--onto", main_branch, data["reverted"]["base"])
-        if rb.returncode != 0:
+        if rb.returncode != 0:  # a merge of main cannot help (the replay starts from the old base): a human decides
             _git(wt, "rebase", "--abort")
-            return MergeOutcome(False, status, f"{task_id} was reverted before and its branch does not rebase "
-                                f"cleanly onto {main_branch}; rebase it by hand:\n" + rb.stderr.strip())
+            why = " ".join(ln.strip() for ln in rb.stderr.splitlines() if ln.strip() and not ln.startswith("hint:"))
+            _set_status(task, "blocked")
+            with (house / "PROGRESS.md").open("a") as f:
+                f.write(f"- {datetime.now():%Y-%m-%d %H:%M} {task_id} zablokowane: gałąź po cofnięciu nie daje się "
+                        f"przenieść na {main_branch}; rebase by hand\n")
+            _commit_house(contest, f"chore(house): {task_id} blocked (rebase after revert)")
+            return MergeOutcome(False, "blocked", f"{task_id} was reverted before and its branch does not rebase "
+                                f"cleanly onto {main_branch}; blocked, rebase it by hand: "
+                                + guard.redact(why)[:300])
 
     if str(task.meta.get("review")) == "always":
         problem = _review_gate(contest, task_id, str(branch), accept_review)
@@ -234,9 +252,10 @@ def merge_task(contest: Path, task_id: str, worktree: Path | None = None,
     pre_head = _git(contest, "rev-parse", "HEAD").stdout.strip()
     r = _git(contest, "merge", "--no-ff", "--no-edit", "-m", f"merge {task_id} ({branch})", str(branch))
     if r.returncode != 0:
+        conflict = bool(_git(contest, "diff", "--name-only", "--diff-filter=U").stdout.strip())
         _git(contest, "merge", "--abort")
         return MergeOutcome(False, status, f"merge of {branch} failed (conflict?); aborted, main unchanged:\n"
-                            + (r.stdout + r.stderr).strip())
+                            + (r.stdout + r.stderr).strip(), conflict=conflict)
     merge_sha = _git(contest, "rev-parse", "HEAD").stdout.strip()
     try:
         red_after = {}

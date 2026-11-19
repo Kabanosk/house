@@ -24,4 +24,4 @@ house exp status <konkurs>                                                     #
 - `house exp prune <konkurs> --keep 3` usuwa worktree słabszych `keep` (commity zostają).
 
 Powiązane: [Konkurs krok po kroku](contest-workflow.md).
-Plan: [`docs/superpowers/plans/2026-11-13-experiments.md`](../superpowers/plans/2026-11-13-experiments.md).
+Plan: [`docs/plans/2026-11-13-experiments.md`](../plans/2026-11-13-experiments.md).

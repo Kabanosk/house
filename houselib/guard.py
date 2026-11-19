@@ -6,6 +6,8 @@ Used by the Claude Code hook (`bin/house-hook`, before a tool runs), by `house g
 What an agent should know:
   * Frozen acceptance criteria (`.house/checks/*.json`) are written only by `house check`; the acceptance tests
     and the local scorer pinned in them (`protected_paths`) must not be edited by workers.
+  * The attempt register `.house/attempts.jsonl` is written only by house itself (`house night`, `house merge`);
+    workers must not edit it.
   * Task branches must not carry `.house/` files (write through `$HOUSE_DIR` instead) or anything that looks like
     a secret; `git add` / `git commit -a` of a secret and pushes to a remote outside `guard.push_allow` (default
     `origin`) or forced pushes to the contest's main branch are refused.
@@ -28,8 +30,12 @@ from . import spec as specmod
 from .export import SECRET_RES
 from .fm import parse_frontmatter
 
-CONTROL = {"&&", "||", ";", "|", "&", ";;"}
-REDIRECTS = {">", ">>", ">|", "&>", "&>>", "1>", "2>"}
+CONTROL = {"&&", "||", ";", "|", "&", ";;", "|&"}
+REDIRECTS = {">", ">>", ">|", "&>", "&>>", "1>", "2>", ">&", "<>"}  # operators whose target is written (an fd
+# target such as `2>&1` or `>&-` is skipped)
+_NAMED_FD = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")  # bash `{fd}>file`: the shell picks the fd, names it fd
+REDIRECT_OPS = REDIRECTS | {"<", "<<", "<<<", "<&", ">&", "<>"}  # every redirection operator (each takes one word)
+SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}  # `<shell> -c SCRIPT` is checked as SCRIPT too
 FINISHED = ("merged", "done")
 
 
@@ -200,6 +206,10 @@ def _in_checks(rel: str) -> bool:
     return rel == ".house/checks" or rel.startswith(".house/checks/")
 
 
+REGISTER = ".house/attempts.jsonl"
+REGISTER_REASON = f"{REGISTER} is written only by house (the attempt register of `house night` / `house merge`)"
+
+
 def _git_internal(rel: str) -> bool:
     """Tell whether `rel` is a file that can switch the git hooks off: `.git/hooks/**`, `.git/config` or a
     `config.worktree` (where `core.hooksPath` can be set per worktree)."""
@@ -241,7 +251,8 @@ def protected_violation(contest: Path, rel: str, content: bytes | None, protecte
 def check_edit(rel: str, contest: Path) -> str | None:
     """Decide whether a worker may write the file `rel`.
 
-    Refuses `.house/checks/**` (written only by `house check`), every file in `protected_paths`, and the files that
+    Refuses `.house/checks/**` (written only by `house check`), `.house/attempts.jsonl` (the attempt register,
+    written only by house), every file in `protected_paths`, and the files that
     configure git hooks (`.git/hooks/**`, `.git/config`).
 
     Args:
@@ -253,6 +264,8 @@ def check_edit(rel: str, contest: Path) -> str | None:
     """
     if _in_checks(rel):
         return f"{rel} is written only by `house check` (frozen acceptance criteria)"
+    if rel == REGISTER:
+        return REGISTER_REASON
     if _git_internal(rel):
         return f"{rel}: {HOOKS_REASON}"
     owner = protected_paths(contest).get(rel)
@@ -285,14 +298,26 @@ def _normalize(command: str) -> str:
     return "".join(out)
 
 
+# one shell operator; shlex returns a run of operator characters (`);`, `)&&`) as one token, which is split by this
+_OPERATOR = re.compile(r"&>>|&>|>>|>&|>\||<<<|<<|<&|<>|&&|\|\||\|&|;;|[;()&|<>]")
+
+
 def _tokens(command: str) -> list[str]:
-    """Split a shell command into tokens (operators such as `&&` and `;` are separate tokens); naive split on error."""
+    """Split a shell command into tokens: words and single operators (`&&`, `;`, `(`, `)`, `>>`, ... each a token of
+    its own, also when written together as in `(true);rm x`); naive split on error."""
     lex = shlex.shlex(_normalize(command), posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     try:
-        return list(lex)
+        raw = list(lex)
     except ValueError:
         return command.split()
+    out: list[str] = []
+    for tok in raw:
+        if tok and all(ch in "();&|<>" for ch in tok):
+            out += _OPERATOR.findall(tok)
+        else:
+            out.append(tok)
+    return out
 
 
 def _segments(command: str) -> list[list[str]]:
@@ -310,6 +335,34 @@ def _segments(command: str) -> list[list[str]]:
     return [s for s in ([t for t in seg if t not in ("(", ")", "{", "}", "!")] for seg in segs) if s]
 
 
+def _split_redirects(seg: list[str]) -> tuple[list[str], list[str]]:
+    """Separate a simple command's words from its redirections.
+
+    The tokenizer splits `2>/dev/null` into `2`, `>`, `/dev/null`, so a number (or a bash named fd such as `{fd}`)
+    right before an operator is taken as its file descriptor and dropped (`echo 2 >x` loses the word `2`, which no
+    check needs).
+
+    Args:
+        seg: Tokens of one simple command (see `_segments`).
+
+    Returns:
+        `(words, redirections)`: the words in order, and each redirection as its operator followed by its target.
+    """
+    words: list[str] = []
+    redirs: list[str] = []
+    i = 0
+    while i < len(seg):
+        if seg[i] in REDIRECT_OPS:
+            redirs += seg[i:i + 2]
+            i += 2
+        elif (seg[i].isdigit() or _NAMED_FD.fullmatch(seg[i])) and i + 1 < len(seg) and seg[i + 1] in REDIRECT_OPS:
+            i += 1
+        else:
+            words.append(seg[i])
+            i += 1
+    return words, redirs
+
+
 def _git_parts(seg: list[str], cwd: Path) -> tuple[list[str], Path]:
     """`git [-C dir] [-c k=v] [--no-pager] sub args…` → ([sub, args…], effective cwd)."""
     args, i = seg[1:], 0
@@ -325,9 +378,15 @@ def _git_parts(seg: list[str], cwd: Path) -> tuple[list[str], Path]:
 
 
 def _written_paths(seg: list[str], cwd: Path) -> list[tuple[str, Path]]:
-    """(path, cwd it is relative to) for paths a shell segment writes or deletes (best effort)."""
-    out = [(seg[i + 1], cwd) for i, t in enumerate(seg[:-1]) if t in REDIRECTS]
-    args = [t for i, t in enumerate(seg) if t not in REDIRECTS and (i == 0 or seg[i - 1] not in REDIRECTS)]
+    """(path, cwd it is relative to) for paths a shell segment writes or deletes (best effort).
+
+    Redirections count wherever they stand; the program is found after `VAR=x` words and wrappers
+    (`timeout 5 rm x` deletes `x`).
+    """
+    words, redirs = _split_redirects(seg)
+    out = [(redirs[i + 1], cwd) for i in range(0, len(redirs) - 1, 2)
+           if redirs[i] in REDIRECTS and not (redirs[i + 1].isdigit() or redirs[i + 1] == "-")]
+    args = words[_command_start(words):]
     if not args:
         return out
     cmd = Path(args[0]).name
@@ -340,7 +399,7 @@ def _written_paths(seg: list[str], cwd: Path) -> list[tuple[str, Path]]:
     elif cmd in ("cp", "install", "ln") and files:
         out.append((files[-1], cwd))
     elif cmd == "git":
-        sub, gcwd = _git_parts(seg, cwd)
+        sub, gcwd = _git_parts(args, cwd)
         rest = sub[1:]
         if sub[:1] in (["rm"], ["mv"]):
             out += [(a, gcwd) for a in rest if not a.startswith("-") and a != "--"]
@@ -385,6 +444,94 @@ def _secret_file(path: Path) -> bool:
     except OSError:
         return False
     return looks_secret(name, head)
+
+
+# Shapes `redact` masks on top of `export.SECRET_RES` (which stays as it is, so `house export` blocking does not
+# change): a whole PEM private key block, the value of an environment assignment whose name says it is a secret, a
+# bearer or basic authorization, an API-key header, the secret values of a URL query and the password of a URL.
+_PEM_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.DOTALL)
+# The name is at most 64 characters and starts at an identifier boundary, so a search costs O(64) per position and
+# never rescans a long run of name characters; the secret test is done on its `_` segments in `_redact_env`.
+_ENV_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z0-9_]{1,64})=")
+# A shell word is a run of adjacent fragments with no whitespace between them: "..." (with \" escapes), '...', $'...'
+# (with \' escapes), a command substitution $( ... ) (parentheses balanced up to three levels deep, quotes and
+# backticks inside it respected) or `...`, and unquoted chunks of non-separator characters or backslash escapes. A
+# word that opens with a quote that never closes runs to the end of the text; an unterminated quote later in a word is
+# left out (it is usually the closing quote of an enclosing string, as in `echo "KEY=1"`). A `$(` or backtick that
+# never closes (or nests deeper) runs to the end of the text. Possessive quantifiers keep it linear.
+_SUBST_ATOM = r"""[^()'"`\\]|\\[\s\S]|'[^']*+'|"(?:[^"\\]|\\[\s\S])*+"|`[^`]*+`"""
+_PARENS = rf"""\((?:{_SUBST_ATOM})*+\)"""
+for _ in range(2):
+    _PARENS = rf"""\((?:{_SUBST_ATOM}|{_PARENS})*+\)"""
+_ENV_VALUE_RE = re.compile(
+    rf"""(?:"(?:[^"\\]|\\[\s\S])*+"|'[^']*+'|\$'(?:[^'\\]|\\[\s\S])*+'|\${_PARENS}|`[^`]*+`"""
+    r"""|\$\([\s\S]*+\Z|`[\s\S]*+\Z|(?:[^\s;'"&|)\\$`]|\$(?![('])|\\[\s\S])++)++"""
+    r"""|"(?:[^"\\]|\\[\s\S])*+\Z|'[^']*+\Z"""
+)
+_SECRET_SEGMENTS = frozenset({"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PAT", "APIKEY"})
+_BEARER_RE = re.compile(r"(?i)bearer\s+\S{16,}")
+_BASIC_RE = re.compile(r"(?i)(authorization\s*:\s*)basic\s+[A-Za-z0-9+/=_-]{8,}")
+_API_KEY_HEADER_RE = re.compile(r"(?i)(\bx-api-key\s*:\s*)[^\s'\"]+")
+_QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:token|access_token|refresh_token|api_key|apikey|key|password|secret"
+                              r"|client_secret|sig|signature)=)[^&#\s'\"]+")
+_URL_CRED_RE = re.compile(r"(://[^/\s:@]+:)[^/\s?#]*@")
+
+
+def _redact_env(text: str) -> str:
+    """Mask the value of every `NAME=value` whose NAME has a secret `_` segment, keeping the name.
+
+    Args:
+        text: Any text.
+
+    Returns:
+        The text with `NAME=` followed by `[REDACTED]` in place of each such assignment. Linear in the text: the
+        value is looked at only after the name matched, and the scan then resumes after the value.
+    """
+    out, pos, scan = [], 0, 0
+    while m := _ENV_NAME_RE.search(text, scan):
+        scan = m.end()
+        if _SECRET_SEGMENTS.isdisjoint(m.group(1).split("_")):
+            continue  # not a secret name: look on from after the `=` (a secret may follow, as in `A=B_KEY=x`)
+        value = _ENV_VALUE_RE.match(text, m.end())
+        if value is None:
+            continue
+        out += [text[pos:m.end()], "[REDACTED]"]
+        pos = scan = value.end()
+    return "".join(out) + text[pos:]
+
+
+def redact(text: str) -> str:
+    """Replace every secret-looking token in `text` with `[REDACTED]`.
+
+    Used before a session record is printed or written, so a Bash command that carries a key never leaves the
+    reader in clear text. Text without any match comes back unchanged.
+
+    Args:
+        text: Any text, for example a shell command line.
+
+    Returns:
+        The text with each match of each `export.SECRET_RES` pattern replaced by `[REDACTED]`, plus (redact only) a
+        whole PEM private key block (to its END line, or to the end of the text when truncated); the value of a
+        `NAME=value` assignment (the whole shell word: adjacent quoted and unquoted fragments up to whitespace, `;`,
+        `&`, `|` or `)`, with a balanced `$( ... )` or `` `...` `` inside it; one that never closes runs to the end of
+        the text) whose
+        uppercase NAME (up to 64 characters) has an underscore-separated segment KEY, TOKEN, SECRET, PASSWORD,
+        PASSWD, PASS, PAT or APIKEY (`GITHUB_TOKEN=[REDACTED]`, the name stays; `MONKEY` and `TOKENIZERS_PARALLELISM`
+        are left alone); `Bearer <16+ characters>` (becomes `Bearer [REDACTED]`); `Authorization: Basic <base64>`
+        (becomes `Basic [REDACTED]`); the value of an `X-Api-Key:` header; the value of a URL query parameter
+        `token`, `access_token`, `refresh_token`, `api_key`, `apikey`, `key`, `password`, `secret`,
+        `client_secret`, `sig` or `signature`; and the password in
+        `://user:password@` (becomes `://user:[REDACTED]@`; the password ends at `/`, `?`, `#` or whitespace).
+    """
+    text = _PEM_RE.sub("[REDACTED]", text)
+    for rx in SECRET_RES:
+        text = rx.sub("[REDACTED]", text)
+    text = _redact_env(text)
+    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _BASIC_RE.sub(r"\1Basic [REDACTED]", text)
+    text = _API_KEY_HEADER_RE.sub(r"\1[REDACTED]", text)
+    text = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", text)
+    return _URL_CRED_RE.sub(r"\1[REDACTED]@", text)
 
 
 def _status(cwd: Path) -> list[tuple[str, str]]:
@@ -464,7 +611,7 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
     """Decide whether a Bash tool command may run; the first violation found wins.
 
     The command is split into simple commands (heredoc bodies are ignored, newlines count as `;`). Refuses:
-      * writes or deletes of `.house/checks/**` or protected files (see `check_edit`) through redirections
+      * writes or deletes of `.house/checks/**`, `.house/attempts.jsonl` or protected files (see `check_edit`) through redirections
         (`>`, `>>`, `&>` …), `tee`, `rm`, `mv`, `truncate`, `shred`, `unlink`, `sed -i` / `perl -i`, the destination
         of `cp` / `install` / `ln`, `git rm` / `git mv`, and `git checkout <rev> --` / `git restore --source`
         from anything but HEAD (restoring from HEAD is allowed);
@@ -476,7 +623,11 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
         a read (`--get`, `--list`), writes to `.git/hooks/**` or `.git/config`. The hooks themselves (`githook.py`)
         are the real enforcement of the secret, push and protected-file rules inside task worktrees; this check
         only keeps the agent from removing them.
-    Best effort: it understands `git -C dir` and `-c k=v`, but not variables, subshell expansion or scripts.
+    `house out [--] CMD` and `house exp … -- CMD` are checked as CMD itself (`house out show|prune` and `house exp`
+    without `--` are not wrappers; a single CMD word is checked as a shell script), also with redirections
+    between its words; `sh|bash -c SCRIPT` is checked as SCRIPT too. The program of a simple command is found after
+    `VAR=x` words and wrappers (`timeout 60 git push --no-verify` is refused like `git push --no-verify`).
+    Best effort: it understands `git -C dir` and `-c k=v`, but not variables, subshell expansion or script files.
 
     Args:
         command: The shell command line exactly as the Bash tool received it.
@@ -489,15 +640,17 @@ def check_bash(command: str, cwd: Path, contest: Path) -> str | None:
     protected = protected_paths(contest)
     if HOOKSPATH_RE.search(_normalize(command)) and not CONFIG_READ_RE.search(command):
         return HOOKS_REASON
-    for seg in _segments(command):
+    for seg in _commands(command):
         for target, base in _written_paths(seg, cwd):
             rel = repo_relative(target, base, contest)
-            if rel and (rel in protected or _in_checks(rel) or _git_internal(rel)):
+            if rel and (rel in protected or _in_checks(rel) or rel == REGISTER or _git_internal(rel)):
                 reason = check_edit(rel, contest)
                 if reason:
                     return reason
-        if seg[0] == "git":
-            sub, gcwd = _git_parts(seg, cwd)
+        words, _ = _split_redirects(seg)
+        words = words[_command_start(words):]
+        if words and Path(words[0]).name == "git":
+            sub, gcwd = _git_parts(words, cwd)
             if "--no-verify" in sub or (sub[:1] == ["commit"] and any(
                     a.startswith("-") and not a.startswith("--") and "n" in a for a in sub[1:])):
                 return HOOKS_REASON
@@ -578,7 +731,7 @@ def check_signal(tool: str, args: dict, cwd: Path, home: Path | None = None) -> 
             return HUMAN_REASON
         if HOUSE_ENV_RE.search(command):
             return ENV_REASON
-        for seg in _segments(command):
+        for seg in _commands(command):
             if _runs_signal_cli(seg):
                 return SIGNAL_CLI_REASON
             for target, base in _written_paths(seg, cwd):
@@ -620,19 +773,100 @@ def _human_only_command(command: str) -> bool:
     return False
 
 
-def _runs_signal_cli(seg: list[str]) -> bool:
-    """Tell whether a simple command runs signal-cli: as the command (after `VAR=x` and wrappers such as
-    `timeout 5`, `env`, `script -qc`), or inside a quoted command string (`bash -c "signal-cli …"`)."""
+# wrapper options whose value is the next word (attached forms such as `-uX`, `-sKILL`, `--signal=KILL` are one word)
+WRAPPER_ARG_OPTIONS = {
+    "env": {"-u", "--unset", "-C", "--chdir"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from"},
+    "nice": {"-n", "--adjustment"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+}
+
+
+def _command_start(seg: list[str], wrappers: set[str] = WRAPPERS) -> int:
+    """Index of the program a simple command runs: after `VAR=x` words and wrappers such as `timeout 5` or `env`
+    (with their options, including those that take a value: `env -u X`, `timeout -s KILL`, `sudo -u u`, ...)."""
     i = 0
     while i < len(seg):
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]):
             i += 1
-        elif Path(seg[i]).name in WRAPPERS:
+        elif Path(seg[i]).name in wrappers:
+            takes_value = WRAPPER_ARG_OPTIONS.get(Path(seg[i]).name, set())
             i += 1
             while i < len(seg) and (seg[i].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", seg[i])):
-                i += 1
+                i += 2 if seg[i] in takes_value else 1
         else:
             break
+    return i
+
+
+def _through_house_out(seg: list[str]) -> list[str]:
+    """`house out [--] CMD …` and `house exp … -- CMD …` (any path ending in `/house`, wrappers and nesting allowed)
+    are CMD itself. For `exp`, `cli.main` cuts at the first `--` whatever comes before it (`exp --budget 5m run …`).
+
+    Redirections anywhere in the segment (`house >/dev/null out -- rm x`) are skipped while looking for the wrapper
+    and kept, after CMD, so their targets are still checked. `house out show …`, `house out prune …`, `house out`
+    with an option and every `house exp` without `--` are not wrappers and stay as they are.
+    """
+    words, redirs = _split_redirects(seg)
+    unwrapped = False
+    while True:
+        i = _command_start(words)
+        if not (i + 1 < len(words) and Path(words[i]).name == "house" and words[i + 1] in ("out", "exp")):
+            break
+        rest = words[i + 2:]
+        if words[i + 1] == "exp":
+            if "--" not in rest:
+                break
+            rest = rest[rest.index("--") + 1:]  # `cli.main`: everything after the first `--` is the command
+        elif rest[:1] == ["--"]:
+            rest = rest[1:]
+        elif not rest or rest[0] in ("show", "prune") or rest[0].startswith("-"):
+            break
+        if not rest:
+            break
+        words, unwrapped = rest, True
+    return [*words, *redirs] if unwrapped else seg
+
+
+def _shell_script(seg: list[str]) -> str | None:
+    """The SCRIPT of `sh|bash|… [options] -c SCRIPT` (also `-lc`, `-ec`, after wrappers), or of a command that is one
+    word with spaces (`house exp run … -- 'a && b'` runs that word through the shell), else None."""
+    words, _ = _split_redirects(seg)
+    if len(words) == 1 and any(ch.isspace() for ch in words[0]):
+        return words[0]
+    i = _command_start(words)
+    if i >= len(words) or Path(words[i]).name not in SHELLS:
+        return None
+    j = i + 1
+    while j < len(words) and words[j].startswith(("-", "+")):
+        word = words[j]
+        if word in ("--rcfile", "--init-file"):
+            j += 2
+            continue
+        if not word.startswith("--") and "c" in word[1:]:
+            return words[j + 1] if j + 1 < len(words) else None
+        j += 2 if not word.startswith("--") and word[-1] in "oO" else 1  # `-o X`, `-euo X`, `+O X`
+    return None
+
+
+def _commands(command: str, depth: int = 0) -> list[list[str]]:
+    """The simple commands of a shell line with `house out [--]` unwrapped and `sh -c SCRIPT` expanded (up to three
+    levels deep): what really runs."""
+    out = []
+    for seg in _segments(command):
+        seg = _through_house_out(seg)
+        out.append(seg)
+        script = _shell_script(seg)
+        if script and depth < 3:
+            out += _commands(script, depth + 1)
+    return out
+
+
+def _runs_signal_cli(seg: list[str]) -> bool:
+    """Tell whether a simple command runs signal-cli: as the command (after `VAR=x` and wrappers such as
+    `timeout 5`, `env`, `script -qc`), or inside a quoted command string (`bash -c "signal-cli …"`)."""
+    i = _command_start(seg)
     if i < len(seg) and Path(seg[i]).name == "signal-cli":
         return True
     return any(" " in t and INNER_SIGNAL_CLI_RE.search(t) for t in seg)
@@ -649,16 +883,7 @@ JOB_REASON = ("Signal job: {what}. The job works only inside its worktree, witho
 
 def _command_name(seg: list[str]) -> tuple[str, list[str]]:
     """The program a simple command runs (after `VAR=x` and wrappers such as `timeout 5`) and its arguments."""
-    i = 0
-    while i < len(seg):
-        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]):
-            i += 1
-        elif Path(seg[i]).name in WRAPPERS - {"sudo"}:
-            i += 1
-            while i < len(seg) and (seg[i].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", seg[i])):
-                i += 1
-        else:
-            break
+    i = _command_start(seg, WRAPPERS - {"sudo"})
     return (Path(seg[i]).name, seg[i + 1:]) if i < len(seg) else ("", [])
 
 
@@ -735,13 +960,36 @@ def _at_head(repo: Path, rel: str) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
+def register_changed(contest: Path) -> bool:
+    """Tell whether the attempt register differs from HEAD, byte for byte.
+
+    A missing file equals a register that HEAD does not have either; any other difference (an edit, a deletion, a
+    new file not committed yet) counts as changed. Bytes are compared because the register may hold any content.
+    """
+    shown = subprocess.run(["git", "show", f"HEAD:{REGISTER}"], cwd=contest, capture_output=True, check=False)
+    head_bytes = shown.stdout if shown.returncode == 0 else None
+    path = contest / REGISTER
+    return (path.read_bytes() if path.is_file() else None) != head_bytes
+
+
+def restore_register(contest: Path) -> None:
+    """Put the attempt register back to HEAD's bytes (working tree and index); delete it when HEAD has none."""
+    if _git(contest, "cat-file", "-e", f"HEAD:{REGISTER}").returncode == 0:
+        _git(contest, "checkout", "HEAD", "--", REGISTER)
+    else:
+        (contest / REGISTER).unlink(missing_ok=True)
+        _git(contest, "rm", "--cached", "-q", "--ignore-unmatch", "--", REGISTER)
+
+
 def frozen_tampering(contest: Path) -> list[str]:
     """Find uncommitted changes in the contest checkout that only house itself may make.
 
     Compares the working tree with HEAD (house commits its own `.house/` changes at once, so any difference is
     a hand edit). Reports: an unreadable `.house/checks/*.json`; a changed `frozen` section there (legitimate only
     through `house check --freeze/--refreeze`); a task file `.house/tasks/T*-*.md` whose `status` was set to
-    `merged` / `done` by hand (only `house merge` sets it). Used by `house merge` as a gate and by
+    `merged` / `done` by hand (only `house merge` sets it); `.house/attempts.jsonl` that differs from HEAD
+    (house commits each register row right after writing it, so any difference is a hand edit, a forged or deleted
+    row). Used by `house merge` as a gate and by
     `diff_violations`.
 
     Args:
@@ -763,6 +1011,9 @@ def frozen_tampering(contest: Path) -> list[str]:
             continue
         if before != now:
             found.append(f"frozen criteria in {rel} changed outside `house check --freeze/--refreeze`")
+    if register_changed(contest):
+        found.append(f"{REGISTER} changed outside house (only house night/merge write the attempt register); "
+                     f"restore with: git checkout HEAD -- {REGISTER}")
     for path in sorted((house / "tasks").glob("T*-*.md")):
         rel = str(path.relative_to(contest))
         try:
@@ -828,3 +1079,68 @@ def diff_violations(contest: Path, task_id: str, worktree: Path) -> list[str]:
         elif _secret_file(worktree / rel):
             found.append(f"{rel} looks like a secret")
     return found + frozen_tampering(contest)
+
+
+# `<<<<<<<` / `>>>>>>>` lines only: a lone `=======` is a legitimate RST or setext underline, never a marker
+_CONFLICT_MARKER = re.compile(rb"^(<{7}|>{7})( |$)")
+
+
+def conflict_markers(repo: Path, main_ref: str | None, diff_args: tuple[str, ...] = (),
+                     files: list[str] | tuple[str, ...] = (), env: dict | None = None) -> set[str]:
+    """Paths holding conflict marker lines that the main line does not carry itself.
+
+    The one scan for conflict markers (`night` before and after committing a merge of main, the `pre-commit` hook
+    during a merge). A marker line starts with `<<<<<<<` or `>>>>>>>` followed by a space or the line end; a lone
+    `=======` never counts.
+
+    Args:
+        repo: The worktree to look in.
+        main_ref: The main-line commit that was merged (`MERGE_HEAD` or its sha). A marker line counts only when the
+            `main_ref` version of the same file lacks that exact line (main may carry such lines on purpose, e.g. a
+            conflict sample in the docs). None: every marker line counts.
+        diff_args: Arguments of a `git diff` whose added lines are scanned (e.g. `("HEAD",)`, `("--cached",
+            "HEAD")`, `("<base>..HEAD",)`); empty for no diff. `git diff` never sees untracked files: the night
+            scans those after staging them (`--cached`, just before its commit), the hook sees them staged.
+        files: Paths (relative to `repo`) whose whole working-tree content is scanned too.
+        env: Environment for git (the hook passes its index file).
+
+    Returns:
+        The paths with at least one such marker line.
+    """
+    found: dict[str, set[bytes]] = {}
+    if diff_args:
+        r = subprocess.run(["git", "-c", "core.quotePath=false", "diff", "--no-renames", *diff_args, "-U0",
+                            "--no-color", "--no-ext-diff"], cwd=repo, capture_output=True, check=False, env=env)
+        current, in_hunk = "", False
+        for raw in r.stdout.split(b"\n"):
+            # file headers come from `diff --git a/<p> b/<p>` (both sides name the same path, renames are off), not
+            # from `+++ `: an added line that itself starts with `++ ` shows as `+++ ...` inside a hunk
+            if raw.startswith(b"diff --git "):
+                rest = raw[len(b"diff --git "):].decode(errors="replace")
+                size = (len(rest) - 5) // 2
+                current = rest[2:2 + size] if size > 0 and rest.startswith("a/") else ""
+                in_hunk = False
+            elif raw.startswith(b"diff --cc ") or raw.startswith(b"diff --combined "):
+                current, in_hunk = raw.split(b" ", 2)[2].decode(errors="replace"), False
+            elif raw.startswith(b"@@"):
+                in_hunk = True
+            elif in_hunk and current and raw.startswith(b"+") and _CONFLICT_MARKER.match(raw[1:]):
+                found.setdefault(current, set()).add(raw[1:])
+    for rel in files:
+        path = repo / rel
+        try:
+            data = path.read_bytes() if path.is_file() and not path.is_symlink() else b""
+        except OSError:
+            data = b""
+        lines = {ln for ln in data.split(b"\n") if _CONFLICT_MARKER.match(ln)}
+        if lines:
+            found.setdefault(rel, set()).update(lines)
+    out = set()
+    for rel, lines in found.items():
+        if main_ref:
+            shown = subprocess.run(["git", "show", f"{main_ref}:{rel}"], cwd=repo, capture_output=True, check=False,
+                                   env=env)
+            lines = lines - set(shown.stdout.split(b"\n")) if shown.returncode == 0 else lines
+        if lines:
+            out.add(rel)
+    return out

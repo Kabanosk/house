@@ -38,6 +38,45 @@ class ChecksTest(unittest.TestCase):
         self.write_task(task_text(acceptance, **kw))
         checks.freeze(self.house, "T001")
 
+    def test_gate_state_is_recorded_and_read(self):
+        self.frozen(RUN_OK)
+        path = self.house / "checks" / "T001.json"
+        self.assertTrue(checks.run_checks(self.house, "T001", self.work).green)
+        gate = json.loads(path.read_text())["gate"]
+        self.assertEqual((gate["green"], gate["init_ok"], gate["mismatch"]), (True, True, False))
+        self.assertTrue(gate["at"])
+        self.assertEqual(checks.last_state(path), "GREEN")
+
+    def test_gate_red_from_init_sh_although_criteria_pass(self):
+        self.frozen(RUN_OK)
+        (self.house / "init.sh").write_text("exit 3\n")
+        path = self.house / "checks" / "T001.json"
+        self.assertFalse(checks.run_checks(self.house, "T001", self.work).green)
+        self.assertTrue(json.loads(path.read_text())["results"]["AC-1"]["passes"])
+        self.assertEqual(checks.last_state(path), "RED (init.sh)")
+
+    def test_gate_red_when_criteria_changed_since_freeze(self):
+        self.frozen(RUN_OK)
+        self.write_task(task_text(RUN_OK.replace("print(1)", "print(2)")))
+        path = self.house / "checks" / "T001.json"
+        self.assertFalse(checks.run_checks(self.house, "T001", self.work).green)
+        self.assertEqual(checks.last_state(path), "RED (criteria changed)")
+
+    def test_last_state_of_a_file_without_gate_keeps_per_criterion_rules(self):
+        path = self.house / "checks" / "T001.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"frozen": {"criteria": [{"id": "AC-1", "kind": "run"}]},
+                                    "results": {"AC-1": {"passes": True}}}))
+        self.assertEqual(checks.last_state(path), "GREEN")
+        path.write_text(json.dumps({"frozen": {"criteria": [{"id": "AC-1", "kind": "run"}]},
+                                    "results": {"AC-1": {"passes": True}}, "gate": "garbage"}))
+        self.assertEqual(checks.last_state(path), "GREEN")
+
+    def test_read_only_check_writes_no_gate(self):
+        self.frozen(RUN_OK)
+        checks.run_checks(self.house, "T001", self.work, record=False)
+        self.assertNotIn("gate", json.loads((self.house / "checks" / "T001.json").read_text()))
+
     def test_parse_legacy_strings_are_manual(self):
         cs = checks.parse_acceptance(["demo works", "README exists"])
         self.assertEqual([(c.id, c.kind, c.text) for c in cs],

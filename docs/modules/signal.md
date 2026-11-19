@@ -11,7 +11,7 @@ judge przyjmuje domyślną odpowiedź (z powiadomieniem). House zapisuje tylko �
 konkursów; inne rozmowy odrzuca bez zapisu.
 
 Powiązane: [Agent `@claude` z Signala](signal-agent.md).
-Plany i specyfikacje: [`signal-notify`](../superpowers/plans/2026-11-13-signal-notify.md),
+Plany i specyfikacje: [`signal-notify`](../plans/2026-11-13-signal-notify.md),
 [`signal-groups` (spec)](../specs/2026-11-16-signal-groups-design.md),
 [`signal-groups` (plan)](../plans/2026-11-16-signal-groups.md).
 

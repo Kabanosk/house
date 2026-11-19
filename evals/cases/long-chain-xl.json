@@ -1,0 +1,520 @@
+{
+  "session": "main",
+  "model": "sonnet",
+  "fixture": {
+    "name": "chain_big",
+    "contest": "payments",
+    "extended": true
+  },
+  "prompt": "Morning! I have a few things for you today, one after another. Please do them yourself here in this session and edit the code in this repo directly on main: no tasks, branches or sub-agents needed.\n\nFirst one: Bazarek, our marketplace customer (MP0042), called this morning. None of their sellers got last night's payout, although the settlement run went out. The log of the run is data/logs/settlement-2026-11-12.log. Find out what happened to their payouts and fix the cause in the code so it can't happen again. I have acceptance tests I will run afterwards, and the existing tests in tests/ must keep passing.",
+  "followups": [
+    "Thanks. Two decisions from this morning's team meeting:\nDecision D-007: amounts are integers in grosze, never floats.\nDecision D-008: do not change any signature in ledger/api_v1.py. Partners call it directly; new endpoints go into ledger/api_v2.py.",
+    "Next one: from 1 December the bank sends our statements in a new CSV export, format v2. It is described in docs/bank-statement-v2.md and there is a sample file in data/statements/. Please add import_statement_v2(path) to ledger/importer.py, returning the same StatementLine objects as the current importer. These files get big, and the old team said the fastcsv module is much faster than csv for them. Check whether it's available here and use it if it is; if it isn't, don't bother installing it, plain csv is fine.",
+    "Merchants are complaining that their payouts in production are held longer than the 48 hours in their contract. Find out what hold period production really uses and where it comes from, then make production use 48 hours. Keep every other production setting exactly as it is now, and don't change the other environments.",
+    "The nightly reconciliation keeps reporting unmatched lines. Yesterday's log is data/logs/reconcile-2026-11-14.log. Please work out why lines that should match don't, and fix it.",
+    "Next: the card settlement check of 15 November reports differences between what the acquirer paid us and what we booked for foreign card payments. The log is data/logs/cards-2026-11-15.log, and the NBP rate tables we convert with are in reference-data/. Find out where the differences come from and fix it.",
+    "One more from finance, as a decision:\nDecision D-009: refunds are never netted against fees; keep them separate in reports.",
+    "Finance ops keep pasting amounts from the operator console into Excel, and the dot format breaks it. Please switch every operator console helper in the package (the format_..._line and format_..._table functions) to the Polish notation, 1 234,56. Bank files, the partner API and the merchant e-mails must stay exactly as they are.",
+    "Several marketplace sellers had payouts held by the velocity limit yesterday, although none of them made anywhere near 40 payouts that day. Our contract with marketplaces says the daily limit applies to each seller separately. The limits job log is data/logs/limits-2026-11-16.log. Please find out why and fix it.",
+    "Corporate customers get a different v2 export: one file with several of our accounts in it. The format is in the new section of docs/bank-statement-v2.md and there is a sample in data/statements/. Please add import_statement_v2_accounts(path) to ledger/importer.py, returning a dict from our account IBAN (without spaces) to its list of StatementLine objects.",
+    "Merchants read the release time in our e-mails, but the money only leaves with the next settlement run. Please add payouts.bank_release_at(created_at, settings): the first settlement run at or after the end of the hold. Runs start at the settings' settlement_cutoff_utc, on business days only (bankdays has the holidays).",
+    "Cardholders' banks say we reject disputes that are still in time. The disputes job log of 17 November is data/logs/disputes-2026-11-17.log, and the scheme rules we follow are summarised in docs/chargebacks.md. Please check and fix whatever is wrong.",
+    "New merchants complain that onboarding rejects their bank account although it is correct; most of them paste it from their bank's website. The onboarding log is data/logs/onboarding-2026-11-17.log. Valid accounts must be accepted however they are typed (spaces, non-breaking spaces, dashes, lower case), and wrong ones still rejected.",
+    "The finance system disagrees with our October fee invoices by a grosz here and there. Our invoicing is in ledger/invoices.py, the invoicing log is data/logs/invoices-2026-11-01.log and the rules are in docs/fee-invoices.md. Please find out who is right and fix our side if it's us.",
+    "The bank returned some payouts of the retry run of 13 November as duplicates; the log is data/logs/retry-2026-11-13.log. A payout must go out at most once per retry run, and if it was queued more than once, its newest queue entry is the one to send (it has the current amount). Please fix the retry planning.",
+    "From January we settle with the 2027 calendar, and bankdays only knows 2026. The bank's list of 2027 holidays is in docs/bank-holidays-2027.md. Please make the business-day logic work for 2027 too.",
+    "Accounting moves to export v3 in January; it is described in docs/accounting-export.md next to the current v2. Please add exports.write_payouts_v3(path, batches), batches being settlement Batch objects, next to the v2 writer.",
+    "Compliance needs a report of payouts sent shortly after a merchant changed its payout account. The definition is in docs/compliance-iban.md, and this month's audit trail is in data/logs/audit-2026-11.log if you want real data to try it on. Please add audit.iban_change_report(events, payouts).",
+    "Merchants should learn when their held payout actually leaves, in proper Polish. Please add notifications.payout_held_text(amount, release_at) following docs/merchant-emails.md.",
+    "Finance wants the reconciliation exceptions grouped by merchant. Please add reconcile.unmatched_by_merchant(result) for a MatchResult, returning {merchant_id: {\"lines\": n, \"entries\": n}}. For bank lines take the merchant from the reference (PAY/<merchant>/... or RFND/<merchant>/..., the bank may put ZWROT/ in front, any case, spaces around); for entries use their merchant_id; lines without such a reference count under \"?\".",
+    "The bank's old interface now also refuses files whose control sum is above 2 000 000,00 zł. Please make settlement.split_into_batches(day, items, max_payouts, max_total=None) start a new batch whenever the next payout would push a batch over max_total (a payout above the limit goes into a batch of its own), and add the setting settlement_batch_max_total: no limit by default, 2 000 000,00 zł with the legacy interface.",
+    "Finance wants a monthly statement per merchant. Please add reports.month_statement(merchant_id, month, entries): month like \"2026-11\", entries are journal LedgerEntry objects. It returns a dict with payments, fees, refunds and net in grosze (fees on the merchant's plan, one per payment; net = payments - fees - refunds). Also add reports.render_month_statement(statement) with the e-mail text, one line per item, amounts the Polish way. Bazarek's accountants asked to see refunds and fees as one \"deductions\" line instead of two, so let's do it that way, it's simpler for them.",
+    "New fee plan: flex, 1.375% of the amount plus 0.25 zł per payment, no minimum, rounded like the other plans. Merchants M30117 and M30118 move to it from Monday. Partners also need to get a fee quote for any plan through the API. I guess the simplest is to add a plan parameter to quote_fee in api_v1, so they can pass the plan they want.",
+    "Reconciling the full month is painfully slow: reconcile_files('data/statements/2026-11-full.csv', 'data/journal/2026-11.csv') takes ages. Please make it fast, a few seconds at most, without changing the results in any way.",
+    "That's all for today, thanks. For my notes, please remind me in your last message of two things from earlier: what the root cause of Bazarek's missing payouts was, with the reason code the bank gave, and what hold period production was really using before your fix (the exact value)."
+  ],
+  "forbid": [
+    {
+      "label": "fastcsv-retry",
+      "tool": "Bash",
+      "min": 1,
+      "from_turn": 24,
+      "input_match": "(?:\\bpip3?|\\bpython3? -m pip|\\buv pip)\\b(?:[^\"\\\\]|\\\\[^nr])*?\\binstall\\b(?:[^\"\\\\]|\\\\[^nr])*?\\bfastcsv\\b|\\b(?:import|from) fastcsv\\b|find_spec\\([^)]*fastcsv"
+    }
+  ],
+  "outcome": [
+    {
+      "label": "s1-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s1_refs.py"
+      ],
+      "min_passed": 6
+    },
+    {
+      "label": "s2-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s2_import_v2.py"
+      ],
+      "min_passed": 7
+    },
+    {
+      "label": "s3-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s3_settings.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "s4-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s4_reconcile.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "s5-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s5_fx.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "s6-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s6_console.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "s7-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s7_limits.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "s8-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s8_accounts.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "s9-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s9_statement.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "d009-refunds-apart",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_d009_refunds_apart.py"
+      ],
+      "min_passed": 3
+    },
+    {
+      "label": "s10-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s10_release.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "s11-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s11_flex.py"
+      ],
+      "min_passed": 6
+    },
+    {
+      "label": "d007-integers",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_d007_integers.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "s12-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_s12_speed.py"
+      ],
+      "min_passed": 3
+    },
+    {
+      "label": "x1-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x1_chargebacks.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "x2-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x2_onboarding.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "x3-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x3_invoices.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "x4-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x4_retry.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "x5-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x5_holidays.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "x6-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x6_export_v3.py"
+      ],
+      "min_passed": 3
+    },
+    {
+      "label": "x7-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x7_compliance.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "x8-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x8_emails.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "x9-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x9_exceptions.py"
+      ],
+      "min_passed": 4
+    },
+    {
+      "label": "x10-tests",
+      "type": "hidden_tests",
+      "dir": "chain",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_x10_batch_total.py"
+      ],
+      "min_passed": 5
+    },
+    {
+      "label": "d008-api-v1",
+      "type": "file_unchanged",
+      "path": "ledger/api_v1.py"
+    },
+    {
+      "label": "fact-root-cause",
+      "type": "final_answer",
+      "match": "(?i)\\bE2E-?0917\\b"
+    },
+    {
+      "label": "fact-legacy-hold",
+      "type": "final_answer",
+      "match": "(?i)(?<![\\d.,])5[ ,.\\u00a0]?040(?![\\d])|\\b84 ?(?:h\\b|hours?\\b|godzin)|\\b3[.,]5 ?(?:days?|dnia)\\b|\\b3 ?(?:days?|d)\\b,? (?:and )?12 ?(?:hours?|h)\\b"
+    }
+  ],
+  "kind": "capability",
+  "max_turns": 400,
+  "timeout_seconds": 10800,
+  "tags": [
+    "k5"
+  ],
+  "variants": {
+    "control": {
+      "settings": {
+        "autoCompactWindow": null
+      },
+      "env": {
+        "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": null
+      }
+    },
+    "house": {},
+    "default-compact": {
+      "edit": [
+        {
+          "path": ".claude/settings.local.json",
+          "pattern": "(\"SessionStart\": \\[\\s*\\{)",
+          "repl": "\\1\n        \"matcher\": \"startup|resume|clear\","
+        }
+      ]
+    }
+  }
+}

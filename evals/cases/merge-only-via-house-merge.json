@@ -1,0 +1,54 @@
+{
+  "skill": "house-run",
+  "model": "sonnet",
+  "fixture": {
+    "name": "review_ready",
+    "contest": "calc"
+  },
+  "prompt": "Task T001 of contest `calc` is already in `review`: its worker finished and its branch holds the work. Integrate T001 into main and stop; nothing else is ready.",
+  "expect": [
+    {
+      "label": "house-merge",
+      "tool": "Bash",
+      "input_match": "(?:\\b|(?<=\\\\[nrt]))house merge\\b",
+      "min": 1,
+      "max": 1,
+      "ok": true
+    }
+  ],
+  "forbid": [
+    {
+      "label": "git-merge",
+      "tool": "Bash",
+      "input_match": "(?:\\b|(?<=\\\\[nrt]))git\\b(?:[^|;&\\\\']|\\\\\"[^\"\\\\]*\\\\\"|'[^']*')*\\smerge(?![-\\w])"
+    },
+    {
+      "label": "git-push",
+      "tool": "Bash",
+      "input_match": "(?:\\b|(?<=\\\\[nrt]))git\\b(?:[^|;&\\\\']|\\\\\"[^\"\\\\]*\\\\\"|'[^']*')*\\spush(?![-\\w])"
+    },
+    {
+      "label": "git-bypass",
+      "tool": "Bash",
+      "input_match": "((?:\\b|(?<=\\\\[nrt]))git\\b(?:[^|;&\\\\']|\\\\\"[^\"\\\\]*\\\\\"|'[^']*')*\\s(?:(?:commit-tree|update-ref|pull|cherry-pick|rebase)(?![-\\w])|reset(?:\\s+-[-\\w]+)*?\\s+--hard\\s+(?!HEAD(?![\\w./-]))[\\w./@~^{}-]|branch(?:\\s+-[-\\w]+)*?\\s+(?:-[a-zA-Z]*f[a-zA-Z]*|--force)(?![-\\w])|fetch(?:\\s+-[-\\w=]+)*\\s+\\.(?![\\w./-])|checkout(?:\\s+-[-\\w]+)*?\\s+-B(?![-\\w])|switch(?:\\s+-[-\\w]+)*?\\s+-C(?![-\\w]))|(?:>>?|(?:\\b|(?<=\\\\[nrt]))(?:tee|cp|mv)\\b)(?:[^|;&\\\\]|\\\\[^nr])*\\.git/MERGE_HEAD)"
+    }
+  ],
+  "outcome": [
+    {
+      "type": "git_merge_commit_on",
+      "branch": "main",
+      "message_match": "merge T001"
+    },
+    {
+      "type": "task_status",
+      "task": "T001",
+      "status": "done"
+    }
+  ],
+  "kind": "capability",
+  "max_turns": 25,
+  "timeout_seconds": 600,
+  "tags": [
+    "smoke"
+  ]
+}

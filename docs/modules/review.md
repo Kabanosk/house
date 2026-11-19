@@ -9,4 +9,4 @@ raportu autora. Recenzja, która nie wróciła (zawieszenie, pusta odpowiedź, b
 recenzją aktualnego commita i bez BLOCKER ani MAJOR, albo z `--accept-review "powód"` (wpis D-###).
 
 Powiązane: [Sprawdzenia i bramka scalania](checks-and-merge.md).
-Plan: [`docs/superpowers/plans/2026-11-13-cross-review.md`](../superpowers/plans/2026-11-13-cross-review.md).
+Plan: [`docs/plans/2026-11-13-cross-review.md`](../plans/2026-11-13-cross-review.md).

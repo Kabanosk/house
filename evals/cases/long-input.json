@@ -1,0 +1,139 @@
+{
+  "session": "main",
+  "model": "sonnet",
+  "fixture": {
+    "name": "spec_huge",
+    "contest": "halcyon"
+  },
+  "prompt": "The rulebook of the Halcyon Grid Forecasting Challenge 2027, its official rules and the submission API reference, is in this contest's sources: `.house/sources/rules.md`.\n\nI need two things from you. Please do them yourself here in this session and edit the code in this repo directly on main: no tasks, branches or sub-agents needed.\n\n1. Implement `validate.py` to the rulebook's submission file format for the final phase. It must define `validate(text: str) -> list[str]`: `text` is the whole content of a submission file, and the function returns the sorted list of the distinct codes of the submission-file rules (as the rulebook names them) that the file breaks, or `[]` for a valid file. Follow the rulebook exactly, including what it says about which codes are reported together. Standard library only. I have acceptance tests for it that I will run afterwards; the smoke test in tests/ must pass too.\n\n2. Answer these ten questions from the rulebook:\nQ1. What is the final submission deadline? Give the date as YYYY-MM-DD.\nQ2. During the final phase, how many submission files may a team upload per calendar week?\nQ3. How much prize money in euros, in total, does a team receive that wins first place in the Solar track and also the Open Methods Award?\nQ4. Which API error code does an upload get when the only rule its file breaks is having two rows for the same site and timestamp?\nQ5. How many GPU-hours may a team's final evaluation run use at most?\nQ6. What is the largest value the `limit` query parameter of `GET /v2/submissions` accepts?\nQ7. Which HTTP header carries the team's API token?\nQ8. How many test sites does the private leaderboard use?\nQ9. What is the largest submission file, in MiB, that `POST /v2/submissions` accepts?\nQ10. To which e-mail address are appeals sent?\n\nEnd your last message with the ten answers, one per line, exactly in the form `Q1: <answer>` up to `Q10: <answer>`. Give the answer only: a number as plain digits, a date as YYYY-MM-DD, and a code, a header or an address as the rulebook writes it. Put nothing else on those lines.",
+  "outcome": [
+    {
+      "label": "validator-tests",
+      "type": "hidden_tests",
+      "dir": "spec",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "{hidden}",
+        "-t",
+        "{hidden}",
+        "-p",
+        "test_validate.py"
+      ],
+      "min_passed": 14
+    },
+    {
+      "label": "fact-01",
+      "type": "final_answer",
+      "key": "Q1",
+      "match": "(?im)^[\\s>*_`-]*Q1[\\s*_`]*:[\\s*_`]*(?:2027-03-21(?:[ T]23:59(?::00)?(?: ?UTC|Z)?)?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-02",
+      "type": "final_answer",
+      "key": "Q2",
+      "match": "(?im)^[\\s>*_`-]*Q2[\\s*_`]*:[\\s*_`]*(?:27(?: (?:submission )?(?:files|submissions|uploads))?(?: (?:per|a|/) ?(?:calendar )?week)?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-03",
+      "type": "final_answer",
+      "key": "Q3",
+      "match": "(?im)^[\\s>*_`-]*Q3[\\s*_`]*:[\\s*_`]*(?:(?:€ ?|EUR ?)?22[ ,  ]?750(?:\\.00)?(?: ?(?:€|EUR|euros?))?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-04",
+      "type": "final_answer",
+      "key": "Q4",
+      "match": "(?im)^[\\s>*_`-]*Q4[\\s*_`]*:[\\s*_`]*(?:E-2207)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-05",
+      "type": "final_answer",
+      "key": "Q5",
+      "match": "(?im)^[\\s>*_`-]*Q5[\\s*_`]*:[\\s*_`]*(?:340(?: ?GPU[- ]hours?)?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-06",
+      "type": "final_answer",
+      "key": "Q6",
+      "match": "(?im)^[\\s>*_`-]*Q6[\\s*_`]*:[\\s*_`]*(?:175)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-07",
+      "type": "final_answer",
+      "key": "Q7",
+      "match": "(?im)^[\\s>*_`-]*Q7[\\s*_`]*:[\\s*_`]*(?:X\\-Morrow5\\-Badge:?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-08",
+      "type": "final_answer",
+      "key": "Q8",
+      "match": "(?im)^[\\s>*_`-]*Q8[\\s*_`]*:[\\s*_`]*(?:434(?: (?:test )?sites)?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-09",
+      "type": "final_answer",
+      "key": "Q9",
+      "match": "(?im)^[\\s>*_`-]*Q9[\\s*_`]*:[\\s*_`]*(?:37(?: ?MiB)?)[\\s*_`]*\\.?[\\s*_`]*$"
+    },
+    {
+      "label": "fact-10",
+      "type": "final_answer",
+      "key": "Q10",
+      "match": "(?im)^[\\s>*_`-]*Q10[\\s*_`]*:[\\s*_`]*(?:<?(?:mailto:)?appeals-q7k@halcyon-grid\\.example>?)[\\s*_`]*\\.?[\\s*_`]*$"
+    }
+  ],
+  "kind": "capability",
+  "max_turns": 120,
+  "timeout_seconds": 3600,
+  "tags": [
+    "k5"
+  ],
+  "variants": {
+    "pasted": {
+      "edit": [
+        {
+          "path": "AGENTS.md",
+          "pattern": "\\nLong inputs \\(contest docs, logs, data\\):\\n(?:- [^\\n]*\\n){5}(?=\\n|\\Z)",
+          "repl": ""
+        },
+        {
+          "path": ".claude/agents/coder.md",
+          "pattern": "\\nLong inputs \\(contest docs, logs, data\\):\\n(?:- [^\\n]*\\n){5}(?=\\n|\\Z)",
+          "repl": ""
+        },
+        {
+          "path": ".claude/agents/researcher.md",
+          "pattern": "\\nLong inputs \\(contest docs, logs, data\\):\\n(?:- [^\\n]*\\n){5}(?=\\n|\\Z)",
+          "repl": ""
+        },
+        {
+          "path": ".claude/agents/judge.md",
+          "pattern": "\\nLong inputs \\(contest docs, logs, data\\):\\n(?:- [^\\n]*\\n){5}(?=\\n|\\Z)",
+          "repl": ""
+        }
+      ],
+      "prompt": "Here is the rulebook of the Halcyon Grid Forecasting Challenge 2027, its official rules and the submission API reference:\n\n<rulebook>\n{material:rules.md}\n</rulebook>\n\nI need two things from you. Please do them yourself here in this session and edit the code in this repo directly on main: no tasks, branches or sub-agents needed.\n\n1. Implement `validate.py` to the rulebook's submission file format for the final phase. It must define `validate(text: str) -> list[str]`: `text` is the whole content of a submission file, and the function returns the sorted list of the distinct codes of the submission-file rules (as the rulebook names them) that the file breaks, or `[]` for a valid file. Follow the rulebook exactly, including what it says about which codes are reported together. Standard library only. I have acceptance tests for it that I will run afterwards; the smoke test in tests/ must pass too.\n\n2. Answer these ten questions from the rulebook:\nQ1. What is the final submission deadline? Give the date as YYYY-MM-DD.\nQ2. During the final phase, how many submission files may a team upload per calendar week?\nQ3. How much prize money in euros, in total, does a team receive that wins first place in the Solar track and also the Open Methods Award?\nQ4. Which API error code does an upload get when the only rule its file breaks is having two rows for the same site and timestamp?\nQ5. How many GPU-hours may a team's final evaluation run use at most?\nQ6. What is the largest value the `limit` query parameter of `GET /v2/submissions` accepts?\nQ7. Which HTTP header carries the team's API token?\nQ8. How many test sites does the private leaderboard use?\nQ9. What is the largest submission file, in MiB, that `POST /v2/submissions` accepts?\nQ10. To which e-mail address are appeals sent?\n\nEnd your last message with the ten answers, one per line, exactly in the form `Q1: <answer>` up to `Q10: <answer>`. Give the answer only: a number as plain digits, a date as YYYY-MM-DD, and a code, a header or an address as the rulebook writes it. Put nothing else on those lines."
+    },
+    "sources": {
+      "copy": [
+        {
+          "material": "rules.md",
+          "to": ".house/sources/rules.md"
+        },
+        {
+          "material": "sources-index.json",
+          "to": ".house/sources/index.json"
+        },
+        {
+          "material": "sources-gitignore",
+          "to": ".house/sources/.gitignore"
+        }
+      ],
+      "prompt": "The rulebook of the Halcyon Grid Forecasting Challenge 2027, its official rules and the submission API reference, is in this contest's sources: `.house/sources/rules.md`.\n\nI need two things from you. Please do them yourself here in this session and edit the code in this repo directly on main: no tasks, branches or sub-agents needed.\n\n1. Implement `validate.py` to the rulebook's submission file format for the final phase. It must define `validate(text: str) -> list[str]`: `text` is the whole content of a submission file, and the function returns the sorted list of the distinct codes of the submission-file rules (as the rulebook names them) that the file breaks, or `[]` for a valid file. Follow the rulebook exactly, including what it says about which codes are reported together. Standard library only. I have acceptance tests for it that I will run afterwards; the smoke test in tests/ must pass too.\n\n2. Answer these ten questions from the rulebook:\nQ1. What is the final submission deadline? Give the date as YYYY-MM-DD.\nQ2. During the final phase, how many submission files may a team upload per calendar week?\nQ3. How much prize money in euros, in total, does a team receive that wins first place in the Solar track and also the Open Methods Award?\nQ4. Which API error code does an upload get when the only rule its file breaks is having two rows for the same site and timestamp?\nQ5. How many GPU-hours may a team's final evaluation run use at most?\nQ6. What is the largest value the `limit` query parameter of `GET /v2/submissions` accepts?\nQ7. Which HTTP header carries the team's API token?\nQ8. How many test sites does the private leaderboard use?\nQ9. What is the largest submission file, in MiB, that `POST /v2/submissions` accepts?\nQ10. To which e-mail address are appeals sent?\n\nEnd your last message with the ten answers, one per line, exactly in the form `Q1: <answer>` up to `Q10: <answer>`. Give the answer only: a number as plain digits, a date as YYYY-MM-DD, and a code, a header or an address as the rulebook writes it. Put nothing else on those lines."
+    }
+  }
+}

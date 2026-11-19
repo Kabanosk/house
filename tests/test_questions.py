@@ -93,5 +93,36 @@ class QuestionsTest(unittest.TestCase):
         self.assertEqual([q.id for q in apply], ["Q-001"])  # Q-003 (zawsze człowiek) never defaults
 
 
+class CommitTest(unittest.TestCase):
+    def test_commit_leaves_register_and_checks_alone(self):
+        import subprocess
+        from tests.helpers import EMAIL, NAME, git
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d)
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.name", NAME)
+            git(repo, "config", "user.email", EMAIL)
+            house = repo / ".house"
+            (house / "checks").mkdir(parents=True)
+            (house / "tasks").mkdir()
+            (house / "QUESTIONS.md").write_text(QS)
+            (house / "DECISIONS.md").write_text("# D\n")
+            (house / "attempts.jsonl").write_text('{"task": "T001", "n": 1}\n')
+            (house / "checks" / "T001.json").write_text('{"frozen": {}}\n')
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "base")
+            (house / "attempts.jsonl").write_text('{"task": "T001", "n": 1}\n{"task": "T001", "n": 9}\n')
+            (house / "checks" / "T001.json").write_text('{"frozen": {"x": 1}}\n')
+            questions.answer(house, "Q-001", "B", "Wojtek", "signal", today="2026-11-17")
+            committed = git(repo, "show", "--name-only", "--format=", "HEAD")
+            self.assertIn(".house/QUESTIONS.md", committed)
+            self.assertNotIn("attempts.jsonl", committed)
+            self.assertNotIn("checks", committed)
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+                                    check=False).stdout
+            self.assertIn(" M .house/attempts.jsonl", status)
+            self.assertIn(" M .house/checks/T001.json", status)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,9 @@ Every local attempt goes through the experiment loop, so the record is kept by c
 5a. `house exp run` blocks for budget + scoring. Give the tool call a timeout above that, or run it in the
    background; an interrupted run kills the command and is recorded as `crash` "interrupted". Read the tree with
    `house exp status`, never from the stale `.house/experiments.csv` inside an experiment worktree.
+5b. Long commands that may fail outside `house exp` (full test runs, builds, training) go through
+   `$HOUSE_ROOT/bin/house out -- <command>`: the full output lands in a log, you read the short envelope and then
+   `house out show <id> --grep '<pattern>'` (or `E-###` for an experiment's log) instead of rerunning.
 6. `house exp prune <contest> --keep 3` frees disk (worktrees of weaker keeps; refs stay).
 
 ## 2. Local ↔ leaderboard agreement

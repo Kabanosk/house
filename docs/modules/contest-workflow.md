@@ -48,6 +48,28 @@ Uwaga: `AGENTS.md`/`CLAUDE.md` na wspólnej gałęzi czytają też narzędzia re
    Dopisz tryb (`copilot`/`autopilot`) i limity, jeśli chcesz inne niż domyślne (3 agentów, 5 pomysłów).
 4. Odpowiedz na pytania z `QUESTIONS.md` (przez „jak tam”). Dopóki regulamin jest „UNCLEAR”, dopytaj organizatorów.
 
+## Dokumenty konkursu (`house sources`)
+
+Regulamin, treść zadania i dokumentacja API trafiają do `.house/sources/` bajt w bajt, a agenci czytają je po
+zakresie linii zamiast przepisywać:
+
+    house sources add <konkurs> regulamin.md              # plik; nazwa = nazwa pliku małymi literami
+    house sources add <konkurs> - --name zadanie.txt      # stdin (tekst wklejony, do ok. 5 000 znaków)
+    house sources add <konkurs> plik.md --replace         # nadpisz dokument o tej samej nazwie
+    house sources <konkurs>                               # spis treści: rozmiar, ~tokeny, nagłówki z numerami linii
+
+Spis treści pokazuje wielkość w znakach i liniach, nagłówki Markdown z numerami linii (poza blokami kodu, do 50),
+ostrzega o liniach dłuższych niż 2 000 znaków, o niezamkniętym bloku kodu oraz gdy plik różni się od `index.json`
+(wtedy zakresy linii w `spec.yaml` mogły się przesunąć). Pliki binarne są wymienione bez nagłówków. Dowiązań
+symbolicznych nie kopiujemy (także `index.json` jako dowiązanie to błąd), nazwa pliku musi pasować do
+`[a-z0-9][a-z0-9._-]{0,80}`; plik o innej nazwie leży w katalogu nieczytany i spis wypisuje go jako
+`'nazwa': invalid name (not read)`. Pierwsze `add` zapisuje `.house/sources/.gitignore` z wpisem `.add-*` (istniejący
+zostaje), więc pozostałość po przerwanym kopiowaniu nie trafi do commita. Komenda niczego nie commituje:
+`.house/sources/` i `index.json` trafiają do repo razem z resztą `.house/`. Tekst wklejony w czacie `/house-start`
+przekazuje przez heredoc z markerem `HOUSE_SRC_<8 losowych znaków hex>` wybranym osobno przy każdym wklejeniu (agent
+sprawdza, że tekst go nie zawiera); heredoc dopisuje jeden końcowy znak nowej linii. `/house-start` prosi o te pliki, a
+`spec.yaml` i zadania odwołują się do dokumentów przez ścieżkę i zakres linii (`.house/sources/regulamin.md:L120-L180`).
+
 ## W trakcie: hackathon budowlany
 
 1. `/house-ideate` → pomysły, do każdego karta „co już istnieje” (katalog YC, YC Requests for Startups,
@@ -84,6 +106,20 @@ Też ręcznie: `house yc AI agents that negotiate prices` → najbliższe firmy 
 Dane: codzienny zrzut katalogu YC ([yc-oss](https://github.com/yc-oss/api)), cache w `~/.cache/house/`, działa
 offline na starym zrzucie.
 
+## Decyzje z poprzednich konkursów
+
+`house decisions [--contest K] [--exclude K]... [--by human|agent] [--since RRRR-MM-DD] [--grep TEKST] [--all] [--full]` wypisuje
+decyzje z `DECISIONS.md` wszystkich konkursów z `contests.yaml`, jedna linia na wpis:
+`<konkurs> D-### <data> <kto>: <tytuł> — contests/<konkurs>/.house/DECISIONS.md:<linia>` (ścieżka względem
+katalogu systemu). Zastąpione wpisy (`Zastępuje:`) są ukryte, z `--all` mają znacznik `[zastąpiona przez D-###]`;
+decyzję człowieka może zastąpić tylko wpis człowieka: gdy wskazuje ją wpis agenta (`judge`, `coordinator`), zostaje na
+liście aktywna (także dla hooka po kompakcji) ze znacznikiem `[podważona przez D-### (agent)]`. `--exclude K` (można
+powtarzać) pomija konkurs, np. bieżący. Data w `Data:` ma zaczynać się od `RRRR-MM-DD`, dalej może być cokolwiek
+(`2026-11-17, 14:30`). Konkurs bez pliku daje jedną linię `note:` i jest pomijany. `--grep` szuka dosłownie, bez wielkości liter, w tytule
+i polach. `/house-start` i `/house-ideate` uruchamiają `house decisions --by human --exclude <bieżący konkurs>`, wybierają wpisy
+ważne dla tego konkursu (sprzęt, czas, zasady, odrzucone podejścia) i pokazują je Tobie jako ograniczenia do
+potwierdzenia albo odrzucenia (w `autopilot` wypisują ważne w briefingu i nie czekają). Nic nie jest przejmowane po cichu ani wpisywane do `DECISIONS.md` bez Twojej odpowiedzi.
+
 ## Tryby
 
 Tryby (`mode` w `spec.yaml`): `copilot` pyta o wybór pomysłu, zmianę kierunku i duże koszty;
@@ -103,4 +139,4 @@ Tryby (`mode` w `spec.yaml`): `copilot` pyta o wybór pomysłu, zmianę kierunku
 
 ## Historia projektowa
 
-Plan: [`docs/superpowers/plans/2026-11-05-house-core.md`](../superpowers/plans/2026-11-05-house-core.md). Założenia: [`docs/SPEC.md`](../SPEC.md).
+Plan: [`docs/plans/2026-11-05-house-core.md`](../plans/2026-11-05-house-core.md). Założenia: [`docs/SPEC.md`](../SPEC.md).
