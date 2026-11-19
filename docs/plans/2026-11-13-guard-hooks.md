@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ stdlib, `unittest`, git, Claude Code hooks (PreToolUse / SessionStart; input JSON on stdin with `tool_name`, `tool_input`, `cwd`; exit code 2 blocks and shows stderr to the model).
 
-**Spec:** `docs/superpowers/specs/2026-11-12-system-hardening-design.md` §6 (P2); roadmap item 1 (allowlist) per Wojtek 2026-11-13.
+**Spec:** `docs/specs/2026-11-12-system-hardening-design.md` §6 (P2); roadmap item 1 (allowlist) per Wojtek 2026-11-13.
 
 ## Global Constraints
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ stdlib, `unittest`, git.
 
-**Spec:** `docs/superpowers/specs/2026-11-12-system-hardening-design.md` §5 (P1).
+**Spec:** `docs/specs/2026-11-12-system-hardening-design.md` §5 (P1).
 
 ## Global Constraints
 

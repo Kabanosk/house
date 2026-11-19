@@ -12,7 +12,7 @@ wygenerowane pliki ktoś zmienił.
 
 Ile stałego kontekstu niesie sesja w konkursie (AGENTS.md, opisy skilli i agentów, duplikaty skilli):
 `house doctor --context <nazwa>`. Pomiary: [`docs/context-budget.md`](../context-budget.md).
-Plan: [`docs/superpowers/plans/2026-11-13-context-and-manifest.md`](../superpowers/plans/2026-11-13-context-and-manifest.md).
+Plan: [`docs/plans/2026-11-13-context-and-manifest.md`](../plans/2026-11-13-context-and-manifest.md).
 
 ## Gdy coś nie działa
 

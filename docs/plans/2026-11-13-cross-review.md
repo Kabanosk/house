@@ -13,7 +13,7 @@ mode with a time limit, verifies the output is a review, parses findings and wri
 **Tech Stack:** Python 3.11+ stdlib; `codex exec --sandbox read-only --skip-git-repo-check -C <repo> -o <out> -`;
 `claude -p --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)" --permission-prompts none`.
 
-**Spec:** `docs/superpowers/specs/2026-11-12-system-hardening-design.md` §9 (P5).
+**Spec:** `docs/specs/2026-11-12-system-hardening-design.md` §9 (P5).
 
 ## Global Constraints
 

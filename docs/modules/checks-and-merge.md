@@ -5,7 +5,7 @@ tego, czego nie sprawdzi komenda. Na końcu planowania są zamrażane (`.house/c
 poluzuje; zmiana tylko z powodem (`--refreeze --reason`, wpis D-###).
 
 Powiązane: [Ochrona (guard)](guard.md), [Recenzja krzyżowa](review.md).
-Plan: [`docs/superpowers/plans/2026-11-13-house-check.md`](../superpowers/plans/2026-11-13-house-check.md).
+Plan: [`docs/plans/2026-11-13-house-check.md`](../plans/2026-11-13-house-check.md).
 
 ## Komendy
 

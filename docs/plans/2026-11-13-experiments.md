@@ -13,7 +13,7 @@ playbook, stagnation and submissions protocols, spec template, README.
 
 **Tech Stack:** Python 3.11 stdlib, git, unittest.
 
-**Spec:** `docs/superpowers/specs/2026-11-12-system-hardening-design.md` §11 (P7). The spec is a sketch ("details
+**Spec:** `docs/specs/2026-11-12-system-hardening-design.md` §11 (P7). The spec is a sketch ("details
 at the first optimize contest"); decisions it leaves open are made below as **[ruling]**.
 
 ## Global Constraints

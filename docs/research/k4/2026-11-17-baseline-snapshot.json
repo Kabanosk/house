@@ -1,0 +1,440 @@
+{
+ "made": "2026-11-17T12:02:15+0100",
+ "weights": {
+  "input": 1.0,
+  "cache_read": 0.1,
+  "cache_write_5m": 1.25,
+  "cache_write_1h": 2.0,
+  "output": 5.0
+ },
+ "days": 30,
+ "note": "estimate of API cost (relative prices), not a bill and not subscription usage",
+ "sessions": [
+  {
+   "contest": "grok-bot-hackathon-26",
+   "kind": "interactive",
+   "start": "2026-11-05T16:59:06.007Z",
+   "end": "2026-11-05T18:52:26.503Z",
+   "calls": 321,
+   "calls_subagents": 215,
+   "subagent_files": 8,
+   "models": {
+    "claude-opus-5-5": 124,
+    "claude-haiku-5-5": 93,
+    "claude-sonnet-5-5": 104
+   },
+   "tokens": {
+    "input": 788,
+    "cache_read": 25129814,
+    "cache_write_5m": 519459,
+    "cache_write_1h": 148432,
+    "output": 264783
+   },
+   "weighted_cost": 4783872,
+   "context_first": 43298,
+   "context_median": 122624,
+   "context_peak": 194372,
+   "compactions": 0,
+   "compaction_max_pre": null,
+   "compaction_triggers": [],
+   "cost_state": {
+    "totalCostUSD": 10.160210500000002,
+    "totalAPIDuration": 2901571,
+    "totalAPIDurationWithoutRetries": 2901124,
+    "totalToolDuration": 859400,
+    "totalLinesAdded": 863,
+    "totalLinesRemoved": 41,
+    "totalDuration": 6803454,
+    "startTime": 1793897943048,
+    "modelUsage": {
+     "claude-haiku-5-5": {
+      "inputTokens": 127217,
+      "outputTokens": 36937,
+      "thinkingTokens": 14956,
+      "cacheReadInputTokens": 4986190,
+      "cacheCreationInputTokens": 80368,
+      "cacheCreationEphemeral5mInputTokens": 80368,
+      "cacheCreationEphemeral1hInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 0.09109810000000004
+     },
+     "claude-opus-5-5": {
+      "inputTokens": 13476,
+      "outputTokens": 92939,
+      "thinkingTokens": 17844,
+      "cacheReadInputTokens": 17012214,
+      "cacheCreationInputTokens": 237918,
+      "cacheCreationEphemeral5mInputTokens": 70345,
+      "cacheCreationEphemeral1hInputTokens": 167573,
+      "webSearchRequests": 0,
+      "costUSD": 7.007435800000002
+     },
+     "claude-sonnet-5-5": {
+      "inputTokens": 228,
+      "outputTokens": 150756,
+      "thinkingTokens": 42974,
+      "cacheReadInputTokens": 6317956,
+      "cacheCreationInputTokens": 368746,
+      "cacheCreationEphemeral5mInputTokens": 368746,
+      "cacheCreationEphemeral1hInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 3.0616765999999997
+     }
+    },
+    "hasUnknownModelCost": false
+   }
+  },
+  {
+   "contest": "grok-bot-hackathon-26",
+   "kind": "codex",
+   "start": "2026-11-05T18:28:40.172Z",
+   "end": "2026-11-05T18:34:01.826Z",
+   "calls": 24,
+   "models": {
+    "gpt-6.1-sol": 24
+   },
+   "tokens": {
+    "input": 20950,
+    "cache_read": 821248,
+    "cache_write_5m": 0,
+    "cache_write_1h": 0,
+    "output": 12682
+   },
+   "weighted_cost": 166485,
+   "context_first": 17256,
+   "context_median": 36799,
+   "context_peak": 42305,
+   "compactions": 0
+  },
+  {
+   "contest": "grok-bot-hackathon-26",
+   "kind": "interactive",
+   "start": "2026-11-05T18:52:30.160Z",
+   "end": "2026-11-05T20:07:56.988Z",
+   "calls": 212,
+   "calls_subagents": 115,
+   "subagent_files": 10,
+   "models": {
+    "claude-opus-5-5": 109,
+    "claude-haiku-5-5": 13,
+    "claude-sonnet-5-5": 90
+   },
+   "tokens": {
+    "input": 478,
+    "cache_read": 20413684,
+    "cache_write_5m": 666997,
+    "cache_write_1h": 174379,
+    "output": 208216
+   },
+   "weighted_cost": 4265431,
+   "context_first": 46661,
+   "context_median": 155996,
+   "context_peak": 214996,
+   "compactions": 0,
+   "compaction_max_pre": null,
+   "compaction_triggers": [],
+   "cost_state": {
+    "totalCostUSD": 10.499537005000008,
+    "totalAPIDuration": 2171759,
+    "totalAPIDurationWithoutRetries": 2171255,
+    "totalToolDuration": 501782,
+    "totalLinesAdded": 1528,
+    "totalLinesRemoved": 125,
+    "totalDuration": 8040486,
+    "startTime": 1793904749362,
+    "modelUsage": {
+     "claude-haiku-5-5": {
+      "inputTokens": 246576,
+      "outputTokens": 39124,
+      "thinkingTokens": 15271,
+      "cacheReadInputTokens": 469578,
+      "cacheCreationInputTokens": 114513,
+      "cacheCreationEphemeral5mInputTokens": 114513,
+      "cacheCreationEphemeral1hInputTokens": 0,
+      "webSearchRequests": 12,
+      "costUSD": 0.18322950500000004
+     },
+     "claude-opus-5-5": {
+      "inputTokens": 5704,
+      "outputTokens": 121768,
+      "thinkingTokens": 27899,
+      "cacheReadInputTokens": 17189561,
+      "cacheCreationInputTokens": 321280,
+      "cacheCreationEphemeral5mInputTokens": 139998,
+      "cacheCreationEphemeral1hInputTokens": 181282,
+      "webSearchRequests": 0,
+      "costUSD": 8.046334200000006
+     },
+     "claude-sonnet-5-5": {
+      "inputTokens": 188,
+      "outputTokens": 71334,
+      "thinkingTokens": 13362,
+      "cacheReadInputTokens": 5250423,
+      "cacheCreationInputTokens": 412486,
+      "cacheCreationEphemeral5mInputTokens": 412486,
+      "cacheCreationEphemeral1hInputTokens": 0,
+      "webSearchRequests": 0,
+      "costUSD": 2.2699733000000006
+     }
+    },
+    "hasUnknownModelCost": false
+   }
+  },
+  {
+   "contest": "grok-bot-hackathon-26",
+   "kind": "codex",
+   "start": "2026-11-05T18:57:43.558Z",
+   "end": "2026-11-05T18:59:40.659Z",
+   "calls": 6,
+   "models": {
+    "gpt-6.1-sol": 6
+   },
+   "tokens": {
+    "input": 27024,
+    "cache_read": 161792,
+    "cache_write_5m": 0,
+    "cache_write_1h": 0,
+    "output": 3541
+   },
+   "weighted_cost": 60908,
+   "context_first": 17136,
+   "context_median": 34595,
+   "context_peak": 41778,
+   "compactions": 0
+  },
+  {
+   "contest": "techarena-france-2026-datacom",
+   "kind": "interactive",
+   "start": "2026-11-16T09:16:50.779Z",
+   "end": "2026-11-16T09:17:52.263Z",
+   "calls": 10,
+   "calls_subagents": 2,
+   "subagent_files": 1,
+   "models": {
+    "claude-opus-5-5": 8,
+    "claude-haiku-5-5": 2
+   },
+   "tokens": {
+    "input": 22,
+    "cache_read": 469885,
+    "cache_write_5m": 10502,
+    "cache_write_1h": 50376,
+    "output": 4382
+   },
+   "weighted_cost": 182800,
+   "context_first": 43857,
+   "context_median": 67934,
+   "context_peak": 77987,
+   "compactions": 0,
+   "compaction_max_pre": null,
+   "compaction_triggers": [],
+   "cost_state": {
+    "totalCostUSD": 0.5629706,
+    "totalAPIDuration": 49744,
+    "totalAPIDurationWithoutRetries": 49706,
+    "totalToolDuration": 17144,
+    "totalLinesAdded": 0,
+    "totalLinesRemoved": 0,
+    "totalDuration": 7039834,
+    "startTime": 1794820608302,
+    "modelUsage": {
+     "claude-haiku-5-5": {
+      "inputTokens": 13595,
+      "outputTokens": 2633,
+      "thinkingTokens": 1021,
+      "cacheReadInputTokens": 4185,
+      "cacheCreationInputTokens": 10502,
+      "cacheCreationEphemeral5mInputTokens": 10502,
+      "cacheCreationEphemeral1hInputTokens": 0,
+      "webSearchRequests": 1,
+      "costUSD": 0.014030599999999999
+     },
+     "claude-opus-5-5": {
+      "inputTokens": 18,
+      "outputTokens": 2636,
+      "thinkingTokens": 492,
+      "cacheReadInputTokens": 465700,
+      "cacheCreationInputTokens": 50376,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 50376,
+      "webSearchRequests": 0,
+      "costUSD": 0.5489399999999999
+     }
+    },
+    "hasUnknownModelCost": false
+   }
+  },
+  {
+   "contest": "grok-bot-baseline",
+   "kind": "night",
+   "start": "2026-11-17T11:00:06.060Z",
+   "end": "2026-11-17T11:00:36.256Z",
+   "calls": 7,
+   "calls_subagents": 0,
+   "subagent_files": 0,
+   "models": {
+    "claude-sonnet-5-5": 7
+   },
+   "tokens": {
+    "input": 14,
+    "cache_read": 208075,
+    "cache_write_5m": 0,
+    "cache_write_1h": 25635,
+    "output": 2687
+   },
+   "weighted_cost": 85526,
+   "context_first": 28171,
+   "context_median": 34219,
+   "context_peak": 37226,
+   "compactions": 0,
+   "compaction_max_pre": null,
+   "compaction_triggers": [],
+   "cost_state": {
+    "totalCostUSD": 0.15024550000000003,
+    "totalAPIDuration": 22533,
+    "totalAPIDurationWithoutRetries": 22527,
+    "totalToolDuration": 3245,
+    "totalLinesAdded": 0,
+    "totalLinesRemoved": 0,
+    "totalDuration": 30619,
+    "startTime": 1794913205661,
+    "modelUsage": {
+     "claude-sonnet-5-5": {
+      "inputTokens": 14,
+      "outputTokens": 2687,
+      "thinkingTokens": 75,
+      "cacheReadInputTokens": 208075,
+      "cacheCreationInputTokens": 25635,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 25635,
+      "webSearchRequests": 0,
+      "costUSD": 0.15024550000000003
+     }
+    },
+    "hasUnknownModelCost": false
+   }
+  },
+  {
+   "contest": "grok-bot-baseline",
+   "kind": "night",
+   "start": "2026-11-17T11:00:06.155Z",
+   "end": "2026-11-17T11:00:51.383Z",
+   "calls": 9,
+   "calls_subagents": 0,
+   "subagent_files": 0,
+   "models": {
+    "claude-sonnet-5-5": 9
+   },
+   "tokens": {
+    "input": 18,
+    "cache_read": 278352,
+    "cache_write_5m": 0,
+    "cache_write_1h": 40374,
+    "output": 4734
+   },
+   "weighted_cost": 132271,
+   "context_first": 26013,
+   "context_median": 36313,
+   "context_peak": 40376,
+   "compactions": 0,
+   "compaction_max_pre": null,
+   "compaction_triggers": [],
+   "cost_state": {
+    "totalCostUSD": 0.2367072,
+    "totalAPIDuration": 41187,
+    "totalAPIDurationWithoutRetries": 41176,
+    "totalToolDuration": 3187,
+    "totalLinesAdded": 0,
+    "totalLinesRemoved": 0,
+    "totalDuration": 45694,
+    "startTime": 1794913205713,
+    "modelUsage": {
+     "claude-sonnet-5-5": {
+      "inputTokens": 18,
+      "outputTokens": 4734,
+      "thinkingTokens": 151,
+      "cacheReadInputTokens": 278352,
+      "cacheCreationInputTokens": 40374,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 40374,
+      "webSearchRequests": 0,
+      "costUSD": 0.2367072
+     }
+    },
+    "hasUnknownModelCost": false
+   }
+  },
+  {
+   "contest": "grok-bot-baseline",
+   "kind": "night-codex",
+   "start": "2026-11-17T11:00:07.008Z",
+   "end": "2026-11-17T11:01:42.702Z",
+   "calls": 9,
+   "models": {
+    "gpt-6.1-sol": 9
+   },
+   "tokens": {
+    "input": 43652,
+    "cache_read": 217344,
+    "cache_write_5m": 0,
+    "cache_write_1h": 0,
+    "output": 3429
+   },
+   "weighted_cost": 82531,
+   "context_first": 17198,
+   "context_median": 30704,
+   "context_peak": 33686,
+   "compactions": 0
+  },
+  {
+   "contest": "grok-bot-baseline",
+   "kind": "night",
+   "start": "2026-11-17T11:00:53.909Z",
+   "end": "2026-11-17T11:01:25.857Z",
+   "calls": 7,
+   "calls_subagents": 0,
+   "subagent_files": 0,
+   "models": {
+    "claude-sonnet-5-5": 7
+   },
+   "tokens": {
+    "input": 14,
+    "cache_read": 198961,
+    "cache_write_5m": 0,
+    "cache_write_1h": 23585,
+    "output": 2835
+   },
+   "weighted_cost": 81255,
+   "context_first": 28163,
+   "context_median": 32613,
+   "context_peak": 35176,
+   "compactions": 0,
+   "compaction_max_pre": null,
+   "compaction_triggers": [],
+   "cost_state": {
+    "totalCostUSD": 0.1426141,
+    "totalAPIDuration": 25678,
+    "totalAPIDurationWithoutRetries": 25668,
+    "totalToolDuration": 3054,
+    "totalLinesAdded": 0,
+    "totalLinesRemoved": 0,
+    "totalDuration": 32580,
+    "startTime": 1794913253306,
+    "modelUsage": {
+     "claude-sonnet-5-5": {
+      "inputTokens": 14,
+      "outputTokens": 2835,
+      "thinkingTokens": 129,
+      "cacheReadInputTokens": 198961,
+      "cacheCreationInputTokens": 23585,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 23585,
+      "webSearchRequests": 0,
+      "costUSD": 0.1426141
+     }
+    },
+    "hasUnknownModelCost": false
+   }
+  }
+ ]
+}

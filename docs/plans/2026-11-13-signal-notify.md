@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ stdlib, `signal-cli` 0.14.x native (JSON output), `unittest`.
 
-**Spec:** `docs/superpowers/specs/2026-11-12-system-hardening-design.md` §7 (P3, Signal decisions of 2026-11-13) and §7a (decision levels, deadlines).
+**Spec:** `docs/specs/2026-11-12-system-hardening-design.md` §7 (P3, Signal decisions of 2026-11-13) and §7a (decision levels, deadlines).
 
 ## Global Constraints
 
