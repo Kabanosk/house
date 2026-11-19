@@ -7,8 +7,11 @@ What they enforce, only in a **linked worktree of a house contest** (task and ex
 checkout, where the human commits, and repos that are not house contests are left alone):
   * `pre-commit`: staged files that look like secrets (`.env*` except `.env.example`, key/token patterns, judged on
     the staged content); staged `.house/` files (workers write through `$HOUSE_DIR`); staged changes to protected
-    files (frozen acceptance tests, the local scorer). The last two are skipped while a merge, rebase or cherry-pick
-    is in progress (the staged diff then holds the other side's changes); secrets are checked always.
+    files (frozen acceptance tests, the local scorer). The last two are skipped while a rebase, cherry-pick or
+    revert is in progress (the staged diff then holds the other side's changes). During a merge (`MERGE_HEAD`) a
+    staged `.house/` or protected path must hold one side's content, HEAD's or MERGE_HEAD's (no "evil merge" edits
+    them), and staged conflict marker lines that main does not carry are refused (`guard.conflict_markers`);
+    secrets are checked always.
   * `pre-push`: a remote not listed in spec `guard.push_allow` (default `origin`; a URL given instead of a remote
     name counts as a different remote); deleting or force-pushing the contest's main branch.
 
@@ -127,6 +130,13 @@ def _staged(cwd: Path, env: dict) -> list[tuple[str, str]]:
     return [(s, p) for s, p in zip(parts[0::2], parts[1::2], strict=False) if s and p]
 
 
+def _object(cwd: Path, spec: str, env: dict) -> str | None:
+    """Object id of `spec` (`HEAD:<path>`, `:<path>` in the index git uses), or None when it does not exist."""
+    r = subprocess.run(["git", "rev-parse", "-q", "--verify", spec], cwd=cwd, capture_output=True, text=True,
+                       check=False, env=env)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def pre_commit(cwd: Path, index_file: str | None = None) -> list[str]:
     """Reasons to refuse the commit being made in `cwd` (see the module docstring); [] allows it.
 
@@ -142,6 +152,7 @@ def pre_commit(cwd: Path, index_file: str | None = None) -> list[str]:
         env["GIT_INDEX_FILE"] = index_file
     gitdir = Path(_git(cwd, "rev-parse", "--absolute-git-dir").stdout.strip())
     sequence = any((gitdir / name).exists() for name in SEQUENCE_STATE)
+    merging = (gitdir / "MERGE_HEAD").exists()
     protected = guard.protected_paths(contest)
     problems = []
     for status, rel in _staged(cwd, env):
@@ -149,15 +160,25 @@ def pre_commit(cwd: Path, index_file: str | None = None) -> list[str]:
         if status != "D":
             blob = subprocess.run(["git", "show", f":{rel}"], cwd=cwd, capture_output=True, check=False, env=env)
             content = blob.stdout if blob.returncode == 0 else b""
+        house_path = rel == ".house" or rel.startswith(".house/")
         if not sequence:
-            if rel == ".house" or rel.startswith(".house/"):
+            if house_path:
                 problems.append(f"{rel}: task branches must not carry .house/ files (write via $HOUSE_DIR)")
             else:
                 why = guard.protected_violation(contest, rel, content, protected)
                 if why:
                     problems.append(why)
+        elif merging and (house_path or rel in protected):
+            staged = _object(cwd, f":{rel}", env)
+            if staged not in (_object(cwd, f"HEAD:{rel}", env), _object(cwd, f"MERGE_HEAD:{rel}", env)):
+                problems.append(f"{rel}: a merge may keep only one side's content of a .house/ or protected file "
+                                "(HEAD or MERGE_HEAD); the staged content is neither side")
         if content is not None and guard.looks_secret(Path(rel).name, content):
             problems.append(f"{rel} looks like a secret (keep keys in an ignored .env)")
+    if merging:
+        for rel in sorted(guard.conflict_markers(cwd, "MERGE_HEAD", ("--cached", "HEAD"), env=env)):
+            problems.append(f"{rel}: conflict marker lines are staged during a merge (lines main does not carry); "
+                            "resolve them first")
     return problems
 
 

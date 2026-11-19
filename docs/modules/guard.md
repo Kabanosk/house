@@ -5,8 +5,8 @@ Pierwszą linią obrony są hooki Claude Code (`bin/house-hook`), a w worktree z
 `house merge`, który sprawdza diff gałęzi niezależnie od tego, jak plik został zmieniony
 (zob. [Sprawdzenia i bramka scalania](checks-and-merge.md)).
 
-Plan: [`guard-hooks`](../superpowers/plans/2026-11-13-guard-hooks.md).
-Założenia: [`system-hardening`](../superpowers/specs/2026-11-12-system-hardening-design.md).
+Plan: [`guard-hooks`](../plans/2026-11-13-guard-hooks.md).
+Założenia: [`system-hardening`](../specs/2026-11-12-system-hardening-design.md).
 
 ## Hooki Claude Code
 
@@ -20,6 +20,45 @@ pisanie do `.house/checks/`, commit plików `.env*` i plików z kluczami, push n
 Hook to pierwsza linia obrony (łapie typowe komendy: przekierowania, `sed -i`, `rm`, `git -C`, wiele linii),
 ale nie każdą sztuczkę (np. `python3 -c "open(...,'w')"`); twardą granicą jest `house merge`, który sprawdza
 diff gałęzi niezależnie od tego, jak plik został zmieniony.
+
+`house out -- KOMENDA` guard sprawdza jak samą KOMENDĘ: `house out` jest opakowaniem, tak jak `timeout 5` czy
+`env X=1`, także zagnieżdżone, z przekierowaniami między słowami (`house >/dev/null out -- …`; cele przekierowań są
+sprawdzane osobno) i po `cd x &&`. Program komendy guard szuka za `VAR=x` i opakowaniami, więc
+`timeout 60 git push --no-verify` jest odrzucone jak `git push --no-verify`, a skrypt z `sh|bash -c '…'` sprawdza jak
+zwykłą komendę. Ograniczenia są te same co bez `house out`: guard nie rozumie zmiennych, podstawień `$(…)` ani plików
+skryptów. `house out show` i `house out prune` nie są opakowaniem. Tak samo `house exp … -- KOMENDA` (także z opcjami
+przed `run`, np. `house exp --budget 5m run …`): guard sprawdza KOMENDĘ po pierwszym `--` (jedno słowo po `--` idzie
+przez powłokę, więc jest sprawdzane jak skrypt); `house exp` bez `--` nie jest opakowaniem. Przekierowania z nazwanym
+deskryptorem (`{fd}>/dev/null`) są pomijane jak `2>/dev/null`, a `>&plik` i `<>plik` liczą się jako zapis (cel `2`,
+`-` nie jest plikiem). Opcje opakowań z wartością (`env -u X`, `timeout -s KILL`, `sudo -u u`, `nice -n 5`,
+`stdbuf -o L`) i opcje powłoki z wartością (`bash -o pipefail`, `-O extglob`, `--rcfile f`) nie zasłaniają komendy.
+
+Znane ograniczenie: `python3 <root>/bin/house out -- …` (house uruchomiony przez interpreter) nie jest rozpakowywane;
+guard widzi wtedy program `python3`, a nie `house out`.
+
+Lista dozwolonych komend (`permissions.allow`) ma osobną regułę dla każdej komendy `bin/house` (generowaną z listy
+podkomend CLI) poza `out`. `house out` ma tylko `out show`, `out prune` i `out -- <komenda>` dla komend, które konkurs
+i tak ma dozwolone (`git status`, `pytest`, `npm run` itd.). Każda inna komenda opakowana w `house out --` przechodzi
+zwykłe pytanie o zgodę (albo klasyfikator trybu auto), tak jak bez opakowania. Dawna ogólna reguła
+`Bash(<root>/bin/house:*)` przepuszczała `house out -- <cokolwiek>`; istniejące konkursy dostają nowe reguły
+(a stara znika) po `house adapt <konkurs>`.
+
+## Kompakcja kontekstu
+
+`house adapt` ustawia w tym samym pliku progi kompaktowania kontekstu: `autoCompactWindow: 200000` i zmienną
+`CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS=150000`. Claude Code kompaktuje sam przy ~167K tokenów (okno minus bufor ~33K),
+a bez tego ustawienia dopiero przy ~967K na modelach z oknem 1M. Kompaktowanie w bezczynności rusza po ~1 h ciszy,
+gdy cache jest ciepły (TTL 1 h), a sesja ma co najmniej 150K tokenów; `"idleCompaction": false` je wyłącza.
+Wartość już obecna w `settings.local.json` wygrywa, także gdy zapisał ją wcześniejszy `house adapt`; `house adapt`
+nie nadpisuje jej, więc żeby przyjąć nowy domyślny próg, usuń klucz i uruchom `house adapt` ponownie. Nocni pracownicy
+używają tego samego pliku (`--settings`), więc też je dostają.
+
+Sesję konkursu Claude Code kompaktuje według własnych, wbudowanych instrukcji; house nie dodaje swoich (K5:
+nasze instrukcje w ośmiu sekcjach nie dały mierzalnej różnicy, `docs/research/k5/2026-11-18-compaction.md`).
+Zaraz po kompaktowaniu `SessionStart` przywraca dosłownie obowiązujące decyzje człowieka (`D-###` z `Kto: człowiek`,
+niezastąpione polem `Zastępuje:`; odpowiedzi z Signala są już takimi wpisami), odpowiedzi na `Q-###` wpisane ręcznie
+w `QUESTIONS.md`, a potem otwarte pytania i zadania w toku, do 10 000 znaków. Hooki `PreCompact` i `PostCompact`
+z wcześniejszego `house adapt` znikają przy następnym `house adapt`; do tego czasu nic nie robią.
 
 ## Hooki git
 
