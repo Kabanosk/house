@@ -5,5 +5,6 @@ questions.
 
 - Log every decision that changes direction, scope, rules of work, or answers a `Q-###`.
 - Entry: `## D-### <title>` + Decyzja / Dlaczego / Kto (człowiek | judge | coordinator) / Data. Polish.
-- Numbering is sequential; never renumber or delete. A reversed decision gets a new entry referencing the old.
+- Numbering is sequential; never renumber or delete. A reversed decision gets a new entry with `- **Zastępuje:** D-###` (the old id; add a reason in
+  parentheses if useful). Leave the old entry untouched.
 - Don't log trivia (variable names, library minor choices).
