@@ -184,6 +184,41 @@ def load_task(house: Path, task_id: str) -> Task:
     return Task(task_id, matches[0], meta, parse_acceptance(meta.get("acceptance")), protected)
 
 
+def last_state(path: Path) -> str:
+    """The last check state of a task from its `.house/checks/T###.json`, as short text.
+
+    Shared by the compact session state (`hook`) and the attempt facts (`evidence`).
+
+    Returns:
+        When the file records the gate of the last recorded run (`gate`, written by `run_checks`) and it was red
+        for a reason outside the criteria: `RED (init.sh)`, `RED (criteria changed)` or both, with any failed
+        criteria after them. Otherwise, by criterion: `RED (AC-1, ...)` when a criterion failed; `no check result`
+        when the file is unreadable or holds no results yet; `incomplete (AC-2, ...)` when a frozen `run` criterion
+        has no passing result; otherwise `GREEN`. Without a readable frozen criteria list, the ids that have results
+        stand in for the run criteria. A file without `gate` (written before it existed) is read by criterion only.
+    """
+    try:
+        data = json.loads(path.read_text())
+        results = data.get("results", {})
+        bad = [cid for cid, r in results.items() if r.get("passes") is False]
+        gate = data.get("gate")
+        if isinstance(gate, dict) and gate.get("green") is False:
+            why = ["init.sh"] * (gate.get("init_ok") is False) + ["criteria changed"] * (gate.get("mismatch") is True)
+            if why:
+                return f"RED ({', '.join(why + bad)})"
+        if bad:
+            return f"RED ({', '.join(bad)})"
+        if not results:
+            return "no check result"
+        frozen = data.get("frozen", {}).get("criteria")
+        run_ids = ([c["id"] for c in frozen if c.get("kind") == "run"] if isinstance(frozen, list)
+                   else list(results))
+        missing = [cid for cid in run_ids if results.get(cid, {}).get("passes") is not True]
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return "no check result"
+    return f"incomplete ({', '.join(missing)})" if missing else "GREEN"
+
+
 def _checks_path(house: Path, task_id: str) -> Path:
     """Return the path of the frozen-criteria file `.house/checks/<task_id>.json`."""
     return house / "checks" / f"{task_id}.json"
@@ -427,7 +462,9 @@ def run_checks(house: Path, task_id: str, workdir: Path, record: bool = True) ->
         house: Path of the contest's `.house/` directory (holds the frozen criteria and `init.sh`).
         task_id: Task id; it must be frozen.
         workdir: Checkout to run in: the contest checkout or a task worktree.
-        record: Store the results in the checks file (default). Use False for read-only re-checks of other tasks.
+        record: Store the results and the aggregate `gate` (`green`, `init_ok`, `mismatch`, `at`) in the checks
+            file (default), so `last_state` can tell a red gate whose criteria passed. Use False for read-only
+            re-checks of other tasks.
 
     Returns:
         A `CheckReport`. If `.house/init.sh` exists it runs first (limit INIT_TIMEOUT, 300 s) and
@@ -461,10 +498,12 @@ def run_checks(house: Path, task_id: str, workdir: Path, record: bool = True) ->
     finally:
         if init_group is not None:
             _kill_group(init_group)
+    report = CheckReport(task_id, results, not _same_definition(task, data), init_ok,
+                         {c.id: c.kind for c in criteria})
     if record:
+        data["gate"] = {"green": report.green, "init_ok": init_ok, "mismatch": report.mismatch, "at": _now()}
         _save(house, task_id, data)
-    return CheckReport(task_id, results, not _same_definition(task, data), init_ok,
-                       {c.id: c.kind for c in criteria})
+    return report
 
 
 def record_manual(house: Path, task_id: str, criterion_id: str, evidence: str) -> None:

@@ -130,13 +130,18 @@ def parse(text: str) -> list[Question]:
     return out
 
 
+_COMMIT_SPEC = (".house", ":(exclude).house/attempts.jsonl", ":(exclude).house/checks")
+
+
 def _commit(house: Path, message: str) -> None:
-    """Commit only the `.house` folder of the enclosing git repo; do nothing outside a repo or on failure."""
+    """Commit the `.house` folder of the enclosing git repo, except the attempt register and the frozen criteria
+    (only house's own gate and register writers commit those, so a hand edit is never committed here); do nothing
+    outside a repo or on failure."""
     repo = house.parent
     if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True, check=False).returncode:
         return
-    subprocess.run(["git", "add", "-A", "--", ".house"], cwd=repo, capture_output=True, check=False)
-    subprocess.run(["git", "commit", "-q", "-m", message, "--", ".house"], cwd=repo, capture_output=True,
+    subprocess.run(["git", "add", "-A", "--", *_COMMIT_SPEC], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-q", "-m", message, "--", *_COMMIT_SPEC], cwd=repo, capture_output=True,
                    check=False)
 
 

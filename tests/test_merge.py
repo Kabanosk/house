@@ -1,9 +1,12 @@
 """`house merge`: check the branch, merge, re-check every merged task on main, revert on regression."""
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
-from houselib import checks, merge, scaffold
+from houselib import attempts, checks, cli, merge, night, scaffold
 from houselib.fm import parse_frontmatter
 from tests.helpers import FAKE_TOOLS, git, make_root
 
@@ -159,6 +162,28 @@ class MergeTest(unittest.TestCase):
         self.assertTrue(out.ok, out.message)
         self.assertTrue((self.c / "mul.py").is_file())
 
+    def test_reverted_rebase_refusal_blocks_for_a_human(self):
+        self.calc_task()
+        self.assertTrue(merge.merge_task(self.c, "T001").ok)
+        wt = self.add_task("T002", "mul", '  - id: AC-1\n    run: "python3 -c \'import mul\'"\n',
+                           {"mul.py": "X = 1\n", "calc.py": CALC_BAD + "\n"})
+        self.assertTrue(merge.merge_task(self.c, "T002").reverted)
+        (self.c / "calc.py").write_text(CALC_OK + "# main\n")
+        git(self.c, "commit", "-qam", "main edits calc")
+        self.set_review("T002")
+        out = merge.merge_task(self.c, "T002")
+        self.assertFalse(out.ok)
+        self.assertIn("does not rebase cleanly", out.message)
+        self.assertFalse(out.conflict, "a merge of main cannot fix a reverted task's replay: a human decides")
+        self.assertEqual((out.status, self.status("T002")), ("blocked", "blocked"))
+        self.assertLess(len(out.message), 600)
+        self.assertNotIn("hint:", out.message)
+
+    def set_review(self, tid: str) -> None:
+        from houselib.fm import set_fields
+        tf = next((self.house / "tasks").glob(f"{tid}-*.md"))
+        tf.write_text(set_fields(tf.read_text(), {"status": "review"}))
+
     def test_tampered_frozen_criteria_refused(self):
         self.add_task("T001", "calc", '  - id: AC-1\n    run: "python3 -m unittest -q test_calc"\n',
                       {"calc.py": CALC_BAD, "test_calc.py": TEST_CALC})
@@ -291,6 +316,129 @@ class MergeTest(unittest.TestCase):
             self.assertEqual(cli.main(["merge", "c1", "T001"]), 0)
             self.assertEqual(cli.main(["merge", "c1", "T001"]), 1)  # no branch/worktree any more
         self.assertIn("T001 done", out.getvalue())
+
+
+class CliMergeRegisterTest(unittest.TestCase):
+    """`house merge` records one `merge` row per run in the attempt register and commits it."""
+    tearDown, add_task, calc_task = MergeTest.tearDown, MergeTest.add_task, MergeTest.calc_task
+
+    def setUp(self):
+        MergeTest.setUp(self)
+        patch = mock.patch.object(cli, "HOUSE_ROOT", self.root)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_merge(self, tid="T001") -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["merge", "c1", tid])
+        return code, err.getvalue()
+
+    def register_clean(self) -> bool:
+        return git(self.c, "status", "--porcelain", "--", ".house/attempts.jsonl").strip() == ""
+
+    def test_cli_merge_records_row(self):
+        wt = self.calc_task()
+        (wt / "scratch.txt").write_text("x\n")
+        code, _ = self.run_merge()  # uncommitted work in the worktree: the gate refuses it
+        self.assertEqual(code, 1)
+        (row,) = attempts.rows(self.house, "T001")
+        self.assertEqual((row.source, row.n, row.session, row.log, row.tool, row.agent, row.outcome),
+                         ("merge", 1, "", "", "claude", "coder", "merge-refused"))
+        self.assertEqual(row.questions, [])
+        self.assertIn("worktree ./.worktrees/T001-calc", row.message)  # no absolute path in the register
+        self.assertNotIn(str(self.c), (self.house / "attempts.jsonl").read_text())
+        self.assertNotIn(str(self.c.resolve()), (self.house / "attempts.jsonl").read_text())
+        self.assertTrue(row.start and row.end)
+        self.assertEqual(row.head, git(self.c, "rev-parse", "task/T001-calc").strip())
+        self.assertEqual(row.base, git(self.c, "merge-base", "HEAD", "task/T001-calc").strip())
+        self.assertTrue(self.register_clean())
+
+    def test_cli_merge_conflict_row_has_reason(self):
+        wt = self.calc_task()
+        (self.c / "calc.py").write_text("X = 0\n")  # main adds calc.py too: the gate's merge conflicts
+        git(self.c, "add", "calc.py")
+        git(self.c, "commit", "-qm", "calc on main")
+        self.assertEqual(self.run_merge()[0], 1)
+        (row,) = attempts.rows(self.house, "T001")
+        self.assertEqual((row.outcome, row.reason), ("merge-refused", "conflict"))
+        self.assertTrue(wt.is_dir())
+        (wt / "scratch.txt").write_text("x\n")
+        self.assertEqual(self.run_merge()[0], 1)  # refused for another reason: no conflict
+        self.assertEqual(attempts.rows(self.house, "T001")[-1].reason, "")
+
+    def test_cli_merge_refused_before_the_gate_records_nothing(self):
+        self.calc_task()
+        git(self.c, "worktree", "remove", "--force", str(self.c / ".worktrees/T001-calc"))
+        self.assertEqual(self.run_merge()[0], 1)  # no worktree: refused before anything is evaluated
+        task = self.house / "tasks/T001-calc.md"
+        task.write_text(task.read_text().replace("status: review", "status: todo"))
+        git(self.c, "commit", "-qam", "todo")
+        self.assertEqual(self.run_merge()[0], 1)  # not in review
+        self.assertEqual(attempts.rows(self.house, "T001"), [])
+        self.assertTrue(self.register_clean())
+
+    def test_cli_merge_success_row_and_numbering(self):
+        self.calc_task()
+        head = git(self.c, "rev-parse", "task/T001-calc").strip()
+        base = git(self.c, "merge-base", "HEAD", "task/T001-calc").strip()
+        code, _ = self.run_merge()
+        self.assertEqual(code, 0)
+        (row,) = attempts.rows(self.house, "T001")
+        self.assertEqual((row.outcome, row.head, row.base, row.n), ("merged", head, base, 1))
+        self.assertTrue(self.register_clean())
+        self.assertEqual(self.run_merge()[0], 1)  # already done: refused before the gate, no row
+        self.assertEqual([(r.n, r.outcome) for r in attempts.rows(self.house, "T001")], [(1, "merged")])
+        self.assertTrue(self.register_clean())
+
+    def test_recording_failure_keeps_the_exit_code(self):
+        self.calc_task()
+        with mock.patch("houselib.attempts.record", side_effect=OSError("disk full")):
+            code, err = self.run_merge()
+        self.assertEqual(code, 0)
+        self.assertIn("attempt register", err)
+
+    def test_forged_register_is_refused_and_not_committed(self):
+        self.calc_task()
+        (self.house / "attempts.jsonl").write_text('{"task": "T001", "n": 7, "outcome": "merged"}\n')
+        code, err = self.run_merge()
+        self.assertEqual(code, 1)
+        self.assertIn("attempt register", err)
+        self.assertEqual(git(self.c, "ls-files", ".house/attempts.jsonl").strip(), "")
+
+    def test_other_uncommitted_house_state_is_left_alone(self):
+        self.calc_task()
+        (self.house / "notes.txt").write_text("x\n")
+        git(self.c, "worktree", "remove", "--force", str(self.c / ".worktrees/T001-calc"))
+        self.run_merge()
+        self.assertIn("?? .house/notes.txt", git(self.c, "status", "--porcelain"))
+        self.assertTrue(self.register_clean())
+
+    def test_merge_gate_commit_never_takes_the_register(self):
+        (self.house / "notes.txt").write_text("x\n")
+        (self.house / "attempts.jsonl").write_text('{"task": "T001", "n": 5, "outcome": "merged"}\n')
+        merge._commit_house(self.c, "state")
+        self.assertIn("notes.txt", git(self.c, "show", "--name-only", "--format=", "HEAD"))
+        self.assertEqual(git(self.c, "ls-files", ".house/attempts.jsonl").strip(), "")
+        self.assertIn("?? .house/attempts.jsonl", git(self.c, "status", "--porcelain"))
+
+    def test_merge_gate_commit_never_takes_a_register_edit(self):
+        night.record_attempt(self.c, attempts.Row(task="T001", n=1, source="night", agent="coder", tool="claude"), "r")
+        reg = self.house / "attempts.jsonl"
+        reg.write_text(reg.read_text() + '{"task": "T001", "n": 9}\n')
+        (self.house / "notes.txt").write_text("x\n")
+        merge._commit_house(self.c, "state")
+        self.assertNotIn('"n": 9', git(self.c, "show", "HEAD:.house/attempts.jsonl"))
+        self.assertIn(" M .house/attempts.jsonl", git(self.c, "status", "--porcelain"))
+
+    def test_cli_merge_row_tool_is_codex_for_codex_agent(self):
+        self.calc_task()
+        task = self.house / "tasks/T001-calc.md"
+        task.write_text(task.read_text().replace("owner: coder\n", "owner: coder\nagent: coder-codex\n"))
+        git(self.c, "commit", "-qam", "agent")
+        self.assertEqual(self.run_merge()[0], 0)
+        (row,) = attempts.rows(self.house, "T001")
+        self.assertEqual((row.agent, row.tool), ("coder-codex", "codex"))
 
 
 if __name__ == "__main__":
